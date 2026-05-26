@@ -13,8 +13,10 @@
   <depend>rclcpp</depend>
 
   <exec_depend>alc_planner</exec_depend>
+  <exec_depend>astra_camera</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>launch_xml</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>rtabmap_ros</exec_depend>
   <exec_depend>rtabmap_slam</exec_depend>

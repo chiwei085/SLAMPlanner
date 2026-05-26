@@ -8,8 +8,18 @@ planner package; this overlay provides the launch wiring and the velocity
 bridge needed by the R2 driver.
 
 `alc_yahboom_r2_exploration.launch.py` explicitly starts the Yahboom R2 base
-bringup, including `Ackman_driver_R2`, before launching RTAB-Map, Nav2,
-ALC-Planner, and the bridge.
+bringup, including `Ackman_driver_R2`, and the Astra RGB-D camera before
+launching RTAB-Map, Nav2, ALC-Planner, and the bridge.
+
+The launch uses RTAB-Map as the only `map -> odom` TF publisher. Nav2 is started
+with `navigation_launch.py` only, so AMCL and Nav2 map_server do not compete
+with RTAB-Map localization.
+
+The integration launch passes an indoor MVP parameter profile to `alc_planner`
+so candidate radius, revisit floors, trigger threshold, and navigation timeout
+can be tuned without recompiling. RTAB-Map uses visual+ICP registration, and
+Nav2's goal checker is configured with a wide yaw tolerance to avoid R2 arc-turn
+loops around ALC revisit targets.
 
 ## Velocity Bridge
 
@@ -55,9 +65,9 @@ Launch the MVP pipeline:
 ros2 launch yahboom_alc_bringup alc_yahboom_r2_exploration.launch.py
 ```
 
-Keep `software/library_ws` before `yahboomcar_ws` in the shell environment. The
-R2 bringup includes the EKF launch from `robot_localization`, which is installed
-in `software/library_ws`.
+Keep `software/library_ws` before `yahboomcar_ws` in the shell environment.
+Astra camera, optional LiDAR drivers, and the R2 bringup's EKF dependency
+`robot_localization` are installed in `software/library_ws`.
 
 Smoke-check the bridge:
 
