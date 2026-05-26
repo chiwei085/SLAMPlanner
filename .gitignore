@@ -1,0 +1,13 @@
+/build/
+/install/
+/log/
+
+# AI agents
+/.agent-hooks/
+/.codex/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

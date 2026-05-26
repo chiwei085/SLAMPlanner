@@ -1,0 +1,6 @@
+[submodule "/home/jetson/SLAMPlanner/ThirdParty"]
+	path = /home/jetson/SLAMPlanner/ThirdParty
+	url = git@github.com:RVL-ntut/ALC-Planner.git
+[submodule "/home/jetson/SLAMPlanner/ThirdParty/ALC-Planner"]
+	path = /home/jetson/SLAMPlanner/ThirdParty/ALC-Planner
+	url = git@github.com:RVL-ntut/ALC-Planner.git
