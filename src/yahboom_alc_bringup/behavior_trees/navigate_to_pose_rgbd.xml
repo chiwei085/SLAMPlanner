@@ -1,7 +1,6 @@
 <!--
   RGB-D exploration behavior tree for Yahboom R2.
-  BackUp is intentionally omitted; frontier abandonment and blacklist logic
-  choose a new exploration goal instead of reversing into uncertain occupancy.
+  Recovery: back up to create clearance, then spin to reorient.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -21,6 +20,7 @@
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <RoundRobin name="RecoveryActions">
+          <BackUp backup_dist="0.30" backup_speed="0.08"/>
           <Sequence name="ClearingActions">
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>

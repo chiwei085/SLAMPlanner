@@ -1,6 +1,5 @@
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <sstream>

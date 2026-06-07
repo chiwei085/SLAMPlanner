@@ -119,7 +119,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                         "information_weight": 0.02,
                         "frontier_size_weight": 0.02,
                         "unreachable_goal_penalty": 3.0,
-                        "allow_unreachable_goal": False,
+                        "allow_unreachable_goal": True,  # let Nav2 attempt goals even when BFS path failed
                         "goal_update_distance": 0.5,
                         "goal_publish_period": 3.0,
                         "footprint_front_m": 0.16,
@@ -160,7 +160,7 @@ def generate_launch_description():
     default_nav2_bt_xml = os.path.join(
         yahboom_alc_share,
         "behavior_trees",
-        "navigate_to_pose_rgbd_no_backup.xml",
+        "navigate_to_pose_rgbd.xml",
     )
     default_model_path = os.path.join(
         yahboom_description_share, "urdf", "yahboomcar_R2.urdf.xacro"
@@ -290,7 +290,7 @@ def generate_launch_description():
         "qos_image": qos,
         "qos_imu": qos,
         "wait_for_transform": 1.0,
-        "Reg/Strategy": "2",
+        "Reg/Strategy": "0",
         "Reg/Force3DoF": "true",
         "RGBD/NeighborLinkRefining": "True",
         "Grid/3D": "false",
