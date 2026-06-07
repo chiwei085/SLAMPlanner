@@ -77,12 +77,13 @@ TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
         large_corridor.emplace_back(8 + i, 5);
     }
 
-    const auto small =
-        core.makeCandidate(small_corner, start, robot_xy,
-                           std::vector<bool>(grid.data.size(), false), 30, 12);
-    const auto large =
-        core.makeCandidate(large_corridor, start, robot_xy,
-                           std::vector<bool>(grid.data.size(), false), 30, 12);
+    FrontierCounts counts1;
+    const auto small = core.makeCandidate(
+        small_corner, start, robot_xy,
+        std::vector<bool>(grid.data.size(), false), 30, 12, counts1);
+    const auto large = core.makeCandidate(
+        large_corridor, start, robot_xy,
+        std::vector<bool>(grid.data.size(), false), 30, 12, counts1);
 
     ASSERT_TRUE(small);
     ASSERT_TRUE(large);
@@ -108,12 +109,13 @@ TEST(ClusterFrontierExplorer, LimitedUnknownOverlapPenalizesScore) {
 
     auto free_core = makeCore(free_grid);
     auto unknown_core = makeCore(unknown_grid);
+    FrontierCounts counts2;
     const auto free_candidate = free_core.makeCandidate(
         cluster, start, free_core.mapToWorld(start.first, start.second),
-        std::vector<bool>(free_grid.data.size(), false), 16, 10);
+        std::vector<bool>(free_grid.data.size(), false), 16, 10, counts2);
     const auto unknown_candidate = unknown_core.makeCandidate(
         cluster, start, unknown_core.mapToWorld(start.first, start.second),
-        std::vector<bool>(unknown_grid.data.size(), false), 16, 10);
+        std::vector<bool>(unknown_grid.data.size(), false), 16, 10, counts2);
 
     ASSERT_TRUE(free_candidate);
     ASSERT_TRUE(unknown_candidate);
@@ -121,7 +123,7 @@ TEST(ClusterFrontierExplorer, LimitedUnknownOverlapPenalizesScore) {
     EXPECT_GT(unknown_candidate->score, free_candidate->score);
 }
 
-TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapDoesNotReject) {
+TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapRejectsCandidate) {
     auto grid = buildGrid(30, 30, 0.05);
     for (int y = 10; y < 15; ++y) {
         for (int x = 6; x < 9; ++x) {
@@ -140,6 +142,61 @@ TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapDoesNotReject) {
     const auto ratio = core.sweptPathUnknownRatio({{5, 12}, {12, 12}});
     ASSERT_TRUE(ratio);
     EXPECT_GT(*ratio, 0.0);
+
+    FrontierCounts counts3;
+    const auto candidate = core.makeCandidate(
+        {{5, 12}}, {2, 12}, core.mapToWorld(2, 12),
+        std::vector<bool>(grid.data.size(), false), 30, 30, counts3);
+    EXPECT_FALSE(candidate);
+}
+
+TEST(ClusterFrontierExplorer, UnreachableGoalRejectsCandidate) {
+    auto grid = buildGrid(12, 12, 0.1);
+    auto core = makeCore(grid);
+    auto blocked = std::vector<bool>(grid.data.size(), false);
+    for (int y = 0; y < 12; ++y) {
+        blocked[core.index(5, y, 12)] = true;
+    }
+
+    FrontierCounts counts4;
+    const auto candidate = core.makeCandidate(
+        {{8, 5}}, {2, 5}, core.mapToWorld(2, 5), blocked, 12, 12, counts4);
+    EXPECT_FALSE(candidate);
+}
+
+TEST(ClusterFrontierExplorer, GoalOptionsExcludeUnknownCells) {
+    auto grid = buildGrid(30, 20, 0.05, -1);
+    for (int y = 2; y <= 17; ++y) {
+        for (int x = 2; x <= 18; ++x) {
+            setCell(grid, x, y, 0);
+        }
+    }
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.frontier_goal_search_radius = 0.6;
+    core.setConfig(config);
+
+    const auto blocked = core.makeBlockedGrid(30, 20, 0);
+    const auto options =
+        core.goalOptionsForCluster({{18, 10}}, blocked, 30, 20);
+
+    ASSERT_FALSE(options.empty());
+    for (const auto& option : options) {
+        EXPECT_LE(option.first, 18);
+        EXPECT_TRUE(core.isFreeValue(
+            grid.data[core.index(option.first, option.second, 30)]));
+    }
+}
+
+TEST(ClusterFrontierExplorer, GridPathDoesNotTraverseUnknownCells) {
+    auto grid = buildGrid(12, 8, 0.1);
+    for (int y = 0; y < 8; ++y) {
+        setCell(grid, 5, y, -1);
+    }
+    auto core = makeCore(grid);
+    const auto blocked = core.makeBlockedGrid(12, 8, 0);
+
+    EXPECT_FALSE(core.gridPath({2, 4}, {8, 4}, blocked, 12, 8));
 }
 
 TEST(ClusterFrontierExplorer, SweptFootprintRejectsPathThatClipsWall) {
@@ -155,9 +212,10 @@ TEST(ClusterFrontierExplorer, FailedGoalBlacklistPreventsReselection) {
     auto core = makeCore(grid);
     core.goalAttemptsForTest().push_back({core.mapToWorld(8, 5), 1, 60.0});
 
+    FrontierCounts counts5;
     const auto candidate = core.makeCandidate(
         {{8, 5}, {9, 5}, {10, 5}}, {2, 5}, core.mapToWorld(2, 5),
-        std::vector<bool>(grid.data.size(), false), 20, 10);
+        std::vector<bool>(grid.data.size(), false), 20, 10, counts5);
 
     EXPECT_FALSE(candidate);
 }
@@ -212,6 +270,77 @@ TEST(ClusterFrontierExplorer, NoCandidateCountsRemainCompact) {
     EXPECT_TRUE(result.candidates.empty());
     EXPECT_EQ(result.counts.free, 100);
     EXPECT_EQ(result.counts.frontier, 0);
+}
+
+// Map layout: free corridor at x=2..18, unknown space at x=19..29.
+// Frontier cells at x=18 are free and adjacent to unknown. A very strict
+// unknown-overlap threshold still rejects these frontier-edge candidates.
+
+TEST(ClusterFrontierExplorer, StrictUnknownRatioThresholdBlocksAllCandidates) {
+    auto grid = buildGrid(30, 20, 0.05, -1);
+    for (int y = 2; y <= 17; ++y)
+        for (int x = 2; x <= 18; ++x) setCell(grid, x, y, 0);
+    for (int x = 0; x < 30; ++x) {
+        setCell(grid, x, 0, 100);
+        setCell(grid, x, 1, 100);
+        setCell(grid, x, 18, 100);
+        setCell(grid, x, 19, 100);
+    }
+    for (int y = 0; y < 20; ++y) {
+        setCell(grid, 0, y, 100);
+        setCell(grid, 1, y, 100);
+    }
+
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.min_clearance_cells = 3;
+    config.path_clearance_cells = 1;
+    config.unknown_overlap_max_ratio = 0.1;
+    config.frontier_goal_search_radius = 0.6;
+    config.goal_publish_period = 0.0;
+    config.goal_update_distance = 0.0;
+    core.setConfig(config);
+
+    const auto result = core.findCandidates(core.mapToWorld(8, 10), 0.0);
+
+    EXPECT_TRUE(result.candidates.empty());
+    EXPECT_GT(result.counts.clusters, 0);
+    EXPECT_GT(
+        result.counts.rejected_unknown_ratio + result.counts.rejected_swept, 0);
+}
+
+TEST(ClusterFrontierExplorer, NewUnknownRatioThresholdFindsCandidates) {
+    auto grid = buildGrid(30, 20, 0.05, -1);
+    for (int y = 2; y <= 17; ++y)
+        for (int x = 2; x <= 18; ++x) setCell(grid, x, y, 0);
+    for (int x = 0; x < 30; ++x) {
+        setCell(grid, x, 0, 100);
+        setCell(grid, x, 1, 100);
+        setCell(grid, x, 18, 100);
+        setCell(grid, x, 19, 100);
+    }
+    for (int y = 0; y < 20; ++y) {
+        setCell(grid, 0, y, 100);
+        setCell(grid, 1, y, 100);
+    }
+
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.min_clearance_cells = 2;
+    config.path_clearance_cells = 2;
+    config.unknown_overlap_max_ratio = 1.0;
+    config.frontier_goal_search_radius = 0.6;
+    config.goal_publish_period = 0.0;
+    config.goal_update_distance = 0.0;
+    core.setConfig(config);
+
+    const auto result = core.findCandidates(core.mapToWorld(8, 10), 0.0);
+
+    EXPECT_FALSE(result.candidates.empty());
+    EXPECT_GT(result.counts.clusters, 0);
+    if (!result.candidates.empty()) {
+        EXPECT_GE(result.candidates.front().path_length, 0.45);
+    }
 }
 
 }  // namespace

@@ -77,8 +77,6 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
             onCmdVel(msg);
         });
 
-    rclcpp::on_shutdown([this]() { publishStopBurst(); });
-
     RCLCPP_INFO(get_logger(),
                 "Yahboom R2 cmd_vel bridge: %s -> %s, min_linear=%.3f, "
                 "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f, "
@@ -160,11 +158,15 @@ void R2CmdVelBridgeNode::publishStopBurst() {
         return;
     }
 
+    RCLCPP_WARN(get_logger(), "Publishing centered zero cmd_vel before exit");
     const geometry_msgs::msg::Twist stop;
     for (int i = 0; i < 10; ++i) {
         publisher_->publish(stop);
         rclcpp::sleep_for(20ms);
     }
+    last_output_ = stop;
+    has_last_output_ = true;
+    last_output_time_ = get_clock()->now();
 }
 
 }  // namespace yahboom_alc_bringup

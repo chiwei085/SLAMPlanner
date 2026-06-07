@@ -1,23 +1,17 @@
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 
 #include <algorithm>
+#include <bitset>
 #include <cmath>
 #include <limits>
 #include <queue>
-#include <set>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace yahboom_alc_bringup
 {
 
 namespace
 {
-
-int signBucket(const int value) {
-    return value >= 0 ? 1 : -1;
-}
-
 }  // namespace
 
 double FootprintCheck::unknownRatio() const {
@@ -88,7 +82,7 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 
     for (const auto& cluster : clusters) {
         auto candidate = makeCandidate(cluster, *start_cell, robot_xy, blocked,
-                                       width, height);
+                                       width, height, result.counts);
         if (!candidate) {
             continue;
         }
@@ -110,10 +104,11 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
     const std::vector<Cell>& cluster, const Cell& start_cell,
     const WorldPoint& robot_xy, const std::vector<bool>& blocked,
-    const int width, const int height) {
+    const int width, const int height, FrontierCounts& counts) {
     const auto goal_options =
         goalOptionsForCluster(cluster, blocked, width, height);
     if (goal_options.empty()) {
+        ++counts.rejected_no_options;
         return std::nullopt;
     }
 
@@ -127,10 +122,20 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         if (isBlacklisted(goal_xy)) {
             continue;
         }
+        const double goal_distance = std::hypot(
+            goal_xy.first - robot_xy.first, goal_xy.second - robot_xy.second);
+        if (goal_distance < config_.min_frontier_distance) {
+            continue;
+        }
+        if (config_.max_frontier_distance > 0.0 &&
+            goal_distance > config_.max_frontier_distance) {
+            continue;
+        }
 
         auto path = gridPath(start_cell, goal_cell, blocked, width, height);
         const bool reachable = path.has_value();
         if (!reachable && !config_.allow_unreachable_goal) {
+            ++counts.rejected_no_path;
             continue;
         }
         if (!path) {
@@ -141,10 +146,12 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         const auto footprint =
             footprintCheckAtWorld(goal_xy.first, goal_xy.second, goal_yaw);
         if (footprint.occupied) {
+            ++counts.rejected_footprint;
             continue;
         }
         const auto swept_unknown_ratio = sweptPathUnknownRatio(*path);
         if (!swept_unknown_ratio) {
+            ++counts.rejected_swept;
             continue;
         }
 
@@ -155,6 +162,10 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         const double progress = corridorProgress(start_xy, goal_xy, axis);
         const double unknown_ratio =
             std::max(footprint.unknownRatio(), *swept_unknown_ratio);
+        if (unknown_ratio > config_.unknown_overlap_max_ratio) {
+            ++counts.rejected_unknown_ratio;
+            continue;
+        }
         double score = config_.path_weight * path_length -
                        config_.information_weight * information -
                        config_.frontier_size_weight * cluster.size() -
@@ -208,27 +219,35 @@ std::vector<Cell> FrontierExplorerCore::findFrontierCells(
 
 std::vector<std::vector<Cell>> FrontierExplorerCore::clusterFrontiers(
     const std::vector<Cell>& frontier_cells, const int width) const {
-    std::set<Cell> frontier_set(frontier_cells.begin(), frontier_cells.end());
-    std::set<Cell> visited;
+    const int height = static_cast<int>(map_.info.height);
+    const int total = width * height;
+    std::vector<bool> is_frontier(total, false);
+    for (const auto& cell : frontier_cells) {
+        is_frontier[index(cell.first, cell.second, width)] = true;
+    }
+    std::vector<bool> visited(total, false);
     std::vector<std::vector<Cell>> clusters;
     for (const auto& seed : frontier_cells) {
-        if (visited.count(seed) != 0) {
+        const int seed_idx = index(seed.first, seed.second, width);
+        if (visited[seed_idx]) {
             continue;
         }
         std::vector<Cell> cluster;
         std::queue<Cell> queue;
         queue.push(seed);
-        visited.insert(seed);
+        visited[seed_idx] = true;
         while (!queue.empty()) {
             const auto cell = queue.front();
             queue.pop();
             cluster.push_back(cell);
             for (const auto& neighbor :
                  neighborCells(cell.first, cell.second)) {
-                (void)width;
-                if (frontier_set.count(neighbor) != 0 &&
-                    visited.count(neighbor) == 0) {
-                    visited.insert(neighbor);
+                if (!inBounds(neighbor.first, neighbor.second, width, height)) {
+                    continue;
+                }
+                const int n_idx = index(neighbor.first, neighbor.second, width);
+                if (is_frontier[n_idx] && !visited[n_idx]) {
+                    visited[n_idx] = true;
                     queue.push(neighbor);
                 }
             }
@@ -244,7 +263,8 @@ std::vector<Cell> FrontierExplorerCore::goalOptionsForCluster(
     const int radius_cells =
         std::max(1, static_cast<int>(config_.frontier_goal_search_radius /
                                      mapResolution()));
-    std::set<Cell> options;
+    std::vector<bool> seen(static_cast<std::size_t>(width * height), false);
+    std::vector<Cell> options;
     for (const auto& frontier : cluster) {
         for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
             for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
@@ -256,24 +276,33 @@ std::vector<Cell> FrontierExplorerCore::goalOptionsForCluster(
                 if (std::hypot(dx, dy) > radius_cells) {
                     continue;
                 }
-                if (blocked[index(x, y, width)]) {
+                const int idx = index(x, y, width);
+                if (!isFreeValue(map_.data[idx])) {
+                    continue;
+                }
+                if (blocked[idx]) {
                     continue;
                 }
                 if (hasOccupiedClearance(x, y, width, height,
                                          config_.min_clearance_cells)) {
-                    options.emplace(x, y);
+                    if (!seen[idx]) {
+                        seen[idx] = true;
+                        options.emplace_back(x, y);
+                    }
                 }
             }
         }
     }
-    return {options.begin(), options.end()};
+    return options;
 }
 
 std::vector<bool> FrontierExplorerCore::makeBlockedGrid(
     const int width, const int height, const int clearance) const {
     std::vector<bool> blocked(map_.data.size(), false);
+    std::vector<bool> occupied(map_.data.size(), false);
     for (std::size_t i = 0; i < map_.data.size(); ++i) {
-        blocked[i] = isOccupiedValue(map_.data[i]);
+        blocked[i] = !isFreeValue(map_.data[i]);
+        occupied[i] = isOccupiedValue(map_.data[i]);
     }
     if (clearance <= 0) {
         return blocked;
@@ -281,7 +310,7 @@ std::vector<bool> FrontierExplorerCore::makeBlockedGrid(
     auto inflated = blocked;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            if (!blocked[index(x, y, width)]) {
+            if (!occupied[index(x, y, width)]) {
                 continue;
             }
             for (int dy = -clearance; dy <= clearance; ++dy) {
@@ -527,7 +556,7 @@ ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
         std::max(1, static_cast<int>(
                         std::ceil(config_.wall_clearance_m / mapResolution())));
     double best = std::numeric_limits<double>::infinity();
-    std::set<std::pair<int, int>> occupied_quadrants;
+    uint8_t quadrant_mask = 0;
     for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
         for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
             const int x = cell.first + dx;
@@ -543,13 +572,14 @@ ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
                 continue;
             }
             best = std::min(best, std::hypot(dx, dy) * mapResolution());
-            occupied_quadrants.emplace(signBucket(dx), signBucket(dy));
+            quadrant_mask |= static_cast<uint8_t>(
+                1u << ((dx >= 0 ? 1 : 0) | ((dy >= 0 ? 1 : 0) << 1)));
         }
     }
     ObstacleNeighborhood result;
     result.wall_clearance = std::isinf(best) ? config_.wall_clearance_m : best;
-    result.corner_penalty =
-        std::max(0.0, static_cast<double>(occupied_quadrants.size()) - 1.0);
+    result.corner_penalty = std::max(
+        0.0, static_cast<double>(std::bitset<4>(quadrant_mask).count()) - 1.0);
     return result;
 }
 

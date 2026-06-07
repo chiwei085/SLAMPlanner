@@ -4,7 +4,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rik_sd/struct_descriptor.hpp>
 
-#include <chrono>
 #include <string>
 
 namespace yahboom_alc_bringup
@@ -34,13 +33,13 @@ class R2CmdVelBridgeNode : public rclcpp::Node
 public:
     explicit R2CmdVelBridgeNode(
         const rclcpp::NodeOptions& options = rclcpp::NodeOptions{});
+    void publishStopBurst();
 
 private:
     R2CmdVelBridgeConfig loadConfig();
     void onCmdVel(const geometry_msgs::msg::Twist::ConstSharedPtr& msg);
     geometry_msgs::msg::Twist limitRate(
         const geometry_msgs::msg::Twist& target);
-    void publishStopBurst();
 
     R2CmdVelBridgeConfig config_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;

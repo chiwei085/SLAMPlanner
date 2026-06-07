@@ -55,6 +55,11 @@ struct FrontierCounts
     int occupied = 0;
     int frontier = 0;
     int clusters = 0;
+    int rejected_no_options = 0;
+    int rejected_no_path = 0;
+    int rejected_footprint = 0;
+    int rejected_swept = 0;
+    int rejected_unknown_ratio = 0;
 };
 
 struct FootprintCheck
@@ -123,7 +128,7 @@ public:
     std::optional<FrontierCandidate> makeCandidate(
         const std::vector<Cell>& cluster, const Cell& start_cell,
         const WorldPoint& robot_xy, const std::vector<bool>& blocked, int width,
-        int height);
+        int height, FrontierCounts& counts);
 
     std::vector<Cell> findFrontierCells(int width, int height) const;
     std::vector<std::vector<Cell>> clusterFrontiers(

@@ -211,7 +211,16 @@ private:
                 ", unknown=" + std::to_string(result.counts.unknown) +
                 ", occupied=" + std::to_string(result.counts.occupied) +
                 ", frontier_cells=" + std::to_string(result.counts.frontier) +
-                ", clusters=" + std::to_string(result.counts.clusters) + ")");
+                ", clusters=" + std::to_string(result.counts.clusters) +
+                ", rej_no_opts=" +
+                std::to_string(result.counts.rejected_no_options) +
+                ", rej_no_path=" +
+                std::to_string(result.counts.rejected_no_path) +
+                ", rej_footprint=" +
+                std::to_string(result.counts.rejected_footprint) +
+                ", rej_swept=" + std::to_string(result.counts.rejected_swept) +
+                ", rej_unknown=" +
+                std::to_string(result.counts.rejected_unknown_ratio) + ")");
             return;
         }
         const auto best = std::min_element(
