@@ -1,0 +1,124 @@
+#include <geometry_msgs/msg/twist.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <string>
+#include <thread>
+
+namespace
+{
+
+std::atomic<bool> g_stop_requested{false};
+
+void handleSignal(int) {
+    g_stop_requested = true;
+}
+
+class R2SafeDriverSupervisor : public rclcpp::Node
+{
+public:
+    R2SafeDriverSupervisor() : rclcpp::Node("r2_safe_driver") {
+        declare_parameter("cmd_vel_topic", "/cmd_vel");
+        declare_parameter("stop_publish_count", 30);
+        declare_parameter("stop_publish_period_sec", 0.02);
+        declare_parameter("driver_package", "yahboomcar_bringup");
+        declare_parameter("driver_executable", "Ackman_driver_R2");
+
+        cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
+        stop_publish_count_ = get_parameter("stop_publish_count").as_int();
+        stop_publish_period_sec_ =
+            get_parameter("stop_publish_period_sec").as_double();
+        driver_package_ = get_parameter("driver_package").as_string();
+        driver_executable_ = get_parameter("driver_executable").as_string();
+        publisher_ =
+            create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
+    }
+
+    int run() {
+        child_pid_ = fork();
+        if (child_pid_ < 0) {
+            RCLCPP_ERROR(get_logger(), "Failed to fork Yahboom driver process");
+            return 1;
+        }
+        if (child_pid_ == 0) {
+            execlp("ros2", "ros2", "run", driver_package_.c_str(),
+                   driver_executable_.c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+
+        RCLCPP_INFO(get_logger(), "Started Yahboom driver supervisor pid=%d",
+                    child_pid_);
+        while (rclcpp::ok() && !g_stop_requested) {
+            int status = 0;
+            const pid_t result = waitpid(child_pid_, &status, WNOHANG);
+            if (result == child_pid_) {
+                RCLCPP_WARN(get_logger(),
+                            "Yahboom driver exited; supervisor stopping");
+                publishStopBurst();
+                return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            }
+            rclcpp::spin_some(get_node_base_interface());
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        RCLCPP_WARN(get_logger(),
+                    "Stopping R2 driver with hardware zero command");
+        publishStopBurst();
+        stopChild();
+        return 0;
+    }
+
+    void publishStopBurst() {
+        const geometry_msgs::msg::Twist stop;
+        for (int i = 0; i < stop_publish_count_; ++i) {
+            publisher_->publish(stop);
+            rclcpp::spin_some(get_node_base_interface());
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(stop_publish_period_sec_));
+        }
+    }
+
+private:
+    void stopChild() {
+        if (child_pid_ <= 0) {
+            return;
+        }
+        publishStopBurst();
+        kill(child_pid_, SIGTERM);
+        for (int i = 0; i < 30; ++i) {
+            int status = 0;
+            if (waitpid(child_pid_, &status, WNOHANG) == child_pid_) {
+                child_pid_ = -1;
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        kill(child_pid_, SIGKILL);
+        waitpid(child_pid_, nullptr, 0);
+        child_pid_ = -1;
+    }
+
+    std::string cmd_vel_topic_;
+    std::string driver_package_;
+    std::string driver_executable_;
+    int stop_publish_count_ = 30;
+    double stop_publish_period_sec_ = 0.02;
+    pid_t child_pid_ = -1;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<R2SafeDriverSupervisor>();
+    const int status = node->run();
+    rclcpp::shutdown();
+    return status;
+}

@@ -82,7 +82,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
         return [
             Node(
                 package="yahboom_alc_bringup",
-                executable="simple_frontier_explorer.py",
+                executable="simple_frontier_explorer",
                 name="simple_frontier_explorer",
                 output="screen",
                 parameters=[
@@ -100,7 +100,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
         return [
             Node(
                 package="yahboom_alc_bringup",
-                executable="cluster_frontier_explorer.py",
+                executable="cluster_frontier_explorer",
                 name="cluster_frontier_explorer",
                 output="screen",
                 parameters=[
@@ -180,6 +180,7 @@ def generate_launch_description():
     startup_motion_delay_sec = LaunchConfiguration("startup_motion_delay_sec")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     nav2_bt_xml = LaunchConfiguration("nav2_bt_xml")
+    planner_log_dir = LaunchConfiguration("planner_log_dir")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
     driver_cmd_vel_topic = LaunchConfiguration("driver_cmd_vel_topic")
 
@@ -201,7 +202,7 @@ def generate_launch_description():
 
     driver_node = Node(
         package="yahboom_alc_bringup",
-        executable="r2_safe_driver.py",
+        executable="r2_safe_driver",
         output="screen",
     )
 
@@ -386,14 +387,33 @@ def generate_launch_description():
                 "max_linear_accel": 0.08,
                 "max_steering_rate": 0.35,
                 "assumed_command_period": 0.10,
-                "arc_turn_when_stationary": False,
+                "arc_turn_when_stationary": True,
+            }
+        ],
+    )
+
+    planner_runtime_logger = Node(
+        package="yahboom_alc_bringup",
+        executable="planner_runtime_logger",
+        name="planner_runtime_logger",
+        output="screen",
+        parameters=[
+            {
+                "log_dir": planner_log_dir,
+                "event_topic": "/planner/events",
+                "map_topic": "/map",
+                "nav_cmd_topic": nav_cmd_vel_topic,
+                "driver_cmd_topic": driver_cmd_vel_topic,
+                "global_frame": "map",
+                "robot_frame": "base_footprint",
+                "snapshot_period_sec": 2.0,
             }
         ],
     )
 
     r2_safety_stop = Node(
         package="yahboom_alc_bringup",
-        executable="r2_safety_stop.py",
+        executable="r2_safety_stop",
         name="r2_safety_stop",
         output="screen",
         parameters=[
@@ -414,7 +434,7 @@ def generate_launch_description():
                             get_package_prefix("yahboom_alc_bringup"),
                             "lib",
                             "yahboom_alc_bringup",
-                            "r2_emergency_stop.py",
+                            "r2_emergency_stop",
                         )
                     ],
                     output="screen",
@@ -509,6 +529,11 @@ def generate_launch_description():
                 description="Nav2 NavigateToPose BT XML used for RGB-D exploration.",
             ),
             DeclareLaunchArgument(
+                "planner_log_dir",
+                default_value="/home/jetson/SLAMPlanner/planner-log",
+                description="Directory for sparse planner runtime JSONL logs.",
+            ),
+            DeclareLaunchArgument(
                 "nav_cmd_vel_topic",
                 default_value="/alc/nav_cmd_vel",
                 description="Topic receiving raw Nav2 controller velocity commands.",
@@ -538,6 +563,7 @@ def generate_launch_description():
             ),
             r2_bridge,
             r2_safety_stop,
+            planner_runtime_logger,
             TimerAction(
                 period=startup_motion_delay_sec,
                 actions=[
