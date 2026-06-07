@@ -43,6 +43,14 @@ TEST(R2CmdVelBridge, ForwardCommandPreservesAndClampsLinearX) {
     input.linear.x = 1.0;
     output = convertNavTwistToR2(input, defaultConfig());
     EXPECT_NEAR(output.linear.x, 0.26, kTolerance);
+}
+
+TEST(R2CmdVelBridge, ReverseCommandPreservesAndClampsLinearX) {
+    Twist input;
+    input.linear.x = -0.2;
+
+    Twist output = convertNavTwistToR2(input, defaultConfig());
+    EXPECT_NEAR(output.linear.x, -0.2, kTolerance);
 
     input.linear.x = -1.0;
     output = convertNavTwistToR2(input, defaultConfig());

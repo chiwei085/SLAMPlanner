@@ -11,3 +11,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# dev record
+/dev-logs/
+
+# runtime planner diagnostics
+/planner-log/*
+!/planner-log/.gitkeep
