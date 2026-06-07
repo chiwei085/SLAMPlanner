@@ -23,6 +23,7 @@ def generate_launch_description():
     use_respawn = LaunchConfiguration("use_respawn")
     log_level = LaunchConfiguration("log_level")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
+    bt_xml_filename = LaunchConfiguration("bt_xml_filename")
 
     lifecycle_nodes = [
         "controller_server",
@@ -39,7 +40,11 @@ def generate_launch_description():
         RewrittenYaml(
             source_file=params_file,
             root_key=namespace,
-            param_rewrites={"use_sim_time": use_sim_time, "autostart": autostart},
+            param_rewrites={
+                "use_sim_time": use_sim_time,
+                "autostart": autostart,
+                "default_bt_xml_filename": bt_xml_filename,
+            },
             convert_types=True,
         ),
         allow_substs=True,
@@ -231,6 +236,14 @@ def generate_launch_description():
             DeclareLaunchArgument("use_respawn", default_value="False"),
             DeclareLaunchArgument("log_level", default_value="info"),
             DeclareLaunchArgument("nav_cmd_vel_topic", default_value="/alc/nav_cmd_vel"),
+            DeclareLaunchArgument(
+                "bt_xml_filename",
+                default_value=os.path.join(
+                    bringup_dir,
+                    "behavior_trees",
+                    "navigate_to_pose_w_replanning_and_recovery.xml",
+                ),
+            ),
             load_nodes,
             load_composable_nodes,
         ]

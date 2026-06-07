@@ -45,6 +45,7 @@ install(
 )
 
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY behavior_trees DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY params DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
@@ -60,12 +61,18 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
 
   ament_add_gtest(test_r2_cmd_vel_bridge
     test/test_r2_cmd_vel_bridge.cpp
   )
   target_link_libraries(test_r2_cmd_vel_bridge
     yahboom_alc_bringup_lib
+  )
+
+  ament_add_pytest_test(test_cluster_frontier_explorer
+    test/test_cluster_frontier_explorer.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts
   )
 endif()
 

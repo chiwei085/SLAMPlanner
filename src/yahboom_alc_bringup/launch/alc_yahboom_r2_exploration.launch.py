@@ -107,11 +107,11 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     {
                         **common_parameters,
                         "cycle_period_sec": 3.0,
-                        "min_frontier_size": 8,
+                        "min_frontier_size": 14,
                         "min_clearance_cells": 3,
-                        "path_clearance_cells": 3,
+                        "path_clearance_cells": 1,
                         "min_frontier_distance": 0.45,
-                        "max_frontier_distance": 2.5,
+                        "max_frontier_distance": 3.5,
                         "frontier_goal_search_radius": 0.6,
                         "robot_start_search_radius": 2.0,
                         "information_radius": 1.5,
@@ -119,9 +119,25 @@ def launch_frontier_explorer(context, *args, **kwargs):
                         "information_weight": 0.02,
                         "frontier_size_weight": 0.02,
                         "unreachable_goal_penalty": 3.0,
-                        "allow_unreachable_goal": True,
+                        "allow_unreachable_goal": False,
                         "goal_update_distance": 0.5,
                         "goal_publish_period": 3.0,
+                        "footprint_front_m": 0.16,
+                        "footprint_rear_m": 0.15,
+                        "footprint_half_width_m": 0.11,
+                        "footprint_padding_m": 0.03,
+                        "swept_step_m": 0.05,
+                        "unknown_overlap_max_ratio": 0.35,
+                        "unknown_overlap_weight": 4.0,
+                        "wall_clearance_m": 0.22,
+                        "corner_penalty_weight": 1.0,
+                        "corridor_progress_weight": 0.4,
+                        "goal_timeout_sec": 45.0,
+                        "stuck_progress_radius_m": 0.12,
+                        "stuck_progress_timeout_sec": 12.0,
+                        "failed_goal_blacklist_radius_m": 0.45,
+                        "failed_goal_blacklist_sec": 60.0,
+                        "failed_goal_max_retries": 1,
                         "marker_topic": "/waypoints",
                         "goal_marker_topic": "/frontier_goal_marker",
                     }
@@ -141,6 +157,11 @@ def generate_launch_description():
     default_nav2_params = os.path.join(
         yahboom_alc_share, "params", "nav2_rgbd_params.yaml"
     )
+    default_nav2_bt_xml = os.path.join(
+        yahboom_alc_share,
+        "behavior_trees",
+        "navigate_to_pose_rgbd_no_backup.xml",
+    )
     default_model_path = os.path.join(
         yahboom_description_share, "urdf", "yahboomcar_R2.urdf.xacro"
     )
@@ -158,6 +179,7 @@ def generate_launch_description():
     rviz_config = LaunchConfiguration("rviz_config")
     startup_motion_delay_sec = LaunchConfiguration("startup_motion_delay_sec")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
+    nav2_bt_xml = LaunchConfiguration("nav2_bt_xml")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
     driver_cmd_vel_topic = LaunchConfiguration("driver_cmd_vel_topic")
 
@@ -319,6 +341,7 @@ def generate_launch_description():
         launch_arguments={
             "use_sim_time": use_sim_time,
             "params_file": nav2_params_file,
+            "bt_xml_filename": nav2_bt_xml,
             "autostart": "true",
             "use_composition": "False",
             "nav_cmd_vel_topic": nav_cmd_vel_topic,
@@ -479,6 +502,11 @@ def generate_launch_description():
                     "Nav2 parameter YAML. Use this to tune spin behavior timing "
                     "for the R2 arc-turn approximation."
                 ),
+            ),
+            DeclareLaunchArgument(
+                "nav2_bt_xml",
+                default_value=default_nav2_bt_xml,
+                description="Nav2 NavigateToPose BT XML used for RGB-D exploration.",
             ),
             DeclareLaunchArgument(
                 "nav_cmd_vel_topic",
