@@ -29,9 +29,14 @@ public:
                 "No /cmd_vel subscriber found, starting Ackman_driver_R2 "
                 "for stop");
             driver_process_started_ = true;
-            std::system(
+            const int start_status = std::system(
                 "ros2 run yahboomcar_bringup Ackman_driver_R2 >/tmp/"
                 "r2_emergency_driver.log 2>&1 &");
+            if (start_status != 0) {
+                RCLCPP_WARN(get_logger(),
+                            "Ackman_driver_R2 start command returned %d",
+                            start_status);
+            }
             const auto deadline =
                 now() + rclcpp::Duration::from_seconds(driver_wait_sec_);
             while (rclcpp::ok() && now() < deadline && !hasCmdVelSubscriber()) {
