@@ -1,11 +1,14 @@
 #include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <type_traits>
 
 namespace yahboom_alc_bringup
 {
+using namespace std::chrono_literals;
+
 namespace
 {
 
@@ -74,12 +77,16 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
             onCmdVel(msg);
         });
 
+    rclcpp::on_shutdown([this]() { publishStopBurst(); });
+
     RCLCPP_INFO(get_logger(),
                 "Yahboom R2 cmd_vel bridge: %s -> %s, min_linear=%.3f, "
-                "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f",
+                "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f, "
+                "max_linear_accel=%.3f, max_steering_rate=%.3f",
                 config_.input_topic.c_str(), config_.output_topic.c_str(),
                 config_.min_linear_speed, config_.max_linear_speed,
-                config_.steering_gain, config_.max_steering);
+                config_.steering_gain, config_.max_steering,
+                config_.max_linear_accel, config_.max_steering_rate);
 }
 
 R2CmdVelBridgeConfig R2CmdVelBridgeNode::loadConfig() {
@@ -116,7 +123,48 @@ void R2CmdVelBridgeNode::onCmdVel(
         return;
     }
 
-    publisher_->publish(convertNavTwistToR2(*msg, config_));
+    publisher_->publish(limitRate(convertNavTwistToR2(*msg, config_)));
+}
+
+geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
+    const geometry_msgs::msg::Twist& target) {
+    const rclcpp::Time now = get_clock()->now();
+
+    double dt = config_.assumed_command_period;
+    if (has_last_output_) {
+        dt = std::max(0.0, (now - last_output_time_).seconds());
+    }
+    else {
+        last_output_ = geometry_msgs::msg::Twist{};
+        has_last_output_ = true;
+    }
+
+    geometry_msgs::msg::Twist output = target;
+    const double max_linear_delta = std::abs(config_.max_linear_accel) * dt;
+    const double max_steering_delta = std::abs(config_.max_steering_rate) * dt;
+
+    output.linear.x =
+        std::clamp(target.linear.x, last_output_.linear.x - max_linear_delta,
+                   last_output_.linear.x + max_linear_delta);
+    output.linear.y =
+        std::clamp(target.linear.y, last_output_.linear.y - max_steering_delta,
+                   last_output_.linear.y + max_steering_delta);
+
+    last_output_ = output;
+    last_output_time_ = now;
+    return output;
+}
+
+void R2CmdVelBridgeNode::publishStopBurst() {
+    if (!publisher_) {
+        return;
+    }
+
+    const geometry_msgs::msg::Twist stop;
+    for (int i = 0; i < 10; ++i) {
+        publisher_->publish(stop);
+        rclcpp::sleep_for(20ms);
+    }
 }
 
 }  // namespace yahboom_alc_bringup

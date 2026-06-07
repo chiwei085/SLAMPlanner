@@ -10,19 +10,32 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
 
   <exec_depend>alc_planner</exec_depend>
   <exec_depend>astra_camera</exec_depend>
+  <exec_depend>imu_filter_madgwick</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>launch_xml</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>rtabmap_ros</exec_depend>
   <exec_depend>rtabmap_slam</exec_depend>
   <exec_depend>rtabmap_sync</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>yahboomcar_base_node</exec_depend>
   <exec_depend>yahboomcar_bringup</exec_depend>
+  <exec_depend>yahboomcar_description</exec_depend>
   <exec_depend>yahboomcar_nav</exec_depend>
   <exec_depend>ydlidar_ros2_driver</exec_depend>
 

@@ -1,18 +1,22 @@
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    GroupAction,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
+    TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration
 from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
-from launch_ros.actions import Node, SetRemap
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def launch_lidar(context, *args, **kwargs):
@@ -62,41 +66,172 @@ def launch_lidar(context, *args, **kwargs):
     return [lidar_launch, tf_base_link_to_laser]
 
 
+def launch_frontier_explorer(context, *args, **kwargs):
+    enabled = LaunchConfiguration("enable_frontier_explorer").perform(context).lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return []
+
+    explorer_type = LaunchConfiguration("frontier_explorer_type").perform(context)
+    common_parameters = {
+        "enabled": True,
+        "map_topic": "/map",
+        "robot_frame": "base_footprint",
+        "global_frame": "map",
+    }
+    if explorer_type == "simple":
+        return [
+            Node(
+                package="yahboom_alc_bringup",
+                executable="simple_frontier_explorer.py",
+                name="simple_frontier_explorer",
+                output="screen",
+                parameters=[
+                    {
+                        **common_parameters,
+                        "cycle_period_sec": 5.0,
+                        "min_goal_distance": 0.45,
+                        "max_goal_distance": 2.5,
+                        "frontier_stride": 3,
+                    }
+                ],
+            )
+        ]
+    if explorer_type == "cluster":
+        return [
+            Node(
+                package="yahboom_alc_bringup",
+                executable="cluster_frontier_explorer.py",
+                name="cluster_frontier_explorer",
+                output="screen",
+                parameters=[
+                    {
+                        **common_parameters,
+                        "cycle_period_sec": 3.0,
+                        "min_frontier_size": 8,
+                        "min_clearance_cells": 3,
+                        "path_clearance_cells": 3,
+                        "min_frontier_distance": 0.45,
+                        "max_frontier_distance": 2.5,
+                        "frontier_goal_search_radius": 0.6,
+                        "robot_start_search_radius": 2.0,
+                        "information_radius": 1.5,
+                        "path_weight": 1.0,
+                        "information_weight": 0.02,
+                        "frontier_size_weight": 0.02,
+                        "unreachable_goal_penalty": 3.0,
+                        "allow_unreachable_goal": True,
+                        "goal_update_distance": 0.5,
+                        "goal_publish_period": 3.0,
+                        "marker_topic": "/waypoints",
+                        "goal_marker_topic": "/frontier_goal_marker",
+                    }
+                ],
+            )
+        ]
+    raise ValueError("frontier_explorer_type must be 'cluster' or 'simple'")
+
+
 def generate_launch_description():
     yahboom_alc_share = get_package_share_directory("yahboom_alc_bringup")
     yahboom_bringup_share = get_package_share_directory("yahboomcar_bringup")
-    nav2_bringup_share = get_package_share_directory("nav2_bringup")
+    yahboom_description_share = get_package_share_directory("yahboomcar_description")
+    yahboom_nav_share = get_package_share_directory("yahboomcar_nav")
     astra_camera_share = get_package_share_directory("astra_camera")
 
-    yahboom_bringup_launch = os.path.join(yahboom_bringup_share, "launch")
     default_nav2_params = os.path.join(
         yahboom_alc_share, "params", "nav2_rgbd_params.yaml"
+    )
+    default_model_path = os.path.join(
+        yahboom_description_share, "urdf", "yahboomcar_R2.urdf.xacro"
+    )
+    default_rviz_config = os.path.join(yahboom_nav_share, "rviz", "rtabmap_nav.rviz")
+    imu_filter_config = os.path.join(
+        yahboom_bringup_share, "param", "imu_filter_param.yaml"
     )
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     qos = LaunchConfiguration("qos")
     localization = LaunchConfiguration("localization")
     enable_camera = LaunchConfiguration("enable_camera")
+    enable_frontier_explorer = LaunchConfiguration("enable_frontier_explorer")
+    rviz = LaunchConfiguration("rviz")
+    rviz_config = LaunchConfiguration("rviz_config")
+    startup_motion_delay_sec = LaunchConfiguration("startup_motion_delay_sec")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
     driver_cmd_vel_topic = LaunchConfiguration("driver_cmd_vel_topic")
 
-    r2_bringup = IncludeLaunchDescription(
+    robot_description = ParameterValue(
+        Command(["xacro ", LaunchConfiguration("model")]), value_type=str
+    )
+
+    joint_state_publisher = Node(
+        package="joint_state_publisher",
+        executable="joint_state_publisher",
+        condition=UnlessCondition(LaunchConfiguration("gui")),
+    )
+
+    robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        parameters=[{"robot_description": robot_description}],
+    )
+
+    driver_node = Node(
+        package="yahboom_alc_bringup",
+        executable="r2_safe_driver.py",
+        output="screen",
+    )
+
+    base_node = Node(
+        package="yahboomcar_base_node",
+        executable="base_node_R2",
+        output="screen",
+        parameters=[
+            {
+                "pub_odom_tf": False,
+                "linear_scale_x": 1.0,
+                "linear_scale_y": 1.0,
+            }
+        ],
+    )
+
+    imu_filter_node = Node(
+        package="imu_filter_madgwick",
+        executable="imu_filter_madgwick_node",
+        output="screen",
+        parameters=[imu_filter_config],
+    )
+
+    ekf_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(yahboom_bringup_launch, "yahboomcar_bringup_R2_launch.py")
-        ),
-        launch_arguments={"pub_odom_tf": "false"}.items(),
+            os.path.join(
+                get_package_share_directory("robot_localization"),
+                "launch",
+                "ekf_x1_x3_launch.py",
+            )
+        )
+    )
+
+    rviz_node = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        output="screen",
+        condition=IfCondition(rviz),
+        arguments=["-d", rviz_config],
     )
 
     astra_camera = IncludeLaunchDescription(
         XMLLaunchDescriptionSource(
-            os.path.join(astra_camera_share, "launch", "astra.launch.xml")
+            os.path.join(astra_camera_share, "launch", "astro_pro_plus.launch.xml")
         ),
         condition=IfCondition(enable_camera),
         launch_arguments={
             "camera_name": "camera",
             "enable_color": "true",
             "enable_depth": "true",
+            "enable_ir": "false",
             "enable_point_cloud": "true",
             "enable_colored_point_cloud": "false",
         }.items(),
@@ -121,6 +256,8 @@ def generate_launch_description():
         ],
     )
 
+    tf_warmup_delay_sec = LaunchConfiguration("tf_warmup_delay_sec")
+
     rtabmap_parameters = {
         "frame_id": "base_footprint",
         "use_sim_time": use_sim_time,
@@ -129,9 +266,17 @@ def generate_launch_description():
         "use_action_for_goal": True,
         "qos_image": qos,
         "qos_imu": qos,
+        "wait_for_transform": 1.0,
         "Reg/Strategy": "2",
         "Reg/Force3DoF": "true",
         "RGBD/NeighborLinkRefining": "True",
+        "Grid/3D": "false",
+        "Grid/NormalsSegmentation": "false",
+        "Grid/RayTracing": "true",
+        "Grid/RangeMin": "0.25",
+        "Grid/RangeMax": "3.0",
+        "Grid/MaxGroundHeight": "0.08",
+        "Grid/MaxObstacleHeight": "1.2",
         "Optimizer/GravitySigma": "0",
     }
 
@@ -167,22 +312,17 @@ def generate_launch_description():
         remappings=rtabmap_remappings,
     )
 
-    nav2 = GroupAction(
-        [
-            SetRemap(src="cmd_vel", dst=nav_cmd_vel_topic),
-            SetRemap(src="/cmd_vel", dst=nav_cmd_vel_topic),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
-                ),
-                launch_arguments={
-                    "use_sim_time": use_sim_time,
-                    "params_file": nav2_params_file,
-                    "autostart": "true",
-                    "use_composition": "false",
-                }.items(),
-            ),
-        ]
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(yahboom_alc_share, "launch", "r2_navigation_launch.py")
+        ),
+        launch_arguments={
+            "use_sim_time": use_sim_time,
+            "params_file": nav2_params_file,
+            "autostart": "true",
+            "use_composition": "False",
+            "nav_cmd_vel_topic": nav_cmd_vel_topic,
+        }.items(),
     )
 
     alc_planner = Node(
@@ -214,15 +354,50 @@ def generate_launch_description():
             {
                 "input_topic": nav_cmd_vel_topic,
                 "output_topic": driver_cmd_vel_topic,
-                "min_linear_speed": 0.05,
-                "max_linear_speed": 0.26,
+                "min_linear_speed": 0.02,
+                "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
                 "linear_deadband": 0.001,
                 "angular_deadband": 0.001,
-                "arc_turn_when_stationary": True,
+                "max_linear_accel": 0.08,
+                "max_steering_rate": 0.35,
+                "assumed_command_period": 0.10,
+                "arc_turn_when_stationary": False,
             }
         ],
+    )
+
+    r2_safety_stop = Node(
+        package="yahboom_alc_bringup",
+        executable="r2_safety_stop.py",
+        name="r2_safety_stop",
+        output="screen",
+        parameters=[
+            {
+                "cmd_vel_topic": driver_cmd_vel_topic,
+                "publish_rate_hz": 30.0,
+                "stop_duration_sec": 4.0,
+            }
+        ],
+    )
+
+    stop_on_shutdown = RegisterEventHandler(
+        OnShutdown(
+            on_shutdown=[
+                ExecuteProcess(
+                    cmd=[
+                        os.path.join(
+                            get_package_prefix("yahboom_alc_bringup"),
+                            "lib",
+                            "yahboom_alc_bringup",
+                            "r2_emergency_stop.py",
+                        )
+                    ],
+                    output="screen",
+                ),
+            ]
+        )
     )
 
     return LaunchDescription(
@@ -246,6 +421,46 @@ def generate_launch_description():
                 "enable_camera",
                 default_value="true",
                 description="Launch the Astra RGB-D camera driver.",
+            ),
+            DeclareLaunchArgument(
+                "gui",
+                default_value="false",
+                description="Use joint_state_publisher_gui if true.",
+            ),
+            DeclareLaunchArgument(
+                "model",
+                default_value=default_model_path,
+                description="Absolute path to the Yahboom R2 URDF xacro.",
+            ),
+            DeclareLaunchArgument(
+                "enable_frontier_explorer",
+                default_value="true",
+                description="Automatically send frontier goals to Nav2.",
+            ),
+            DeclareLaunchArgument(
+                "frontier_explorer_type",
+                default_value="cluster",
+                description="Frontier explorer implementation: cluster or simple.",
+            ),
+            DeclareLaunchArgument(
+                "rviz",
+                default_value="false",
+                description="Launch RViz2 for remote visualization.",
+            ),
+            DeclareLaunchArgument(
+                "rviz_config",
+                default_value=default_rviz_config,
+                description="RViz2 config file.",
+            ),
+            DeclareLaunchArgument(
+                "tf_warmup_delay_sec",
+                default_value="3.0",
+                description="Delay SLAM and Nav2 startup to let the TF tree stabilize on Jetson.",
+            ),
+            DeclareLaunchArgument(
+                "startup_motion_delay_sec",
+                default_value="5.0",
+                description="Delay goal-producing nodes so the robot remains stopped after launch.",
             ),
             DeclareLaunchArgument(
                 "robot_type",
@@ -275,14 +490,33 @@ def generate_launch_description():
                 default_value="/cmd_vel",
                 description="Topic consumed by the Yahboom R2 driver.",
             ),
-            r2_bringup,
+            joint_state_publisher,
+            robot_state_publisher,
+            driver_node,
+            base_node,
+            imu_filter_node,
+            ekf_node,
+            rviz_node,
             OpaqueFunction(function=launch_lidar),
             astra_camera,
-            rgbd_sync,
-            rtabmap_mapping,
-            rtabmap_localization,
-            nav2,
-            alc_planner,
+            TimerAction(
+                period=tf_warmup_delay_sec,
+                actions=[
+                    rgbd_sync,
+                    rtabmap_mapping,
+                    rtabmap_localization,
+                    nav2,
+                ],
+            ),
             r2_bridge,
+            r2_safety_stop,
+            TimerAction(
+                period=startup_motion_delay_sec,
+                actions=[
+                    alc_planner,
+                    OpaqueFunction(function=launch_frontier_explorer),
+                ],
+            ),
+            stop_on_shutdown,
         ]
     )

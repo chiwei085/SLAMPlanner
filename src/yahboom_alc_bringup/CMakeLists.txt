@@ -47,6 +47,15 @@ install(
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY params DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS
+  scripts/cluster_frontier_explorer.py
+  scripts/r2_emergency_stop.py
+  scripts/r2_safe_driver.py
+  scripts/r2_safety_stop.py
+  scripts/simple_frontier_explorer.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
