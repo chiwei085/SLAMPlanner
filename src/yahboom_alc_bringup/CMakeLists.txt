@@ -102,6 +102,9 @@ ament_target_dependencies(r2_safety_stop
 add_executable(r2_emergency_stop
   src/r2_emergency_stop_node.cpp
 )
+target_link_libraries(r2_emergency_stop
+  yahboom_alc_bringup_lib
+)
 ament_target_dependencies(r2_emergency_stop
   geometry_msgs
   rclcpp
@@ -109,6 +112,9 @@ ament_target_dependencies(r2_emergency_stop
 
 add_executable(r2_safe_driver
   src/r2_safe_driver_supervisor.cpp
+)
+target_link_libraries(r2_safe_driver
+  yahboom_alc_bringup_lib
 )
 ament_target_dependencies(r2_safe_driver
   geometry_msgs

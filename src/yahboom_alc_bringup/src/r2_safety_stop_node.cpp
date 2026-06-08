@@ -6,6 +6,37 @@
 #include <csignal>
 #include <memory>
 
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct R2SafetyStopParams
+{
+    std::string cmd_vel_topic = "/cmd_vel";
+    double publish_rate_hz = 30.0;
+    double stop_duration_sec = 4.0;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::R2SafetyStopParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::R2SafetyStopParams;
+        return make_descriptor(
+            named(&R2SafetyStopParams::cmd_vel_topic, "cmd_vel_topic"),
+            named(&R2SafetyStopParams::publish_rate_hz, "publish_rate_hz"),
+            named(&R2SafetyStopParams::stop_duration_sec, "stop_duration_sec"));
+    }
+};
+
+}  // namespace rik_sd
+
 namespace
 {
 
@@ -15,21 +46,18 @@ class R2SafetyStopNode : public rclcpp::Node
 {
 public:
     R2SafetyStopNode() : rclcpp::Node("r2_safety_stop") {
-        declare_parameter("cmd_vel_topic", "/cmd_vel");
-        declare_parameter("publish_rate_hz", 30.0);
-        declare_parameter("stop_duration_sec", 4.0);
-
-        const auto topic = get_parameter("cmd_vel_topic").as_string();
-        publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
+        const auto params = yahboom_alc_bringup::loadDeclaredParameters<
+            yahboom_alc_bringup::R2SafetyStopParams>(*this);
+        publish_rate_hz_ = params.publish_rate_hz;
         stop_publish_target_ = std::max(
-            1,
-            static_cast<int>(publish_rate_hz_ *
-                             get_parameter("stop_duration_sec").as_double()));
-        publisher_ = create_publisher<geometry_msgs::msg::Twist>(topic, 10);
+            1, static_cast<int>(publish_rate_hz_ * params.stop_duration_sec));
+        publisher_ = create_publisher<geometry_msgs::msg::Twist>(
+            params.cmd_vel_topic, 10);
         timer_ = create_wall_timer(
             std::chrono::duration<double>(1.0 / publish_rate_hz_),
             [this]() { onTimer(); });
-        RCLCPP_INFO(get_logger(), "R2 safety stop armed on %s", topic.c_str());
+        RCLCPP_INFO(get_logger(), "R2 safety stop armed on %s",
+                    params.cmd_vel_topic.c_str());
     }
 
     void requestStop() {

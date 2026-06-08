@@ -5,19 +5,49 @@
 #include <cstdlib>
 #include <thread>
 
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct R2EmergencyStopParams
+{
+    std::string cmd_vel_topic = "/cmd_vel";
+    double publish_rate_hz = 30.0;
+    int publish_count = 150;
+    double driver_wait_sec = 4.0;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::R2EmergencyStopParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::R2EmergencyStopParams;
+        return make_descriptor(
+            named(&R2EmergencyStopParams::cmd_vel_topic, "cmd_vel_topic"),
+            named(&R2EmergencyStopParams::publish_rate_hz, "publish_rate_hz"),
+            named(&R2EmergencyStopParams::publish_count, "publish_count"),
+            named(&R2EmergencyStopParams::driver_wait_sec, "driver_wait_sec"));
+    }
+};
+
+}  // namespace rik_sd
+
 class R2EmergencyStopNode : public rclcpp::Node
 {
 public:
     R2EmergencyStopNode() : rclcpp::Node("r2_emergency_stop") {
-        declare_parameter("cmd_vel_topic", "/cmd_vel");
-        declare_parameter("publish_rate_hz", 30.0);
-        declare_parameter("publish_count", 150);
-        declare_parameter("driver_wait_sec", 4.0);
-
-        cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
-        publish_rate_hz_ = get_parameter("publish_rate_hz").as_double();
-        publish_count_ = get_parameter("publish_count").as_int();
-        driver_wait_sec_ = get_parameter("driver_wait_sec").as_double();
+        const auto params = yahboom_alc_bringup::loadDeclaredParameters<
+            yahboom_alc_bringup::R2EmergencyStopParams>(*this);
+        cmd_vel_topic_ = params.cmd_vel_topic;
+        publish_rate_hz_ = params.publish_rate_hz;
+        publish_count_ = params.publish_count;
+        driver_wait_sec_ = params.driver_wait_sec;
         publisher_ =
             create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
     }

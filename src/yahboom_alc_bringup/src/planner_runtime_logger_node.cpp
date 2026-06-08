@@ -14,7 +14,52 @@
 #include <string>
 #include <utility>
 
+#include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct PlannerRuntimeLoggerParams
+{
+    std::string log_dir = "planner-log";
+    double snapshot_period_sec = 2.0;
+    std::string event_topic = "/planner/events";
+    std::string map_topic = "/map";
+    std::string nav_cmd_topic = "/alc/nav_cmd_vel";
+    std::string driver_cmd_topic = "/cmd_vel";
+    std::string global_frame = "map";
+    std::string robot_frame = "base_footprint";
+    int occupied_threshold = 50;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::PlannerRuntimeLoggerParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::PlannerRuntimeLoggerParams;
+        return make_descriptor(
+            named(&PlannerRuntimeLoggerParams::log_dir, "log_dir"),
+            named(&PlannerRuntimeLoggerParams::snapshot_period_sec,
+                  "snapshot_period_sec"),
+            named(&PlannerRuntimeLoggerParams::event_topic, "event_topic"),
+            named(&PlannerRuntimeLoggerParams::map_topic, "map_topic"),
+            named(&PlannerRuntimeLoggerParams::nav_cmd_topic, "nav_cmd_topic"),
+            named(&PlannerRuntimeLoggerParams::driver_cmd_topic,
+                  "driver_cmd_topic"),
+            named(&PlannerRuntimeLoggerParams::global_frame, "global_frame"),
+            named(&PlannerRuntimeLoggerParams::robot_frame, "robot_frame"),
+            named(&PlannerRuntimeLoggerParams::occupied_threshold,
+                  "occupied_threshold"));
+    }
+};
+
+}  // namespace rik_sd
 
 namespace yahboom_alc_bringup
 {
@@ -72,40 +117,28 @@ public:
         : rclcpp::Node("planner_runtime_logger", options),
           tf_buffer_(get_clock()),
           tf_listener_(tf_buffer_) {
-        declare_parameter("log_dir", "planner-log");
-        declare_parameter("snapshot_period_sec", 2.0);
-        declare_parameter("event_topic", "/planner/events");
-        declare_parameter("map_topic", "/map");
-        declare_parameter("nav_cmd_topic", "/alc/nav_cmd_vel");
-        declare_parameter("driver_cmd_topic", "/cmd_vel");
-        declare_parameter("global_frame", "map");
-        declare_parameter("robot_frame", "base_footprint");
-        declare_parameter("occupied_threshold", 50);
+        const auto params =
+            loadDeclaredParameters<PlannerRuntimeLoggerParams>(*this);
+        global_frame_ = params.global_frame;
+        robot_frame_ = params.robot_frame;
+        occupied_threshold_ = params.occupied_threshold;
+        writer_ = std::make_unique<PlannerLogWriter>(params.log_dir);
 
-        global_frame_ = get_parameter("global_frame").as_string();
-        robot_frame_ = get_parameter("robot_frame").as_string();
-        occupied_threshold_ = get_parameter("occupied_threshold").as_int();
-        writer_ = std::make_unique<PlannerLogWriter>(
-            get_parameter("log_dir").as_string());
-
-        writer_->write(
-            {{"type", "run_start"},
-             {"time_sec", rounded(nowSec())},
-             {"snapshot_period_sec",
-              get_parameter("snapshot_period_sec").as_double()},
-             {"nav_cmd_topic", get_parameter("nav_cmd_topic").as_string()},
-             {"driver_cmd_topic",
-              get_parameter("driver_cmd_topic").as_string()}});
+        writer_->write({{"type", "run_start"},
+                        {"time_sec", rounded(nowSec())},
+                        {"snapshot_period_sec", params.snapshot_period_sec},
+                        {"nav_cmd_topic", params.nav_cmd_topic},
+                        {"driver_cmd_topic", params.driver_cmd_topic}});
 
         create_subscription<std_msgs::msg::String>(
-            get_parameter("event_topic").as_string(), 10,
+            params.event_topic, 10,
             [this](const std_msgs::msg::String::SharedPtr msg) {
                 onEvent(*msg);
             });
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
         map_qos.reliable().transient_local();
         create_subscription<nav_msgs::msg::OccupancyGrid>(
-            get_parameter("map_topic").as_string(), map_qos,
+            params.map_topic, map_qos,
             [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
                 latest_map_ = *msg;
                 map_time_ = get_clock()->now();
@@ -113,13 +146,13 @@ public:
         rclcpp::QoS cmd_qos{rclcpp::KeepLast(10)};
         cmd_qos.best_effort();
         create_subscription<geometry_msgs::msg::Twist>(
-            get_parameter("nav_cmd_topic").as_string(), cmd_qos,
+            params.nav_cmd_topic, cmd_qos,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
                 latest_nav_cmd_ = summarizeTwist(*msg);
                 nav_cmd_time_ = get_clock()->now();
             });
         create_subscription<geometry_msgs::msg::Twist>(
-            get_parameter("driver_cmd_topic").as_string(), cmd_qos,
+            params.driver_cmd_topic, cmd_qos,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
                 latest_driver_cmd_ = summarizeTwist(*msg);
                 driver_cmd_time_ = get_clock()->now();
@@ -133,8 +166,7 @@ public:
             });
 
         timer_ = create_wall_timer(
-            std::chrono::duration<double>(
-                get_parameter("snapshot_period_sec").as_double()),
+            std::chrono::duration<double>(params.snapshot_period_sec),
             [this]() { writeSnapshot(); });
         RCLCPP_INFO(get_logger(), "Planner runtime log: %s",
                     writer_->path().c_str());

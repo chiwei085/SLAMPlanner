@@ -583,6 +583,117 @@ ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
     return result;
 }
 
+std::optional<PathProjection> FrontierExplorerCore::projectOntoPath(
+    const WorldPoint& point, const std::vector<Cell>& path) const {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    if (path.size() == 1) {
+        const auto xy =
+            mapToWorldUnchecked(path.front().first, path.front().second);
+        return PathProjection{
+            std::hypot(point.first - xy.first, point.second - xy.second), 0.0};
+    }
+
+    std::optional<PathProjection> best;
+    double arc_before = 0.0;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const auto a =
+            mapToWorldUnchecked(path[i - 1].first, path[i - 1].second);
+        const auto b = mapToWorldUnchecked(path[i].first, path[i].second);
+        const double dx = b.first - a.first;
+        const double dy = b.second - a.second;
+        const double len_sq = dx * dx + dy * dy;
+        if (len_sq <= 1e-12) {
+            continue;
+        }
+        const double len = std::sqrt(len_sq);
+        const double raw_t =
+            ((point.first - a.first) * dx + (point.second - a.second) * dy) /
+            len_sq;
+        const double t = std::clamp(raw_t, 0.0, 1.0);
+        const double px = a.first + t * dx;
+        const double py = a.second + t * dy;
+        const double dist = std::hypot(point.first - px, point.second - py);
+        const double arc = arc_before + t * len;
+        if (!best || dist < best->distance ||
+            (std::abs(dist - best->distance) <= 1e-9 &&
+             arc < best->arc_length)) {
+            best = PathProjection{dist, arc};
+        }
+        arc_before += len;
+    }
+    return best;
+}
+
+std::vector<FrontierCandidate> FrontierExplorerCore::buildSubgoalsForRoute(
+    const FrontierCandidate& final_candidate,
+    const std::vector<FrontierCandidate>& candidates) const {
+    if (!config_.enable_subgoals || config_.max_subgoals <= 0 ||
+        final_candidate.path.empty()) {
+        return {};
+    }
+
+    struct ProjectedCandidate
+    {
+        FrontierCandidate candidate;
+        double arc_length = 0.0;
+    };
+    std::vector<ProjectedCandidate> accepted;
+    const auto spaced_from_accepted = [&](const WorldPoint& xy) {
+        if (std::hypot(xy.first - final_candidate.goal_xy.first,
+                       xy.second - final_candidate.goal_xy.second) <
+            config_.min_subgoal_spacing_m) {
+            return false;
+        }
+        return std::all_of(
+            accepted.begin(), accepted.end(), [&](const auto& subgoal) {
+                return std::hypot(
+                           xy.first - subgoal.candidate.goal_xy.first,
+                           xy.second - subgoal.candidate.goal_xy.second) >=
+                       config_.min_subgoal_spacing_m;
+            });
+    };
+
+    for (const auto& candidate : candidates) {
+        if (accepted.size() >= static_cast<std::size_t>(config_.max_subgoals)) {
+            break;
+        }
+        if (candidate.score < final_candidate.score) {
+            continue;
+        }
+        if (std::hypot(candidate.goal_xy.first - final_candidate.goal_xy.first,
+                       candidate.goal_xy.second -
+                           final_candidate.goal_xy.second) < 1e-6) {
+            continue;
+        }
+        if (isBlacklisted(candidate.goal_xy)) {
+            continue;
+        }
+        const auto projection =
+            projectOntoPath(candidate.goal_xy, final_candidate.path);
+        if (!projection ||
+            projection->distance > config_.subgoal_path_tolerance_m) {
+            continue;
+        }
+        if (!spaced_from_accepted(candidate.goal_xy)) {
+            continue;
+        }
+        accepted.push_back({candidate, projection->arc_length});
+    }
+
+    std::sort(accepted.begin(), accepted.end(),
+              [](const auto& a, const auto& b) {
+                  return a.arc_length < b.arc_length;
+              });
+    std::vector<FrontierCandidate> subgoals;
+    subgoals.reserve(accepted.size());
+    for (auto& subgoal : accepted) {
+        subgoals.push_back(std::move(subgoal.candidate));
+    }
+    return subgoals;
+}
+
 WorldPoint FrontierExplorerCore::clusterAxis(
     const std::vector<Cell>& cluster) const {
     if (cluster.size() < 2) {

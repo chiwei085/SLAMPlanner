@@ -9,6 +9,43 @@
 #include <string>
 #include <thread>
 
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct R2SafeDriverParams
+{
+    std::string cmd_vel_topic = "/cmd_vel";
+    int stop_publish_count = 30;
+    double stop_publish_period_sec = 0.02;
+    std::string driver_package = "yahboomcar_bringup";
+    std::string driver_executable = "Ackman_driver_R2";
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::R2SafeDriverParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::R2SafeDriverParams;
+        return make_descriptor(
+            named(&R2SafeDriverParams::cmd_vel_topic, "cmd_vel_topic"),
+            named(&R2SafeDriverParams::stop_publish_count,
+                  "stop_publish_count"),
+            named(&R2SafeDriverParams::stop_publish_period_sec,
+                  "stop_publish_period_sec"),
+            named(&R2SafeDriverParams::driver_package, "driver_package"),
+            named(&R2SafeDriverParams::driver_executable, "driver_executable"));
+    }
+};
+
+}  // namespace rik_sd
+
 namespace
 {
 
@@ -22,18 +59,13 @@ class R2SafeDriverSupervisor : public rclcpp::Node
 {
 public:
     R2SafeDriverSupervisor() : rclcpp::Node("r2_safe_driver") {
-        declare_parameter("cmd_vel_topic", "/cmd_vel");
-        declare_parameter("stop_publish_count", 30);
-        declare_parameter("stop_publish_period_sec", 0.02);
-        declare_parameter("driver_package", "yahboomcar_bringup");
-        declare_parameter("driver_executable", "Ackman_driver_R2");
-
-        cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
-        stop_publish_count_ = get_parameter("stop_publish_count").as_int();
-        stop_publish_period_sec_ =
-            get_parameter("stop_publish_period_sec").as_double();
-        driver_package_ = get_parameter("driver_package").as_string();
-        driver_executable_ = get_parameter("driver_executable").as_string();
+        const auto params = yahboom_alc_bringup::loadDeclaredParameters<
+            yahboom_alc_bringup::R2SafeDriverParams>(*this);
+        cmd_vel_topic_ = params.cmd_vel_topic;
+        stop_publish_count_ = params.stop_publish_count;
+        stop_publish_period_sec_ = params.stop_publish_period_sec;
+        driver_package_ = params.driver_package;
+        driver_executable_ = params.driver_executable;
         publisher_ =
             create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
     }

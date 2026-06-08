@@ -11,6 +11,53 @@
 #include <string>
 
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct SimpleFrontierExplorerParams
+{
+    bool enabled = true;
+    std::string map_topic = "/map";
+    std::string robot_frame = "base_footprint";
+    std::string global_frame = "map";
+    double cycle_period_sec = 5.0;
+    double min_goal_distance = 0.45;
+    double max_goal_distance = 3.0;
+    int frontier_stride = 3;
+    int occupied_threshold = 50;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::SimpleFrontierExplorerParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::SimpleFrontierExplorerParams;
+        return make_descriptor(
+            named(&SimpleFrontierExplorerParams::enabled, "enabled"),
+            named(&SimpleFrontierExplorerParams::map_topic, "map_topic"),
+            named(&SimpleFrontierExplorerParams::robot_frame, "robot_frame"),
+            named(&SimpleFrontierExplorerParams::global_frame, "global_frame"),
+            named(&SimpleFrontierExplorerParams::cycle_period_sec,
+                  "cycle_period_sec"),
+            named(&SimpleFrontierExplorerParams::min_goal_distance,
+                  "min_goal_distance"),
+            named(&SimpleFrontierExplorerParams::max_goal_distance,
+                  "max_goal_distance"),
+            named(&SimpleFrontierExplorerParams::frontier_stride,
+                  "frontier_stride"),
+            named(&SimpleFrontierExplorerParams::occupied_threshold,
+                  "occupied_threshold"));
+    }
+};
+
+}  // namespace rik_sd
 
 namespace
 {
@@ -26,6 +73,7 @@ geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
 
 using yahboom_alc_bringup::FrontierConfig;
 using yahboom_alc_bringup::FrontierExplorerCore;
+using yahboom_alc_bringup::SimpleFrontierExplorerParams;
 using yahboom_alc_bringup::WorldPoint;
 
 class SimpleFrontierExplorerNode : public rclcpp::Node
@@ -41,27 +89,19 @@ public:
           tf_listener_(tf_buffer_),
           nav_client_(rclcpp_action::create_client<NavigateToPose>(
               this, "/navigate_to_pose")) {
-        declare_parameter("enabled", true);
-        declare_parameter("map_topic", "/map");
-        declare_parameter("robot_frame", "base_footprint");
-        declare_parameter("global_frame", "map");
-        declare_parameter("cycle_period_sec", 5.0);
-        declare_parameter("min_goal_distance", 0.45);
-        declare_parameter("max_goal_distance", 3.0);
-        declare_parameter("frontier_stride", 3);
-        declare_parameter("occupied_threshold", 50);
+        const auto params = yahboom_alc_bringup::loadDeclaredParameters<
+            SimpleFrontierExplorerParams>(*this);
 
-        enabled_ = get_parameter("enabled").as_bool();
-        map_topic_ = get_parameter("map_topic").as_string();
-        robot_frame_ = get_parameter("robot_frame").as_string();
-        global_frame_ = get_parameter("global_frame").as_string();
-        min_goal_distance_ = get_parameter("min_goal_distance").as_double();
-        max_goal_distance_ = get_parameter("max_goal_distance").as_double();
-        frontier_stride_ = std::max(
-            1, static_cast<int>(get_parameter("frontier_stride").as_int()));
+        enabled_ = params.enabled;
+        map_topic_ = params.map_topic;
+        robot_frame_ = params.robot_frame;
+        global_frame_ = params.global_frame;
+        min_goal_distance_ = params.min_goal_distance;
+        max_goal_distance_ = params.max_goal_distance;
+        frontier_stride_ = std::max(1, params.frontier_stride);
 
         FrontierConfig cfg;
-        cfg.occupied_threshold = get_parameter("occupied_threshold").as_int();
+        cfg.occupied_threshold = params.occupied_threshold;
         core_.setConfig(cfg);
 
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
@@ -73,8 +113,7 @@ public:
                 has_map_ = true;
             });
         timer_ = create_wall_timer(
-            std::chrono::duration<double>(
-                get_parameter("cycle_period_sec").as_double()),
+            std::chrono::duration<double>(params.cycle_period_sec),
             [this]() { onTimer(); });
     }
 

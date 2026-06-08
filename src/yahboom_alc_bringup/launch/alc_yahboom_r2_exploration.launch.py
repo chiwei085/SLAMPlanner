@@ -138,6 +138,13 @@ def launch_frontier_explorer(context, *args, **kwargs):
                         "failed_goal_blacklist_radius_m": 0.45,
                         "failed_goal_blacklist_sec": 60.0,
                         "failed_goal_max_retries": 1,
+                        "enable_subgoals": True,
+                        "max_subgoals": 3,
+                        "subgoal_path_tolerance_m": 0.30,
+                        "min_subgoal_spacing_m": 0.45,
+                        "nav2_validation_enabled": True,
+                        "nav2_validation_timeout_sec": 2.0,
+                        "nav2_compute_path_action": "/compute_path_to_pose",
                         "marker_topic": "/waypoints",
                         "goal_marker_topic": "/frontier_goal_marker",
                     }

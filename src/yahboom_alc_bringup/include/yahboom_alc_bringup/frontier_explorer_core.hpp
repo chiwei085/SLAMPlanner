@@ -46,6 +46,10 @@ struct FrontierConfig
     double failed_goal_blacklist_radius_m = 0.45;
     double failed_goal_blacklist_sec = 60.0;
     int failed_goal_max_retries = 1;
+    bool enable_subgoals = true;
+    int max_subgoals = 3;
+    double subgoal_path_tolerance_m = 0.30;
+    double min_subgoal_spacing_m = 0.45;
 };
 
 struct FrontierCounts
@@ -108,6 +112,12 @@ struct FrontierCandidate
     double score = 0.0;
 };
 
+struct PathProjection
+{
+    double distance = 0.0;
+    double arc_length = 0.0;
+};
+
 struct CandidateResult
 {
     std::vector<FrontierCandidate> candidates;
@@ -158,6 +168,11 @@ public:
     ObstacleNeighborhood analyzeObstacleNeighborhood(const Cell& cell,
                                                      int width,
                                                      int height) const;
+    std::optional<PathProjection> projectOntoPath(
+        const WorldPoint& point, const std::vector<Cell>& path) const;
+    std::vector<FrontierCandidate> buildSubgoalsForRoute(
+        const FrontierCandidate& final_candidate,
+        const std::vector<FrontierCandidate>& candidates) const;
     WorldPoint clusterAxis(const std::vector<Cell>& cluster) const;
     double corridorProgress(const WorldPoint& start_xy,
                             const WorldPoint& goal_xy,

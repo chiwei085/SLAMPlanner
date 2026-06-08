@@ -3,7 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <type_traits>
+
+#include "yahboom_alc_bringup/parameter_loader.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -88,31 +89,7 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
 }
 
 R2CmdVelBridgeConfig R2CmdVelBridgeNode::loadConfig() {
-    R2CmdVelBridgeConfig config;
-
-    rik_sd::for_each(config, [this](const auto& field, auto& value) {
-        const auto& core = rik_sd::core_field(field);
-        const std::string parameter_name{core.name_sv()};
-        declare_parameter(parameter_name, value);
-
-        const auto parameter = get_parameter(parameter_name);
-        using value_t = rik_sd::remove_cvref_t<decltype(value)>;
-        if constexpr (std::is_same_v<value_t, std::string>) {
-            value = parameter.as_string();
-        }
-        else if constexpr (std::is_same_v<value_t, double>) {
-            value = parameter.as_double();
-        }
-        else if constexpr (std::is_same_v<value_t, bool>) {
-            value = parameter.as_bool();
-        }
-        else {
-            static_assert(sizeof(value_t) == 0,
-                          "Unsupported R2CmdVelBridgeConfig field type");
-        }
-    });
-
-    return config;
+    return loadDeclaredParameters<R2CmdVelBridgeConfig>(*this);
 }
 
 void R2CmdVelBridgeNode::onCmdVel(

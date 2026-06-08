@@ -56,9 +56,26 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.failed_goal_blacklist_radius_m = 0.45;
     config.failed_goal_blacklist_sec = 60.0;
     config.failed_goal_max_retries = 1;
+    config.enable_subgoals = true;
+    config.max_subgoals = 3;
+    config.subgoal_path_tolerance_m = 0.30;
+    config.min_subgoal_spacing_m = 0.45;
     FrontierExplorerCore core(config);
     core.setMap(grid);
     return core;
+}
+
+FrontierCandidate makeCandidateAt(FrontierExplorerCore& core, const int x,
+                                  const int y, const double score) {
+    FrontierCandidate candidate;
+    candidate.goal_cell = {x, y};
+    candidate.goal_xy = core.mapToWorld(x, y);
+    candidate.goal_yaw = 0.0;
+    candidate.path = {{2, 5}, {x, y}};
+    candidate.path_length = core.pathLength(candidate.path);
+    candidate.reachable = true;
+    candidate.score = score;
+    return candidate;
 }
 
 TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
@@ -341,6 +358,105 @@ TEST(ClusterFrontierExplorer, NewUnknownRatioThresholdFindsCandidates) {
     if (!result.candidates.empty()) {
         EXPECT_GE(result.candidates.front().path_length, 0.45);
     }
+}
+
+TEST(ClusterFrontierExplorer, ProjectsPointOntoBfsPolylineInWorldMeters) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const std::vector<Cell> path{{2, 5}, {8, 5}, {8, 10}};
+
+    const auto near_first_segment =
+        core.projectOntoPath(core.mapToWorld(5, 7), path);
+    const auto near_second_segment =
+        core.projectOntoPath(core.mapToWorld(10, 8), path);
+
+    ASSERT_TRUE(near_first_segment);
+    EXPECT_NEAR(near_first_segment->distance, 0.2, 1e-6);
+    EXPECT_NEAR(near_first_segment->arc_length, 0.3, 1e-6);
+    ASSERT_TRUE(near_second_segment);
+    EXPECT_NEAR(near_second_segment->distance, 0.2, 1e-6);
+    EXPECT_NEAR(near_second_segment->arc_length, 0.9, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, BuildsSubgoalsNearBfsPathOnly) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.subgoal_path_tolerance_m = 0.21;
+    config.min_subgoal_spacing_m = 0.3;
+    core.setConfig(config);
+
+    auto final_goal = makeCandidateAt(core, 18, 5, 1.0);
+    final_goal.path = {{2, 5}, {18, 5}};
+    auto near_path = makeCandidateAt(core, 8, 6, 2.0);
+    auto off_path = makeCandidateAt(core, 10, 9, 3.0);
+    const std::vector<FrontierCandidate> candidates{final_goal, off_path,
+                                                    near_path};
+
+    const auto subgoals = core.buildSubgoalsForRoute(final_goal, candidates);
+
+    ASSERT_EQ(subgoals.size(), 1u);
+    EXPECT_EQ(subgoals.front().goal_cell, near_path.goal_cell);
+}
+
+TEST(ClusterFrontierExplorer, SortsAcceptedSubgoalsByBfsArcLength) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.subgoal_path_tolerance_m = 0.2;
+    config.min_subgoal_spacing_m = 0.2;
+    core.setConfig(config);
+
+    auto final_goal = makeCandidateAt(core, 18, 5, 1.0);
+    final_goal.path = {{2, 5}, {18, 5}};
+    auto later = makeCandidateAt(core, 14, 5, 2.0);
+    auto earlier = makeCandidateAt(core, 6, 5, 3.0);
+
+    const auto subgoals =
+        core.buildSubgoalsForRoute(final_goal, {final_goal, later, earlier});
+
+    ASSERT_EQ(subgoals.size(), 2u);
+    EXPECT_EQ(subgoals[0].goal_cell, earlier.goal_cell);
+    EXPECT_EQ(subgoals[1].goal_cell, later.goal_cell);
+}
+
+TEST(ClusterFrontierExplorer, EnforcesSubgoalSpacingAndLimit) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.max_subgoals = 2;
+    config.subgoal_path_tolerance_m = 0.2;
+    config.min_subgoal_spacing_m = 0.45;
+    core.setConfig(config);
+
+    auto final_goal = makeCandidateAt(core, 24, 5, 1.0);
+    final_goal.path = {{2, 5}, {24, 5}};
+    auto first = makeCandidateAt(core, 6, 5, 2.0);
+    auto duplicate = makeCandidateAt(core, 8, 5, 3.0);
+    auto second = makeCandidateAt(core, 13, 5, 4.0);
+    auto over_limit = makeCandidateAt(core, 19, 5, 5.0);
+
+    const auto subgoals = core.buildSubgoalsForRoute(
+        final_goal, {final_goal, first, duplicate, second, over_limit});
+
+    ASSERT_EQ(subgoals.size(), 2u);
+    EXPECT_EQ(subgoals[0].goal_cell, first.goal_cell);
+    EXPECT_EQ(subgoals[1].goal_cell, second.goal_cell);
+}
+
+TEST(ClusterFrontierExplorer, ProgressRequiresBfsArcAdvance) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    const std::vector<Cell> path{{2, 5}, {20, 5}};
+    const auto start = core.projectOntoPath(core.mapToWorld(3, 5), path);
+    const auto forward = core.projectOntoPath(core.mapToWorld(5, 5), path);
+    const auto lateral = core.projectOntoPath(core.mapToWorld(3, 8), path);
+
+    ASSERT_TRUE(start);
+    ASSERT_TRUE(forward);
+    ASSERT_TRUE(lateral);
+    EXPECT_GE(forward->arc_length - start->arc_length, 0.12);
+    EXPECT_LT(std::abs(lateral->arc_length - start->arc_length), 1e-6);
 }
 
 }  // namespace
