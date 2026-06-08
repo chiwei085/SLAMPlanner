@@ -28,6 +28,7 @@ struct PlannerRuntimeLoggerParams
     std::string map_topic = "/map";
     std::string nav_cmd_topic = "/alc/nav_cmd_vel";
     std::string driver_cmd_topic = "/cmd_vel";
+    std::string navigate_status_topic = "/navigate_to_pose/_action/status";
     std::string global_frame = "map";
     std::string robot_frame = "base_footprint";
     int occupied_threshold = 50;
@@ -52,6 +53,8 @@ struct descriptor<yahboom_alc_bringup::PlannerRuntimeLoggerParams>
             named(&PlannerRuntimeLoggerParams::nav_cmd_topic, "nav_cmd_topic"),
             named(&PlannerRuntimeLoggerParams::driver_cmd_topic,
                   "driver_cmd_topic"),
+            named(&PlannerRuntimeLoggerParams::navigate_status_topic,
+                  "navigate_status_topic"),
             named(&PlannerRuntimeLoggerParams::global_frame, "global_frame"),
             named(&PlannerRuntimeLoggerParams::robot_frame, "robot_frame"),
             named(&PlannerRuntimeLoggerParams::occupied_threshold,
@@ -124,46 +127,50 @@ public:
         occupied_threshold_ = params.occupied_threshold;
         writer_ = std::make_unique<PlannerLogWriter>(params.log_dir);
 
-        writer_->write({{"type", "run_start"},
-                        {"time_sec", rounded(nowSec())},
-                        {"snapshot_period_sec", params.snapshot_period_sec},
-                        {"nav_cmd_topic", params.nav_cmd_topic},
-                        {"driver_cmd_topic", params.driver_cmd_topic}});
+        writer_->write(runStartJson(
+            nowSec(), params.snapshot_period_sec,
+            {params.event_topic, params.map_topic, params.nav_cmd_topic,
+             params.driver_cmd_topic, params.navigate_status_topic}));
 
-        create_subscription<std_msgs::msg::String>(
+        event_sub_ = create_subscription<std_msgs::msg::String>(
             params.event_topic, 10,
             [this](const std_msgs::msg::String::SharedPtr msg) {
                 onEvent(*msg);
             });
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
         map_qos.reliable().transient_local();
-        create_subscription<nav_msgs::msg::OccupancyGrid>(
+        map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             params.map_topic, map_qos,
             [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
                 latest_map_ = *msg;
                 map_time_ = get_clock()->now();
+                ++map_message_count_;
             });
         rclcpp::QoS cmd_qos{rclcpp::KeepLast(10)};
         cmd_qos.best_effort();
-        create_subscription<geometry_msgs::msg::Twist>(
+        nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.nav_cmd_topic, cmd_qos,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
                 latest_nav_cmd_ = summarizeTwist(*msg);
                 nav_cmd_time_ = get_clock()->now();
+                ++nav_cmd_message_count_;
             });
-        create_subscription<geometry_msgs::msg::Twist>(
+        driver_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.driver_cmd_topic, cmd_qos,
             [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
                 latest_driver_cmd_ = summarizeTwist(*msg);
                 driver_cmd_time_ = get_clock()->now();
+                ++driver_cmd_message_count_;
             });
-        create_subscription<action_msgs::msg::GoalStatusArray>(
-            "/navigate_to_pose/_action/status", 10,
-            [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
-                detectStatusChanges(*msg);
-                latest_status_ = *msg;
-                status_time_ = get_clock()->now();
-            });
+        navigate_status_sub_ =
+            create_subscription<action_msgs::msg::GoalStatusArray>(
+                params.navigate_status_topic, 10,
+                [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
+                    detectStatusChanges(*msg);
+                    latest_status_ = *msg;
+                    status_time_ = get_clock()->now();
+                    ++status_message_count_;
+                });
 
         timer_ = create_wall_timer(
             std::chrono::duration<double>(params.snapshot_period_sec),
@@ -193,6 +200,8 @@ private:
     }
 
     void onEvent(const std_msgs::msg::String& msg) {
+        event_time_ = get_clock()->now();
+        ++event_message_count_;
         nlohmann::json payload;
         try {
             payload = nlohmann::json::parse(msg.data);
@@ -237,6 +246,7 @@ private:
                    {{"twist", twistSummaryJson(latest_driver_cmd_)},
                     {"age_sec", ageJson(driver_cmd_time_, now)}}}}},
                 {"navigate_to_pose", statusSummary(now)},
+                {"sources", sourceSummary(now)},
                 {"tf", tfToJson(tf)},
                 {"total_distance_m", rounded(total_distance_m_)}};
     }
@@ -271,6 +281,23 @@ private:
         return {{"count", list.size()},
                 {"statuses", statuses},
                 {"age_sec", ageJson(status_time_, now)}};
+    }
+
+    nlohmann::json sourceSummary(const rclcpp::Time& now) const {
+        return sourcesJson(
+            sourceHealth(event_message_count_, event_time_, now),
+            sourceHealth(map_message_count_, map_time_, now),
+            sourceHealth(nav_cmd_message_count_, nav_cmd_time_, now),
+            sourceHealth(driver_cmd_message_count_, driver_cmd_time_, now),
+            sourceHealth(status_message_count_, status_time_, now));
+    }
+
+    SourceHealth sourceHealth(const int message_count,
+                              const std::optional<rclcpp::Time>& stamp,
+                              const rclcpp::Time& now) const {
+        return {message_count,
+                stamp ? std::optional<double>((now - *stamp).seconds())
+                      : std::nullopt};
     }
 
     nlohmann::json tfToJson(const TFResult& tf) const {
@@ -332,12 +359,24 @@ private:
     std::optional<rclcpp::Time> nav_cmd_time_;
     std::optional<rclcpp::Time> driver_cmd_time_;
     std::optional<rclcpp::Time> status_time_;
+    std::optional<rclcpp::Time> event_time_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr driver_cmd_sub_;
+    rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr
+        navigate_status_sub_;
 
     std::optional<int> last_free_cells_;
     double total_distance_m_ = 0.0;
     std::optional<std::pair<double, double>> last_robot_xy_;
     std::map<std::array<uint8_t, 16>, int8_t> known_nav_statuses_;
+    int event_message_count_ = 0;
+    int map_message_count_ = 0;
+    int nav_cmd_message_count_ = 0;
+    int driver_cmd_message_count_ = 0;
+    int status_message_count_ = 0;
 };
 
 }  // namespace yahboom_alc_bringup

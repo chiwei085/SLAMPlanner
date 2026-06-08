@@ -52,6 +52,38 @@ nlohmann::json twistSummaryJson(const TwistSummary& twist) {
                           {"angular_z", rounded(twist.angular_z, 4)}};
 }
 
+nlohmann::json sourceHealthJson(const SourceHealth& health) {
+    return {
+        {"seen", health.message_count > 0},
+        {"message_count", health.message_count},
+        {"age_sec", health.age_sec ? nlohmann::json(rounded(*health.age_sec))
+                                   : nlohmann::json(nullptr)}};
+}
+
+nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
+                           const SourceHealth& nav_cmd,
+                           const SourceHealth& driver_cmd,
+                           const SourceHealth& navigate_status) {
+    return {{"event", sourceHealthJson(event)},
+            {"map", sourceHealthJson(map)},
+            {"nav_cmd", sourceHealthJson(nav_cmd)},
+            {"driver_cmd", sourceHealthJson(driver_cmd)},
+            {"navigate_status", sourceHealthJson(navigate_status)}};
+}
+
+nlohmann::json runStartJson(const double time_sec,
+                            const double snapshot_period_sec,
+                            const LoggerTopics& topics) {
+    return {{"type", "run_start"},
+            {"time_sec", rounded(time_sec)},
+            {"snapshot_period_sec", snapshot_period_sec},
+            {"event_topic", topics.event_topic},
+            {"map_topic", topics.map_topic},
+            {"nav_cmd_topic", topics.nav_cmd_topic},
+            {"driver_cmd_topic", topics.driver_cmd_topic},
+            {"navigate_status_topic", topics.navigate_status_topic}};
+}
+
 std::string makeRunLogName() {
     const auto now = std::chrono::system_clock::now();
     const auto time = std::chrono::system_clock::to_time_t(now);

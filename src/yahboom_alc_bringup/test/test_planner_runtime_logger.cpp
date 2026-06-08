@@ -64,5 +64,73 @@ TEST(PlannerRuntimeLogger, MapAndTwistHelpersAreCompact) {
     EXPECT_DOUBLE_EQ(twist_json[std::string("angular_z")], 0.9877);
 }
 
+TEST(PlannerRuntimeLogger, RunStartRecordsAllObservedTopics) {
+    const LoggerTopics topics{"/planner/events", "/map", "/alc/nav_cmd_vel",
+                              "/cmd_vel", "/navigate_to_pose/_action/status"};
+
+    const auto record = runStartJson(12.3456, 2.0, topics);
+
+    EXPECT_EQ(record[std::string("type")].dump(), "\"run_start\"");
+    EXPECT_DOUBLE_EQ(record[std::string("time_sec")], 12.346);
+    EXPECT_DOUBLE_EQ(record[std::string("snapshot_period_sec")], 2.0);
+    EXPECT_EQ(record[std::string("event_topic")].dump(), "\"/planner/events\"");
+    EXPECT_EQ(record[std::string("map_topic")].dump(), "\"/map\"");
+    EXPECT_EQ(record[std::string("nav_cmd_topic")].dump(),
+              "\"/alc/nav_cmd_vel\"");
+    EXPECT_EQ(record[std::string("driver_cmd_topic")].dump(), "\"/cmd_vel\"");
+    EXPECT_EQ(record[std::string("navigate_status_topic")].dump(),
+              "\"/navigate_to_pose/_action/status\"");
+}
+
+TEST(PlannerRuntimeLogger,
+     SourcesReportUnseenInputsWithoutChangingNullPayloads) {
+    const auto sources = sourcesJson({}, {}, {}, {}, {});
+    const nlohmann::json snapshot = {
+        {"type", "snapshot"},
+        {"map", nullptr},
+        {"commands",
+         {{"nav", {{"twist", nullptr}, {"age_sec", nullptr}}},
+          {"driver", {{"twist", nullptr}, {"age_sec", nullptr}}}}},
+        {"sources", sources}};
+
+    EXPECT_EQ(snapshot[std::string("map")].dump(), "null");
+    EXPECT_EQ(snapshot[std::string("commands")][std::string("nav")]
+                      [std::string("twist")]
+                          .dump(),
+              "null");
+    EXPECT_EQ(snapshot[std::string("sources")][std::string("map")]
+                      [std::string("seen")]
+                          .dump(),
+              "false");
+    EXPECT_EQ(snapshot[std::string("sources")][std::string("map")]
+                      [std::string("message_count")],
+              0);
+    EXPECT_EQ(snapshot[std::string("sources")][std::string("nav_cmd")]
+                      [std::string("age_sec")]
+                          .dump(),
+              "null");
+}
+
+TEST(PlannerRuntimeLogger, SourcesReportReceivedMapAndTwistInputs) {
+    const auto sources =
+        sourcesJson({}, SourceHealth{2, 0.125}, SourceHealth{3, 1.2345},
+                    SourceHealth{4, 2.0}, {});
+
+    EXPECT_EQ(sources[std::string("map")][std::string("seen")].dump(), "true");
+    EXPECT_EQ(sources[std::string("map")][std::string("message_count")], 2);
+    EXPECT_DOUBLE_EQ(sources[std::string("map")][std::string("age_sec")],
+                     0.125);
+    EXPECT_EQ(sources[std::string("nav_cmd")][std::string("seen")].dump(),
+              "true");
+    EXPECT_EQ(sources[std::string("nav_cmd")][std::string("message_count")], 3);
+    EXPECT_DOUBLE_EQ(sources[std::string("nav_cmd")][std::string("age_sec")],
+                     1.235);
+    EXPECT_EQ(sources[std::string("driver_cmd")][std::string("seen")].dump(),
+              "true");
+    EXPECT_EQ(
+        sources[std::string("navigate_status")][std::string("age_sec")].dump(),
+        "null");
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

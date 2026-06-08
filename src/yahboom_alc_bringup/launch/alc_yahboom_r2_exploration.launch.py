@@ -190,6 +190,7 @@ def generate_launch_description():
     planner_log_dir = LaunchConfiguration("planner_log_dir")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
     driver_cmd_vel_topic = LaunchConfiguration("driver_cmd_vel_topic")
+    navigate_status_topic = LaunchConfiguration("navigate_status_topic")
 
     robot_description = ParameterValue(
         Command(["xacro ", LaunchConfiguration("model")]), value_type=str
@@ -412,6 +413,7 @@ def generate_launch_description():
                 "map_topic": "/map",
                 "nav_cmd_topic": nav_cmd_vel_topic,
                 "driver_cmd_topic": driver_cmd_vel_topic,
+                "navigate_status_topic": navigate_status_topic,
                 "global_frame": "map",
                 "robot_frame": "base_footprint",
                 "snapshot_period_sec": 2.0,
@@ -550,6 +552,11 @@ def generate_launch_description():
                 "driver_cmd_vel_topic",
                 default_value="/cmd_vel",
                 description="Topic consumed by the Yahboom R2 driver.",
+            ),
+            DeclareLaunchArgument(
+                "navigate_status_topic",
+                default_value="/navigate_to_pose/_action/status",
+                description="NavigateToPose action status topic observed by the runtime logger.",
             ),
             joint_state_publisher,
             robot_state_publisher,
