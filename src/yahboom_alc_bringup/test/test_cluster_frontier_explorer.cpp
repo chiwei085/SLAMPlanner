@@ -50,9 +50,14 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.wall_clearance_m = 0.22;
     config.corner_penalty_weight = 1.0;
     config.corridor_progress_weight = 0.4;
+    config.heading_penalty_weight = 0.0;
+    config.heading_penalty_max_rad = 3.141592653589793;
     config.goal_timeout_sec = 45.0;
     config.stuck_progress_radius_m = 0.12;
     config.stuck_progress_timeout_sec = 12.0;
+    config.near_goal_hysteresis_radius_m = 0.35;
+    config.near_goal_retry_limit = 0;
+    config.near_goal_hysteresis_sec = 0.0;
     config.failed_goal_blacklist_radius_m = 0.45;
     config.failed_goal_blacklist_sec = 60.0;
     config.failed_goal_max_retries = 1;
@@ -266,6 +271,59 @@ TEST(ClusterFrontierExplorer, NearbyFailedGoalsShareRetryCount) {
     ASSERT_EQ(core.goalAttempts().size(), 1u);
     EXPECT_EQ(core.goalAttempts()[0].failures, 2);
     EXPECT_TRUE(core.isBlacklisted(core.mapToWorld(8, 5)));
+}
+
+TEST(ClusterFrontierExplorer, HeadingPenaltyPrefersForwardCandidate) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.heading_penalty_weight = 2.0;
+    config.heading_penalty_max_rad = 3.141592653589793;
+    config.unknown_overlap_weight = 0.0;
+    config.wall_clearance_m = 0.1;
+    core.setConfig(config);
+
+    const Cell start{10, 10};
+    const auto robot_xy = core.mapToWorld(start.first, start.second);
+    FrontierCounts counts;
+    const auto forward = core.makeCandidate(
+        {{15, 10}}, start, robot_xy, std::vector<bool>(grid.data.size(), false),
+        30, 20, counts, 0.0);
+    const auto behind = core.makeCandidate(
+        {{5, 10}}, start, robot_xy, std::vector<bool>(grid.data.size(), false),
+        30, 20, counts, 0.0);
+
+    ASSERT_TRUE(forward);
+    ASSERT_TRUE(behind);
+    EXPECT_LT(forward->heading_delta, behind->heading_delta);
+    EXPECT_LT(forward->score, behind->score);
+}
+
+TEST(ClusterFrontierExplorer, CandidateRejectionCountsIncludeFilters) {
+    auto grid = buildGrid(30, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.min_frontier_distance = 0.45;
+    config.max_frontier_distance = 0.8;
+    config.failed_goal_max_retries = 1;
+    core.setConfig(config);
+    core.goalAttemptsForTest().push_back({core.mapToWorld(8, 2), 1, 60.0});
+
+    const Cell start{10, 10};
+    const auto robot_xy = core.mapToWorld(start.first, start.second);
+    FrontierCounts counts;
+    const std::vector<bool> blocked(grid.data.size(), false);
+
+    EXPECT_FALSE(
+        core.makeCandidate({{8, 2}}, start, robot_xy, blocked, 30, 20, counts));
+    EXPECT_FALSE(core.makeCandidate({{11, 10}}, start, robot_xy, blocked, 30,
+                                    20, counts));
+    EXPECT_FALSE(core.makeCandidate({{25, 10}}, start, robot_xy, blocked, 30,
+                                    20, counts));
+
+    EXPECT_GE(counts.rejected_blacklist, 1);
+    EXPECT_GE(counts.rejected_too_near, 1);
+    EXPECT_GE(counts.rejected_too_far, 1);
 }
 
 TEST(ClusterFrontierExplorer, ShouldPublishGoalHonorsDistanceAndPeriod) {

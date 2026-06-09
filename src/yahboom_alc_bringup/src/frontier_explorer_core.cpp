@@ -12,6 +12,21 @@ namespace yahboom_alc_bringup
 
 namespace
 {
+using yahboom_alc_bringup::WorldPoint;
+
+double yawBetween(const WorldPoint& from, const WorldPoint& to) {
+    return std::atan2(to.second - from.second, to.first - from.first);
+}
+
+double headingDelta(const double from_yaw, const double to_yaw) {
+    constexpr double pi = M_PI;
+    constexpr double two_pi = 2.0 * pi;
+    double delta = std::fmod(to_yaw - from_yaw + pi, two_pi);
+    if (delta < 0.0) {
+        delta += two_pi;
+    }
+    return std::abs(delta - pi);
+}
 }  // namespace
 
 double FootprintCheck::unknownRatio() const {
@@ -32,8 +47,9 @@ void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
     footprint_geometry_.reset();
 }
 
-CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
-                                                     const double now_sec) {
+CandidateResult FrontierExplorerCore::findCandidates(
+    const WorldPoint& robot_xy, const double now_sec,
+    std::optional<double> robot_yaw) {
     CandidateResult result;
     const int width = static_cast<int>(map_.info.width);
     const int height = static_cast<int>(map_.info.height);
@@ -82,7 +98,7 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 
     for (const auto& cluster : clusters) {
         auto candidate = makeCandidate(cluster, *start_cell, robot_xy, blocked,
-                                       width, height, result.counts);
+                                       width, height, result.counts, robot_yaw);
         if (!candidate) {
             continue;
         }
@@ -104,7 +120,8 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
     const std::vector<Cell>& cluster, const Cell& start_cell,
     const WorldPoint& robot_xy, const std::vector<bool>& blocked,
-    const int width, const int height, FrontierCounts& counts) {
+    const int width, const int height, FrontierCounts& counts,
+    std::optional<double> robot_yaw) {
     const auto goal_options =
         goalOptionsForCluster(cluster, blocked, width, height);
     if (goal_options.empty()) {
@@ -120,15 +137,18 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         const auto goal_xy =
             mapToWorldUnchecked(goal_cell.first, goal_cell.second);
         if (isBlacklisted(goal_xy)) {
+            ++counts.rejected_blacklist;
             continue;
         }
         const double goal_distance = std::hypot(
             goal_xy.first - robot_xy.first, goal_xy.second - robot_xy.second);
         if (goal_distance < config_.min_frontier_distance) {
+            ++counts.rejected_too_near;
             continue;
         }
         if (config_.max_frontier_distance > 0.0 &&
             goal_distance > config_.max_frontier_distance) {
+            ++counts.rejected_too_far;
             continue;
         }
 
@@ -179,6 +199,15 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         if (!reachable) {
             score += config_.unreachable_goal_penalty;
         }
+        double heading_delta = 0.0;
+        if (robot_yaw && config_.heading_penalty_weight > 0.0 &&
+            config_.heading_penalty_max_rad > 0.0) {
+            heading_delta = headingDelta(
+                *robot_yaw, pathInitialYaw(*path, robot_xy, goal_xy));
+            score += config_.heading_penalty_weight *
+                     std::min(heading_delta, config_.heading_penalty_max_rad) /
+                     config_.heading_penalty_max_rad;
+        }
 
         FrontierCandidate candidate;
         candidate.cells = cluster;
@@ -191,6 +220,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         candidate.reachable = reachable;
         candidate.unknown_overlap_ratio = unknown_ratio;
         candidate.wall_clearance = obstacle.wall_clearance;
+        candidate.heading_delta = heading_delta;
         candidate.score = score;
         if (!best || candidate.score < best->score) {
             best = std::move(candidate);
@@ -821,17 +851,25 @@ bool FrontierExplorerCore::hasOccupiedClearance(const int x, const int y,
     return true;
 }
 
+double FrontierExplorerCore::pathInitialYaw(const std::vector<Cell>& path,
+                                            const WorldPoint& robot_xy,
+                                            const WorldPoint& goal_xy) const {
+    if (path.size() >= 2) {
+        const auto next_xy = mapToWorldUnchecked(path[1].first, path[1].second);
+        return yawBetween(robot_xy, next_xy);
+    }
+    return yawBetween(robot_xy, goal_xy);
+}
+
 double FrontierExplorerCore::pathGoalYaw(const std::vector<Cell>& path,
                                          const WorldPoint& robot_xy,
                                          const WorldPoint& goal_xy) const {
     if (path.size() >= 2) {
         const auto prev_xy = mapToWorldUnchecked(path[path.size() - 2].first,
                                                  path[path.size() - 2].second);
-        return std::atan2(goal_xy.second - prev_xy.second,
-                          goal_xy.first - prev_xy.first);
+        return yawBetween(prev_xy, goal_xy);
     }
-    return std::atan2(goal_xy.second - robot_xy.second,
-                      goal_xy.first - robot_xy.first);
+    return yawBetween(robot_xy, goal_xy);
 }
 
 std::vector<Cell> FrontierExplorerCore::neighborCells(const int x,

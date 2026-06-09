@@ -40,9 +40,14 @@ struct FrontierConfig
     double wall_clearance_m = 0.22;
     double corner_penalty_weight = 1.0;
     double corridor_progress_weight = 0.4;
+    double heading_penalty_weight = 0.0;
+    double heading_penalty_max_rad = 3.141592653589793;
     double goal_timeout_sec = 45.0;
     double stuck_progress_radius_m = 0.12;
     double stuck_progress_timeout_sec = 12.0;
+    double near_goal_hysteresis_radius_m = 0.35;
+    int near_goal_retry_limit = 0;
+    double near_goal_hysteresis_sec = 0.0;
     double failed_goal_blacklist_radius_m = 0.45;
     double failed_goal_blacklist_sec = 60.0;
     int failed_goal_max_retries = 1;
@@ -60,6 +65,9 @@ struct FrontierCounts
     int frontier = 0;
     int clusters = 0;
     int rejected_no_options = 0;
+    int rejected_blacklist = 0;
+    int rejected_too_near = 0;
+    int rejected_too_far = 0;
     int rejected_no_path = 0;
     int rejected_footprint = 0;
     int rejected_swept = 0;
@@ -109,6 +117,7 @@ struct FrontierCandidate
     bool reachable = false;
     double unknown_overlap_ratio = 0.0;
     double wall_clearance = 0.0;
+    double heading_delta = 0.0;
     double score = 0.0;
 };
 
@@ -134,11 +143,14 @@ public:
     void setMap(const nav_msgs::msg::OccupancyGrid& map);
     const nav_msgs::msg::OccupancyGrid& map() const { return map_; }
 
-    CandidateResult findCandidates(const WorldPoint& robot_xy, double now_sec);
+    CandidateResult findCandidates(
+        const WorldPoint& robot_xy, double now_sec,
+        std::optional<double> robot_yaw = std::nullopt);
     std::optional<FrontierCandidate> makeCandidate(
         const std::vector<Cell>& cluster, const Cell& start_cell,
         const WorldPoint& robot_xy, const std::vector<bool>& blocked, int width,
-        int height, FrontierCounts& counts);
+        int height, FrontierCounts& counts,
+        std::optional<double> robot_yaw = std::nullopt);
 
     std::vector<Cell> findFrontierCells(int width, int height) const;
     std::vector<std::vector<Cell>> clusterFrontiers(
@@ -195,6 +207,9 @@ public:
     bool hasUnknownNeighbor(int width, int index) const;
     bool hasOccupiedClearance(int x, int y, int width, int height,
                               int radius) const;
+    double pathInitialYaw(const std::vector<Cell>& path,
+                          const WorldPoint& robot_xy,
+                          const WorldPoint& goal_xy) const;
     double pathGoalYaw(const std::vector<Cell>& path,
                        const WorldPoint& robot_xy,
                        const WorldPoint& goal_xy) const;

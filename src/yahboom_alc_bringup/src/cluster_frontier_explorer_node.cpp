@@ -44,6 +44,12 @@ struct Nav2ValidationParams
     std::string nav2_compute_path_action = "/compute_path_to_pose";
 };
 
+struct RobotPose
+{
+    WorldPoint xy;
+    double yaw = 0.0;
+};
+
 }  // namespace yahboom_alc_bringup
 
 namespace rik_sd
@@ -130,11 +136,21 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "corner_penalty_weight"),
             named(&FrontierConfig::corridor_progress_weight,
                   "corridor_progress_weight"),
+            named(&FrontierConfig::heading_penalty_weight,
+                  "heading_penalty_weight"),
+            named(&FrontierConfig::heading_penalty_max_rad,
+                  "heading_penalty_max_rad"),
             named(&FrontierConfig::goal_timeout_sec, "goal_timeout_sec"),
             named(&FrontierConfig::stuck_progress_radius_m,
                   "stuck_progress_radius_m"),
             named(&FrontierConfig::stuck_progress_timeout_sec,
                   "stuck_progress_timeout_sec"),
+            named(&FrontierConfig::near_goal_hysteresis_radius_m,
+                  "near_goal_hysteresis_radius_m"),
+            named(&FrontierConfig::near_goal_retry_limit,
+                  "near_goal_retry_limit"),
+            named(&FrontierConfig::near_goal_hysteresis_sec,
+                  "near_goal_hysteresis_sec"),
             named(&FrontierConfig::failed_goal_blacklist_radius_m,
                   "failed_goal_blacklist_radius_m"),
             named(&FrontierConfig::failed_goal_blacklist_sec,
@@ -259,9 +275,9 @@ private:
             return;
         }
         if (goal_active_) {
-            const auto robot_xy = lookupRobotPose();
-            if (robot_xy) {
-                checkActiveGoalProgress(*robot_xy);
+            const auto robot_pose = lookupRobotPose();
+            if (robot_pose) {
+                checkActiveGoalProgress(robot_pose->xy);
             }
             return;
         }
@@ -273,12 +289,13 @@ private:
             logWaiting("Waiting for /navigate_to_pose action server");
             return;
         }
-        const auto robot_xy = lookupRobotPose();
-        if (!robot_xy) {
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
             return;
         }
 
-        auto result = core_.findCandidates(*robot_xy, nowSec());
+        auto result =
+            core_.findCandidates(robot_pose->xy, nowSec(), robot_pose->yaw);
         publishFrontierMarkers(result.candidates);
         if (result.candidates.empty()) {
             clearGoalMarker();
@@ -292,6 +309,12 @@ private:
                 ", clusters=" + std::to_string(result.counts.clusters) +
                 ", rej_no_opts=" +
                 std::to_string(result.counts.rejected_no_options) +
+                ", rej_blacklist=" +
+                std::to_string(result.counts.rejected_blacklist) +
+                ", rej_too_near=" +
+                std::to_string(result.counts.rejected_too_near) +
+                ", rej_too_far=" +
+                std::to_string(result.counts.rejected_too_far) +
                 ", rej_no_path=" +
                 std::to_string(result.counts.rejected_no_path) +
                 ", rej_footprint=" +
@@ -309,7 +332,7 @@ private:
             publishCandidateEvent("goal_suppressed", *best);
             return;
         }
-        beginRouteSelection(*robot_xy, result.candidates);
+        beginRouteSelection(robot_pose->xy, result.candidates);
     }
 
     struct RouteWaypoint
@@ -504,6 +527,7 @@ private:
         last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
         last_progress_time_sec_ = nowSec();
         active_goal_sent_time_sec_ = nowSec();
+        active_goal_hysteresis_retries_ = 0;
         core_.noteGoalPublished(final_candidate.goal_xy,
                                 final_candidate.goal_yaw, nowSec());
         publishPlannerEvent(
@@ -529,12 +553,15 @@ private:
         sendGoal(waypoint.xy, waypoint.yaw);
     }
 
-    std::optional<WorldPoint> lookupRobotPose() {
+    std::optional<RobotPose> lookupRobotPose() {
         try {
             const auto transform = tf_buffer_.lookupTransform(
                 global_frame_, robot_frame_, tf2::TimePointZero);
-            return WorldPoint{transform.transform.translation.x,
-                              transform.transform.translation.y};
+            const auto& t = transform.transform.translation;
+            const auto& r = transform.transform.rotation;
+            const double yaw = std::atan2(2.0 * (r.w * r.z + r.x * r.y),
+                                          1.0 - 2.0 * (r.y * r.y + r.z * r.z));
+            return RobotPose{WorldPoint{t.x, t.y}, yaw};
         }
         catch (const tf2::TransformException& exc) {
             RCLCPP_DEBUG(get_logger(), "Waiting for robot pose TF: %s",
@@ -597,10 +624,10 @@ private:
             goal_handle_.reset();
             goal_active_ = false;
             ++active_route_index_;
-            const auto robot_xy = lookupRobotPose();
-            if (robot_xy) {
+            const auto robot_pose = lookupRobotPose();
+            if (robot_pose) {
                 const auto projection =
-                    core_.projectOntoPath(*robot_xy, active_route_path_);
+                    core_.projectOntoPath(robot_pose->xy, active_route_path_);
                 if (projection) {
                     last_progress_arc_length_ = projection->arc_length;
                 }
@@ -639,9 +666,62 @@ private:
         if (config.stuck_progress_timeout_sec > 0.0 &&
             now - last_progress_time_sec_ >=
                 config.stuck_progress_timeout_sec) {
+            if (tryNearGoalHysteresis(robot_xy, now)) {
+                return;
+            }
             RCLCPP_WARN(get_logger(),
                         "Abandoning frontier goal after no progress");
             abandonActiveGoal("no_progress");
+        }
+    }
+
+    bool tryNearGoalHysteresis(const WorldPoint& robot_xy, const double now) {
+        const auto& config = core_.config();
+        if (config.near_goal_retry_limit <= 0 ||
+            active_goal_hysteresis_retries_ >= config.near_goal_retry_limit ||
+            config.near_goal_hysteresis_radius_m <= 0.0) {
+            return false;
+        }
+        if (!isNearActiveGoal(robot_xy, config.near_goal_hysteresis_radius_m)) {
+            return false;
+        }
+
+        ++active_goal_hysteresis_retries_;
+        extendActiveGoalTimers(now);
+        publishPlannerEvent("no_progress_hysteresis_retry",
+                            {{"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()},
+                             {"retry", active_goal_hysteresis_retries_},
+                             {"retry_limit", config.near_goal_retry_limit},
+                             {"robot_xy", pointJson(robot_xy)}});
+        RCLCPP_WARN(get_logger(),
+                    "Holding near frontier goal after no progress retry %d/%d",
+                    active_goal_hysteresis_retries_,
+                    config.near_goal_retry_limit);
+        return true;
+    }
+
+    bool isNearActiveGoal(const WorldPoint& robot_xy,
+                          const double radius) const {
+        const auto near = [&](const std::optional<WorldPoint>& goal) {
+            return goal && std::hypot(robot_xy.first - goal->first,
+                                      robot_xy.second - goal->second) <= radius;
+        };
+        return near(active_goal_) || near(active_final_goal_);
+    }
+
+    void extendActiveGoalTimers(const double now) {
+        const auto& config = core_.config();
+        const double grace = config.near_goal_hysteresis_sec > 0.0
+                                 ? config.near_goal_hysteresis_sec
+                                 : config.stuck_progress_timeout_sec;
+        if (config.stuck_progress_timeout_sec > 0.0) {
+            last_progress_time_sec_ =
+                now - std::max(0.0, config.stuck_progress_timeout_sec - grace);
+        }
+        if (config.goal_timeout_sec > 0.0) {
+            active_goal_sent_time_sec_ =
+                now - std::max(0.0, config.goal_timeout_sec - grace);
         }
     }
 
@@ -666,6 +746,7 @@ private:
         active_final_goal_.reset();
         active_route_path_.clear();
         last_progress_arc_length_ = 0.0;
+        active_goal_hysteresis_retries_ = 0;
     }
 
     void blacklistActiveGoal() {
@@ -700,17 +781,27 @@ private:
              {"cluster_size", candidate.cells.size()},
              {"unknown_overlap", rounded(candidate.unknown_overlap_ratio)},
              {"wall_clearance", rounded(candidate.wall_clearance)},
+             {"heading_delta", rounded(candidate.heading_delta)},
              {"reachable", candidate.reachable}});
     }
 
     void publishNoCandidateEvent(const FrontierCounts& counts) {
-        publishPlannerEvent("no_frontier_candidate",
-                            {{"counts",
-                              {{"free", counts.free},
-                               {"unknown", counts.unknown},
-                               {"occupied", counts.occupied},
-                               {"frontier", counts.frontier},
-                               {"clusters", counts.clusters}}}});
+        publishPlannerEvent(
+            "no_frontier_candidate",
+            {{"counts",
+              {{"free", counts.free},
+               {"unknown", counts.unknown},
+               {"occupied", counts.occupied},
+               {"frontier", counts.frontier},
+               {"clusters", counts.clusters},
+               {"rejected_no_options", counts.rejected_no_options},
+               {"rejected_blacklist", counts.rejected_blacklist},
+               {"rejected_too_near", counts.rejected_too_near},
+               {"rejected_too_far", counts.rejected_too_far},
+               {"rejected_no_path", counts.rejected_no_path},
+               {"rejected_footprint", counts.rejected_footprint},
+               {"rejected_swept", counts.rejected_swept},
+               {"rejected_unknown_ratio", counts.rejected_unknown_ratio}}}});
     }
 
     void publishPlannerEvent(
@@ -841,6 +932,7 @@ private:
     double active_goal_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
     double last_progress_arc_length_ = 0.0;
+    int active_goal_hysteresis_retries_ = 0;
     GoalHandle::SharedPtr goal_handle_;
 
     bool nav2_validation_enabled_ = true;
