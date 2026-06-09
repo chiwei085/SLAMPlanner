@@ -184,6 +184,7 @@ def generate_launch_description():
     enable_frontier_explorer = LaunchConfiguration("enable_frontier_explorer")
     rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
+    nav2_start_delay_sec = LaunchConfiguration("nav2_start_delay_sec")
     startup_motion_delay_sec = LaunchConfiguration("startup_motion_delay_sec")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     nav2_bt_xml = LaunchConfiguration("nav2_bt_xml")
@@ -208,10 +209,16 @@ def generate_launch_description():
         parameters=[{"robot_description": robot_description}],
     )
 
-    driver_node = Node(
+    ackman_driver_node = Node(
         package="yahboom_alc_bringup",
         executable="r2_safe_driver",
         output="screen",
+        parameters=[
+            {
+                "driver_package": "yahboomcar_bringup",
+                "driver_executable": "Ackman_driver_R2",
+            }
+        ],
     )
 
     base_node = Node(
@@ -508,11 +515,16 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "tf_warmup_delay_sec",
                 default_value="3.0",
-                description="Delay SLAM and Nav2 startup to let the TF tree stabilize on Jetson.",
+                description="Delay SLAM startup to let the TF tree stabilize on Jetson.",
+            ),
+            DeclareLaunchArgument(
+                "nav2_start_delay_sec",
+                default_value="8.0",
+                description="Delay Nav2 startup until RTAB-Map has time to publish map and TF.",
             ),
             DeclareLaunchArgument(
                 "startup_motion_delay_sec",
-                default_value="5.0",
+                default_value="12.0",
                 description="Delay goal-producing nodes so the robot remains stopped after launch.",
             ),
             DeclareLaunchArgument(
@@ -560,7 +572,7 @@ def generate_launch_description():
             ),
             joint_state_publisher,
             robot_state_publisher,
-            driver_node,
+            ackman_driver_node,
             base_node,
             imu_filter_node,
             ekf_node,
@@ -573,9 +585,9 @@ def generate_launch_description():
                     rgbd_sync,
                     rtabmap_mapping,
                     rtabmap_localization,
-                    nav2,
                 ],
             ),
+            TimerAction(period=nav2_start_delay_sec, actions=[nav2]),
             r2_bridge,
             r2_safety_stop,
             planner_runtime_logger,

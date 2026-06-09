@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rik_sd/struct_descriptor.hpp>
 
+#include <atomic>
 #include <string>
 
 namespace yahboom_alc_bringup
@@ -46,6 +47,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
     geometry_msgs::msg::Twist last_output_;
     rclcpp::Time last_output_time_;
+    std::atomic<bool> stopping_{false};
     bool has_last_output_ = false;
 };
 

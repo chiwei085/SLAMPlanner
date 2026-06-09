@@ -71,7 +71,9 @@ public:
         const geometry_msgs::msg::Twist stop;
         for (int i = 0; i < stop_publish_target_; ++i) {
             publisher_->publish(stop);
-            rclcpp::spin_some(get_node_base_interface());
+            if (rclcpp::ok()) {
+                rclcpp::spin_some(get_node_base_interface());
+            }
         }
         publisher_->publish(stop);
     }

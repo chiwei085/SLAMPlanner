@@ -19,8 +19,11 @@ struct R2SafeDriverParams
     std::string cmd_vel_topic = "/cmd_vel";
     int stop_publish_count = 30;
     double stop_publish_period_sec = 0.02;
-    std::string driver_package = "yahboomcar_bringup";
-    std::string driver_executable = "Ackman_driver_R2";
+    std::string driver_package = "yahboomcar_base_node";
+    std::string driver_executable = "base_node_R2";
+    bool pub_odom_tf = false;
+    double linear_scale_x = 1.0;
+    double linear_scale_y = 1.0;
 };
 
 }  // namespace yahboom_alc_bringup
@@ -40,7 +43,10 @@ struct descriptor<yahboom_alc_bringup::R2SafeDriverParams>
             named(&R2SafeDriverParams::stop_publish_period_sec,
                   "stop_publish_period_sec"),
             named(&R2SafeDriverParams::driver_package, "driver_package"),
-            named(&R2SafeDriverParams::driver_executable, "driver_executable"));
+            named(&R2SafeDriverParams::driver_executable, "driver_executable"),
+            named(&R2SafeDriverParams::pub_odom_tf, "pub_odom_tf"),
+            named(&R2SafeDriverParams::linear_scale_x, "linear_scale_x"),
+            named(&R2SafeDriverParams::linear_scale_y, "linear_scale_y"));
     }
 };
 
@@ -66,6 +72,12 @@ public:
         stop_publish_period_sec_ = params.stop_publish_period_sec;
         driver_package_ = params.driver_package;
         driver_executable_ = params.driver_executable;
+        pub_odom_tf_arg_ = std::string("pub_odom_tf:=") +
+                           (params.pub_odom_tf ? "true" : "false");
+        linear_scale_x_arg_ =
+            "linear_scale_x:=" + std::to_string(params.linear_scale_x);
+        linear_scale_y_arg_ =
+            "linear_scale_y:=" + std::to_string(params.linear_scale_y);
         publisher_ =
             create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
     }
@@ -77,8 +89,13 @@ public:
             return 1;
         }
         if (child_pid_ == 0) {
+            setsid();  // detach from terminal so Ctrl+C SIGINT doesn't reach
+                       // child
             execlp("ros2", "ros2", "run", driver_package_.c_str(),
-                   driver_executable_.c_str(), static_cast<char*>(nullptr));
+                   driver_executable_.c_str(), "--ros-args", "-p",
+                   pub_odom_tf_arg_.c_str(), "-p", linear_scale_x_arg_.c_str(),
+                   "-p", linear_scale_y_arg_.c_str(),
+                   static_cast<char*>(nullptr));
             _exit(127);
         }
 
@@ -108,7 +125,9 @@ public:
         const geometry_msgs::msg::Twist stop;
         for (int i = 0; i < stop_publish_count_; ++i) {
             publisher_->publish(stop);
-            rclcpp::spin_some(get_node_base_interface());
+            if (rclcpp::ok()) {
+                rclcpp::spin_some(get_node_base_interface());
+            }
             std::this_thread::sleep_for(
                 std::chrono::duration<double>(stop_publish_period_sec_));
         }
@@ -137,6 +156,9 @@ private:
     std::string cmd_vel_topic_;
     std::string driver_package_;
     std::string driver_executable_;
+    std::string pub_odom_tf_arg_;
+    std::string linear_scale_x_arg_;
+    std::string linear_scale_y_arg_;
     int stop_publish_count_ = 30;
     double stop_publish_period_sec_ = 0.02;
     pid_t child_pid_ = -1;
@@ -146,9 +168,11 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
+    rclcpp::init(argc, argv);
+    // Install after rclcpp::init() so our handler overwrites rclcpp's.
+    // This keeps rclcpp::ok() true during the stop burst so spin_some() works.
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
-    rclcpp::init(argc, argv);
     auto node = std::make_shared<R2SafeDriverSupervisor>();
     const int status = node->run();
     rclcpp::shutdown();

@@ -16,6 +16,8 @@ struct R2EmergencyStopParams
     double publish_rate_hz = 30.0;
     int publish_count = 150;
     double driver_wait_sec = 4.0;
+    std::string driver_package = "yahboomcar_base_node";
+    std::string driver_executable = "base_node_R2";
 };
 
 }  // namespace yahboom_alc_bringup
@@ -32,7 +34,10 @@ struct descriptor<yahboom_alc_bringup::R2EmergencyStopParams>
             named(&R2EmergencyStopParams::cmd_vel_topic, "cmd_vel_topic"),
             named(&R2EmergencyStopParams::publish_rate_hz, "publish_rate_hz"),
             named(&R2EmergencyStopParams::publish_count, "publish_count"),
-            named(&R2EmergencyStopParams::driver_wait_sec, "driver_wait_sec"));
+            named(&R2EmergencyStopParams::driver_wait_sec, "driver_wait_sec"),
+            named(&R2EmergencyStopParams::driver_package, "driver_package"),
+            named(&R2EmergencyStopParams::driver_executable,
+                  "driver_executable"));
     }
 };
 
@@ -48,23 +53,25 @@ public:
         publish_rate_hz_ = params.publish_rate_hz;
         publish_count_ = params.publish_count;
         driver_wait_sec_ = params.driver_wait_sec;
+        driver_package_ = params.driver_package;
+        driver_executable_ = params.driver_executable;
         publisher_ =
             create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
     }
 
     void run() {
         if (!hasCmdVelSubscriber()) {
-            RCLCPP_WARN(
-                get_logger(),
-                "No /cmd_vel subscriber found, starting Ackman_driver_R2 "
-                "for stop");
+            RCLCPP_WARN(get_logger(),
+                        "No %s subscriber found, starting %s/%s for stop",
+                        cmd_vel_topic_.c_str(), driver_package_.c_str(),
+                        driver_executable_.c_str());
             driver_process_started_ = true;
-            const int start_status = std::system(
-                "ros2 run yahboomcar_bringup Ackman_driver_R2 >/tmp/"
-                "r2_emergency_driver.log 2>&1 &");
+            const std::string command = "ros2 run " + driver_package_ + ' ' +
+                                        driver_executable_ +
+                                        " >/tmp/r2_emergency_driver.log 2>&1 &";
+            const int start_status = std::system(command.c_str());
             if (start_status != 0) {
-                RCLCPP_WARN(get_logger(),
-                            "Ackman_driver_R2 start command returned %d",
+                RCLCPP_WARN(get_logger(), "Driver start command returned %d",
                             start_status);
             }
             const auto deadline =
@@ -94,6 +101,8 @@ private:
     }
 
     std::string cmd_vel_topic_;
+    std::string driver_package_;
+    std::string driver_executable_;
     double publish_rate_hz_ = 30.0;
     int publish_count_ = 150;
     double driver_wait_sec_ = 4.0;

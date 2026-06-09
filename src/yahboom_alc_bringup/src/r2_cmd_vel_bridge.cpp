@@ -94,7 +94,7 @@ R2CmdVelBridgeConfig R2CmdVelBridgeNode::loadConfig() {
 
 void R2CmdVelBridgeNode::onCmdVel(
     const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
-    if (!msg) {
+    if (!msg || stopping_) {
         return;
     }
 
@@ -135,9 +135,10 @@ void R2CmdVelBridgeNode::publishStopBurst() {
         return;
     }
 
+    stopping_ = true;
     RCLCPP_WARN(get_logger(), "Publishing centered zero cmd_vel before exit");
     const geometry_msgs::msg::Twist stop;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 50; ++i) {
         publisher_->publish(stop);
         rclcpp::sleep_for(20ms);
     }
