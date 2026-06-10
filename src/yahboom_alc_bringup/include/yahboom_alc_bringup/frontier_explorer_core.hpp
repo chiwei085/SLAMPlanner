@@ -48,6 +48,10 @@ struct FrontierConfig
     double near_goal_hysteresis_radius_m = 0.35;
     int near_goal_retry_limit = 0;
     double near_goal_hysteresis_sec = 0.0;
+    bool alignment_grace_enabled = true;
+    double alignment_heading_threshold_rad = 0.35;
+    double alignment_max_grace_sec = 12.0;
+    double alignment_min_rotation_delta_rad = 0.05;
     double failed_goal_blacklist_radius_m = 0.45;
     double failed_goal_blacklist_sec = 60.0;
     int failed_goal_max_retries = 1;
@@ -133,6 +137,15 @@ struct CandidateResult
     FrontierCounts counts;
 };
 
+struct AlignmentGraceStatus
+{
+    bool active = false;
+    double target_yaw = 0.0;
+    double heading_error = 0.0;
+    double previous_heading_error = 0.0;
+    double heading_error_delta = 0.0;
+};
+
 class FrontierExplorerCore
 {
 public:
@@ -207,6 +220,14 @@ public:
     bool hasUnknownNeighbor(int width, int index) const;
     bool hasOccupiedClearance(int x, int y, int width, int height,
                               int radius) const;
+    double headingError(double from_yaw, double to_yaw) const;
+    std::optional<double> pathTargetYawNear(
+        const WorldPoint& robot_xy, const std::vector<Cell>& path) const;
+    AlignmentGraceStatus evaluateAlignmentGrace(
+        const WorldPoint& robot_xy, double robot_yaw,
+        std::optional<double> previous_robot_yaw, const std::vector<Cell>& path,
+        const WorldPoint& active_goal_xy,
+        double elapsed_since_waypoint_sent_sec) const;
     double pathInitialYaw(const std::vector<Cell>& path,
                           const WorldPoint& robot_xy,
                           const WorldPoint& goal_xy) const;

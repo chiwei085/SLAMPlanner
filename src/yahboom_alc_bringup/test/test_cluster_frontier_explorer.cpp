@@ -58,6 +58,10 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.near_goal_hysteresis_radius_m = 0.35;
     config.near_goal_retry_limit = 0;
     config.near_goal_hysteresis_sec = 0.0;
+    config.alignment_grace_enabled = true;
+    config.alignment_heading_threshold_rad = 0.35;
+    config.alignment_max_grace_sec = 12.0;
+    config.alignment_min_rotation_delta_rad = 0.05;
     config.failed_goal_blacklist_radius_m = 0.45;
     config.failed_goal_blacklist_sec = 60.0;
     config.failed_goal_max_retries = 1;
@@ -515,6 +519,110 @@ TEST(ClusterFrontierExplorer, ProgressRequiresBfsArcAdvance) {
     ASSERT_TRUE(lateral);
     EXPECT_GE(forward->arc_length - start->arc_length, 0.12);
     EXPECT_LT(std::abs(lateral->arc_length - start->arc_length), 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, HeadingErrorWrapsAcrossPi) {
+    auto grid = buildGrid(10, 10, 0.1);
+    auto core = makeCore(grid);
+
+    EXPECT_NEAR(core.headingError(3.10, -3.10), 0.083185307, 1e-6);
+    EXPECT_NEAR(core.headingError(-3.10, 3.10), 0.083185307, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, PathTargetYawUsesNearestPathSegment) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const std::vector<Cell> path{{2, 5}, {8, 5}, {8, 10}};
+
+    const auto first_segment =
+        core.pathTargetYawNear(core.mapToWorld(5, 6), path);
+    const auto second_segment =
+        core.pathTargetYawNear(core.mapToWorld(9, 8), path);
+
+    ASSERT_TRUE(first_segment);
+    ASSERT_TRUE(second_segment);
+    EXPECT_NEAR(*first_segment, 0.0, 1e-6);
+    EXPECT_NEAR(*second_segment, M_PI_2, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, AlignmentGraceFallsBackToActiveGoalYaw) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const auto robot_xy = core.mapToWorld(5, 5);
+    const auto goal_xy = core.mapToWorld(5, 10);
+
+    const auto status = core.evaluateAlignmentGrace(robot_xy, 0.0, std::nullopt,
+                                                    {}, goal_xy, 1.0);
+
+    EXPECT_FALSE(status.active);
+    EXPECT_NEAR(status.target_yaw, M_PI_2, 1e-6);
+    EXPECT_GT(status.heading_error,
+              core.config().alignment_heading_threshold_rad);
+}
+
+TEST(ClusterFrontierExplorer, AlignmentGraceActivatesWhenYawConverges) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.alignment_heading_threshold_rad = 0.35;
+    config.alignment_max_grace_sec = 12.0;
+    config.alignment_min_rotation_delta_rad = 0.05;
+    core.setConfig(config);
+    const auto robot_xy = core.mapToWorld(5, 5);
+    const auto goal_xy = core.mapToWorld(12, 5);
+    const std::vector<Cell> path{{5, 5}, {12, 5}};
+
+    const auto status =
+        core.evaluateAlignmentGrace(robot_xy, 1.40, M_PI_2, path, goal_xy, 9.0);
+
+    EXPECT_TRUE(status.active);
+    EXPECT_NEAR(status.target_yaw, 0.0, 1e-6);
+    EXPECT_GT(status.heading_error_delta,
+              core.config().alignment_min_rotation_delta_rad);
+}
+
+TEST(ClusterFrontierExplorer, AlignmentGraceRejectsNonConvergingYaw) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const auto robot_xy = core.mapToWorld(5, 5);
+    const auto goal_xy = core.mapToWorld(12, 5);
+    const std::vector<Cell> path{{5, 5}, {12, 5}};
+
+    const auto status =
+        core.evaluateAlignmentGrace(robot_xy, 1.40, 1.30, path, goal_xy, 9.0);
+
+    EXPECT_FALSE(status.active);
+    EXPECT_LT(status.heading_error_delta, 0.0);
+}
+
+TEST(ClusterFrontierExplorer, AlignmentGraceRejectsAlignedHeading) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const auto robot_xy = core.mapToWorld(5, 5);
+    const auto goal_xy = core.mapToWorld(12, 5);
+    const std::vector<Cell> path{{5, 5}, {12, 5}};
+
+    const auto status =
+        core.evaluateAlignmentGrace(robot_xy, 0.10, 0.30, path, goal_xy, 9.0);
+
+    EXPECT_FALSE(status.active);
+    EXPECT_LT(status.heading_error,
+              core.config().alignment_heading_threshold_rad);
+}
+
+TEST(ClusterFrontierExplorer, AlignmentGraceExpiresAfterMaxGrace) {
+    auto grid = buildGrid(20, 20, 0.1);
+    auto core = makeCore(grid);
+    const auto robot_xy = core.mapToWorld(5, 5);
+    const auto goal_xy = core.mapToWorld(12, 5);
+    const std::vector<Cell> path{{5, 5}, {12, 5}};
+
+    const auto status = core.evaluateAlignmentGrace(robot_xy, 1.40, M_PI_2,
+                                                    path, goal_xy, 12.0);
+
+    EXPECT_FALSE(status.active);
+    EXPECT_GT(status.heading_error_delta,
+              core.config().alignment_min_rotation_delta_rad);
 }
 
 }  // namespace

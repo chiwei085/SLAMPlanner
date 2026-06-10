@@ -202,7 +202,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         double heading_delta = 0.0;
         if (robot_yaw && config_.heading_penalty_weight > 0.0 &&
             config_.heading_penalty_max_rad > 0.0) {
-            heading_delta = headingDelta(
+            heading_delta = headingError(
                 *robot_yaw, pathInitialYaw(*path, robot_xy, goal_xy));
             score += config_.heading_penalty_weight *
                      std::min(heading_delta, config_.heading_penalty_max_rad) /
@@ -849,6 +849,96 @@ bool FrontierExplorerCore::hasOccupiedClearance(const int x, const int y,
         }
     }
     return true;
+}
+
+double FrontierExplorerCore::headingError(const double from_yaw,
+                                          const double to_yaw) const {
+    return headingDelta(from_yaw, to_yaw);
+}
+
+std::optional<double> FrontierExplorerCore::pathTargetYawNear(
+    const WorldPoint& robot_xy, const std::vector<Cell>& path) const {
+    if (path.size() < 2) {
+        return std::nullopt;
+    }
+
+    std::optional<PathProjection> best;
+    std::size_t best_segment = 1;
+    double arc_before = 0.0;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const auto a =
+            mapToWorldUnchecked(path[i - 1].first, path[i - 1].second);
+        const auto b = mapToWorldUnchecked(path[i].first, path[i].second);
+        const double dx = b.first - a.first;
+        const double dy = b.second - a.second;
+        const double len_sq = dx * dx + dy * dy;
+        if (len_sq <= 1e-12) {
+            continue;
+        }
+        const double len = std::sqrt(len_sq);
+        const double raw_t = ((robot_xy.first - a.first) * dx +
+                              (robot_xy.second - a.second) * dy) /
+                             len_sq;
+        const double t = std::clamp(raw_t, 0.0, 1.0);
+        const double px = a.first + t * dx;
+        const double py = a.second + t * dy;
+        const double dist =
+            std::hypot(robot_xy.first - px, robot_xy.second - py);
+        const double arc = arc_before + t * len;
+        if (!best || dist < best->distance ||
+            (std::abs(dist - best->distance) <= 1e-9 &&
+             arc < best->arc_length)) {
+            best = PathProjection{dist, arc};
+            best_segment = i;
+        }
+        arc_before += len;
+    }
+    if (!best) {
+        return std::nullopt;
+    }
+
+    const auto a = mapToWorldUnchecked(path[best_segment - 1].first,
+                                       path[best_segment - 1].second);
+    const auto b = mapToWorldUnchecked(path[best_segment].first,
+                                       path[best_segment].second);
+    return yawBetween(a, b);
+}
+
+AlignmentGraceStatus FrontierExplorerCore::evaluateAlignmentGrace(
+    const WorldPoint& robot_xy, const double robot_yaw,
+    const std::optional<double> previous_robot_yaw,
+    const std::vector<Cell>& path, const WorldPoint& active_goal_xy,
+    const double elapsed_since_waypoint_sent_sec) const {
+    AlignmentGraceStatus status;
+    if (!config_.alignment_grace_enabled ||
+        config_.alignment_max_grace_sec <= 0.0) {
+        return status;
+    }
+
+    const auto target_yaw = pathTargetYawNear(robot_xy, path);
+    status.target_yaw =
+        target_yaw ? *target_yaw : yawBetween(robot_xy, active_goal_xy);
+    status.heading_error = headingError(robot_yaw, status.target_yaw);
+    status.previous_heading_error =
+        previous_robot_yaw
+            ? headingError(*previous_robot_yaw, status.target_yaw)
+            : status.heading_error;
+    status.heading_error_delta =
+        status.previous_heading_error - status.heading_error;
+
+    if (elapsed_since_waypoint_sent_sec >= config_.alignment_max_grace_sec) {
+        return status;
+    }
+    if (status.heading_error <= config_.alignment_heading_threshold_rad) {
+        return status;
+    }
+    if (!previous_robot_yaw ||
+        status.heading_error_delta < config_.alignment_min_rotation_delta_rad) {
+        return status;
+    }
+
+    status.active = true;
+    return status;
 }
 
 double FrontierExplorerCore::pathInitialYaw(const std::vector<Cell>& path,

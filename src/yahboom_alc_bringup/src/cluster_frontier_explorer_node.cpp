@@ -151,6 +151,14 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "near_goal_retry_limit"),
             named(&FrontierConfig::near_goal_hysteresis_sec,
                   "near_goal_hysteresis_sec"),
+            named(&FrontierConfig::alignment_grace_enabled,
+                  "alignment_grace_enabled"),
+            named(&FrontierConfig::alignment_heading_threshold_rad,
+                  "alignment_heading_threshold_rad"),
+            named(&FrontierConfig::alignment_max_grace_sec,
+                  "alignment_max_grace_sec"),
+            named(&FrontierConfig::alignment_min_rotation_delta_rad,
+                  "alignment_min_rotation_delta_rad"),
             named(&FrontierConfig::failed_goal_blacklist_radius_m,
                   "failed_goal_blacklist_radius_m"),
             named(&FrontierConfig::failed_goal_blacklist_sec,
@@ -277,7 +285,7 @@ private:
         if (goal_active_) {
             const auto robot_pose = lookupRobotPose();
             if (robot_pose) {
-                checkActiveGoalProgress(robot_pose->xy);
+                checkActiveGoalProgress(*robot_pose);
             }
             return;
         }
@@ -527,6 +535,8 @@ private:
         last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
         last_progress_time_sec_ = nowSec();
         active_goal_sent_time_sec_ = nowSec();
+        active_waypoint_sent_time_sec_ = nowSec();
+        last_alignment_robot_yaw_.reset();
         active_goal_hysteresis_retries_ = 0;
         core_.noteGoalPublished(final_candidate.goal_xy,
                                 final_candidate.goal_yaw, nowSec());
@@ -576,6 +586,8 @@ private:
 
         goal_active_ = true;
         active_goal_ = goal_xy;
+        active_waypoint_sent_time_sec_ = nowSec();
+        last_alignment_robot_yaw_.reset();
         wait_log_count_ = 0;
         publishGoalMarker(goal_xy, goal_yaw);
         RCLCPP_INFO(get_logger(),
@@ -632,6 +644,8 @@ private:
                     last_progress_arc_length_ = projection->arc_length;
                 }
                 last_progress_time_sec_ = nowSec();
+                active_waypoint_sent_time_sec_ = nowSec();
+                last_alignment_robot_yaw_.reset();
                 sendActiveWaypoint();
                 return;
             }
@@ -644,7 +658,7 @@ private:
         clearActiveGoal();
     }
 
-    void checkActiveGoalProgress(const WorldPoint& robot_xy) {
+    void checkActiveGoalProgress(const RobotPose& robot_pose) {
         const double now = nowSec();
         const auto& config = core_.config();
         if (config.goal_timeout_sec > 0.0 &&
@@ -654,11 +668,12 @@ private:
             return;
         }
         const auto projection =
-            core_.projectOntoPath(robot_xy, active_route_path_);
+            core_.projectOntoPath(robot_pose.xy, active_route_path_);
         if (projection && projection->arc_length - last_progress_arc_length_ >=
                               config.stuck_progress_radius_m) {
             last_progress_arc_length_ = projection->arc_length;
             last_progress_time_sec_ = now;
+            last_alignment_robot_yaw_.reset();
             RCLCPP_DEBUG(get_logger(), "Route progress arc=%.3f",
                          last_progress_arc_length_);
             return;
@@ -666,13 +681,58 @@ private:
         if (config.stuck_progress_timeout_sec > 0.0 &&
             now - last_progress_time_sec_ >=
                 config.stuck_progress_timeout_sec) {
-            if (tryNearGoalHysteresis(robot_xy, now)) {
+            if (tryAlignmentProgressGrace(robot_pose, now)) {
+                last_alignment_robot_yaw_ = robot_pose.yaw;
+                return;
+            }
+            if (tryNearGoalHysteresis(robot_pose.xy, now)) {
+                last_alignment_robot_yaw_ = robot_pose.yaw;
                 return;
             }
             RCLCPP_WARN(get_logger(),
                         "Abandoning frontier goal after no progress");
             abandonActiveGoal("no_progress");
+            return;
         }
+        last_alignment_robot_yaw_ = robot_pose.yaw;
+    }
+
+    bool tryAlignmentProgressGrace(const RobotPose& robot_pose,
+                                   const double now) {
+        if (!active_goal_) {
+            return false;
+        }
+        const auto status = core_.evaluateAlignmentGrace(
+            robot_pose.xy, robot_pose.yaw, last_alignment_robot_yaw_,
+            active_route_path_, *active_goal_,
+            now - active_waypoint_sent_time_sec_);
+        if (!status.active) {
+            return false;
+        }
+
+        const auto& config = core_.config();
+        const double last_progress_age = now - last_progress_time_sec_;
+        // Backdate so no_progress won't re-fire until alignment_max_grace_sec
+        // has elapsed from when this waypoint was sent.
+        const double capped_progress_time = active_waypoint_sent_time_sec_ +
+                                            config.alignment_max_grace_sec -
+                                            config.stuck_progress_timeout_sec;
+        last_progress_time_sec_ =
+            std::max(last_progress_time_sec_, capped_progress_time);
+        publishPlannerEvent(
+            "alignment_progress_grace",
+            {{"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()},
+             {"robot_xy", pointJson(robot_pose.xy)},
+             {"heading_error", rounded(status.heading_error)},
+             {"target_yaw", rounded(status.target_yaw)},
+             {"elapsed_since_waypoint_sent",
+              rounded(now - active_waypoint_sent_time_sec_)},
+             {"last_progress_age", rounded(last_progress_age)}});
+        RCLCPP_DEBUG(get_logger(),
+                     "Holding frontier goal for alignment heading_error=%.3f",
+                     status.heading_error);
+        return true;
     }
 
     bool tryNearGoalHysteresis(const WorldPoint& robot_xy, const double now) {
@@ -747,6 +807,8 @@ private:
         active_route_path_.clear();
         last_progress_arc_length_ = 0.0;
         active_goal_hysteresis_retries_ = 0;
+        active_waypoint_sent_time_sec_ = 0.0;
+        last_alignment_robot_yaw_.reset();
     }
 
     void blacklistActiveGoal() {
@@ -930,9 +992,11 @@ private:
     std::size_t active_route_index_ = 0;
     std::vector<Cell> active_route_path_;
     double active_goal_sent_time_sec_ = 0.0;
+    double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
     double last_progress_arc_length_ = 0.0;
     int active_goal_hysteresis_retries_ = 0;
+    std::optional<double> last_alignment_robot_yaw_;
     GoalHandle::SharedPtr goal_handle_;
 
     bool nav2_validation_enabled_ = true;
