@@ -77,25 +77,8 @@ def launch_frontier_explorer(context, *args, **kwargs):
         "map_topic": "/map",
         "robot_frame": "base_footprint",
         "global_frame": "map",
+        "planner_event_topic": "/planner/events",
     }
-    if explorer_type == "simple":
-        return [
-            Node(
-                package="yahboom_alc_bringup",
-                executable="simple_frontier_explorer",
-                name="simple_frontier_explorer",
-                output="screen",
-                parameters=[
-                    {
-                        **common_parameters,
-                        "cycle_period_sec": 5.0,
-                        "min_goal_distance": 0.45,
-                        "max_goal_distance": 2.5,
-                        "frontier_stride": 3,
-                    }
-                ],
-            )
-        ]
     if explorer_type == "cluster":
         return [
             Node(
@@ -160,7 +143,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                 ],
             )
         ]
-    raise ValueError("frontier_explorer_type must be 'cluster' or 'simple'")
+    raise ValueError("frontier_explorer_type must be 'cluster'; simple was removed")
 
 
 def generate_launch_description():
@@ -390,6 +373,7 @@ def generate_launch_description():
                 "map_dist_min_revisit": 0.75,
                 "navigation_timeout_sec": 120.0,
                 "use_approach_heading": True,
+                "planner_event_topic": "/planner/events",
             }
         ],
     )
@@ -509,7 +493,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "frontier_explorer_type",
                 default_value="cluster",
-                description="Frontier explorer implementation: cluster or simple.",
+                description="Frontier explorer implementation. Only cluster is supported.",
             ),
             DeclareLaunchArgument(
                 "rviz",

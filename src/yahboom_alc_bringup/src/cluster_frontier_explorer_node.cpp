@@ -238,6 +238,11 @@ public:
             goal_marker_topic_, marker_qos);
         event_pub_ =
             create_publisher<std_msgs::msg::String>(planner_event_topic_, 10);
+        event_sub_ = create_subscription<std_msgs::msg::String>(
+            planner_event_topic_, 10,
+            [this](const std_msgs::msg::String::SharedPtr msg) {
+                onPlannerEvent(*msg);
+            });
         timer_ =
             create_wall_timer(std::chrono::duration<double>(cycle_period_sec_),
                               [this]() { onTimer(); });
@@ -280,6 +285,10 @@ private:
         }
         if (!map_received_) {
             logWaiting("Waiting for /map");
+            return;
+        }
+        if (alc_paused_) {
+            logWaiting("Frontier exploration paused for ALC");
             return;
         }
         if (goal_active_) {
@@ -375,6 +384,10 @@ private:
     }
 
     void validateNextCandidateRoute() {
+        if (alc_paused_) {
+            clearPendingRouteSelection();
+            return;
+        }
         validation_active_ = false;
         validation_route_.clear();
         validation_final_candidate_.reset();
@@ -420,7 +433,7 @@ private:
 
     void validateRouteSegment(const int generation) {
         if (!validation_active_ || generation != validation_generation_ ||
-            !pending_robot_xy_ || !validation_final_candidate_ ||
+            alc_paused_ || !pending_robot_xy_ || !validation_final_candidate_ ||
             validation_segment_index_ >= validation_route_.size()) {
             return;
         }
@@ -469,6 +482,9 @@ private:
         if (!validation_active_ || generation != validation_generation_) {
             return;
         }
+        if (alc_paused_) {
+            return;
+        }
         if (!handle) {
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "goal_rejected"}});
@@ -480,6 +496,9 @@ private:
         const int generation,
         const ComputePathGoalHandle::WrappedResult& result) {
         if (!validation_active_ || generation != validation_generation_) {
+            return;
+        }
+        if (alc_paused_) {
             return;
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
@@ -581,6 +600,9 @@ private:
     }
 
     void sendGoal(const WorldPoint& goal_xy, const double goal_yaw) {
+        if (alc_paused_) {
+            return;
+        }
         NavigateToPose::Goal goal;
         goal.pose = poseForPoint(goal_xy, goal_yaw);
 
@@ -608,6 +630,12 @@ private:
     }
 
     void onGoalResponse(const GoalHandle::SharedPtr& handle) {
+        if (alc_paused_ || !goal_active_) {
+            if (handle) {
+                nav_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
         if (!handle) {
             RCLCPP_WARN(get_logger(), "Cluster frontier goal rejected");
             publishPlannerEvent("goal_rejected",
@@ -619,6 +647,9 @@ private:
     }
 
     void onGoalResult(const GoalHandle::WrappedResult& result) {
+        if (!goal_active_) {
+            return;
+        }
         const int status = static_cast<int>(result.code);
         RCLCPP_INFO(get_logger(),
                     "Cluster frontier goal finished with status %d", status);
@@ -797,6 +828,35 @@ private:
         clearActiveGoal();
     }
 
+    void pauseForAlc() {
+        if (alc_paused_) {
+            return;
+        }
+        alc_paused_ = true;
+        const auto final_goal = activeFinalGoalJson();
+        const auto active_waypoint = activeGoalJson();
+        clearPendingRouteSelection();
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+        }
+        clearActiveGoal();
+        clearGoalMarker();
+        publishPlannerEvent(
+            "frontier_paused_for_alc",
+            {{"goal_xy", final_goal}, {"active_waypoint_xy", active_waypoint}});
+        RCLCPP_INFO(get_logger(), "Frontier exploration paused for ALC");
+    }
+
+    void resumeAfterAlc() {
+        if (!alc_paused_) {
+            return;
+        }
+        alc_paused_ = false;
+        wait_log_count_ = 0;
+        publishPlannerEvent("frontier_resumed_after_alc");
+        RCLCPP_INFO(get_logger(), "Frontier exploration resumed after ALC");
+    }
+
     void clearActiveGoal() {
         goal_active_ = false;
         goal_handle_.reset();
@@ -809,6 +869,18 @@ private:
         active_goal_hysteresis_retries_ = 0;
         active_waypoint_sent_time_sec_ = 0.0;
         last_alignment_robot_yaw_.reset();
+    }
+
+    void clearPendingRouteSelection() {
+        validation_active_ = false;
+        ++validation_generation_;
+        validation_segment_index_ = 0;
+        validation_segment_started_sec_ = 0.0;
+        pending_robot_xy_.reset();
+        pending_candidates_.clear();
+        pending_candidate_index_ = 0;
+        validation_final_candidate_.reset();
+        validation_route_.clear();
     }
 
     void blacklistActiveGoal() {
@@ -875,6 +947,30 @@ private:
         payload[std::string("time_sec")] = rounded(nowSec());
         msg.data = payload.dump();
         event_pub_->publish(msg);
+    }
+
+    void onPlannerEvent(const std_msgs::msg::String& msg) {
+        nlohmann::json payload;
+        try {
+            payload = nlohmann::json::parse(msg.data);
+        }
+        catch (const nlohmann::json::parse_error& exc) {
+            RCLCPP_DEBUG(get_logger(), "Ignoring malformed planner event: %s",
+                         exc.what());
+            return;
+        }
+        if (!payload.contains("event")) {
+            return;
+        }
+
+        const std::string event = payload["event"].dump();
+        if (event == "\"alc_started\"") {
+            pauseForAlc();
+            return;
+        }
+        if (event == "\"alc_finished\"") {
+            resumeAfterAlc();
+        }
     }
 
     void publishFrontierMarkers(
@@ -984,6 +1080,7 @@ private:
     std::string goal_marker_topic_;
     double cycle_period_sec_ = 3.0;
     int wait_log_count_ = 0;
+    bool alc_paused_ = false;
 
     bool goal_active_ = false;
     std::optional<WorldPoint> active_goal_;
@@ -1022,6 +1119,7 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr
         goal_marker_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

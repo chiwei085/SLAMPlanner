@@ -58,21 +58,6 @@ ament_target_dependencies(cluster_frontier_explorer
   visualization_msgs
 )
 
-add_executable(simple_frontier_explorer
-  src/simple_frontier_explorer_node.cpp
-)
-target_link_libraries(simple_frontier_explorer
-  yahboom_alc_bringup_lib
-)
-ament_target_dependencies(simple_frontier_explorer
-  geometry_msgs
-  nav2_msgs
-  nav_msgs
-  rclcpp
-  rclcpp_action
-  tf2_ros
-)
-
 add_executable(planner_runtime_logger
   src/planner_runtime_logger_node.cpp
 )
@@ -139,7 +124,6 @@ install(
     r2_emergency_stop
     r2_safe_driver
     r2_safety_stop
-    simple_frontier_explorer
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
