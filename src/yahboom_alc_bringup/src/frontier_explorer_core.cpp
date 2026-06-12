@@ -39,6 +39,8 @@ FrontierExplorerCore::FrontierExplorerCore(FrontierConfig config)
 void FrontierExplorerCore::setConfig(const FrontierConfig& config) {
     config_ = config;
     footprint_geometry_.reset();
+    last_strict_candidate_sec_.reset();
+    relaxation_active_ = false;
 }
 
 void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
@@ -48,6 +50,50 @@ void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
 }
 
 CandidateResult FrontierExplorerCore::findCandidates(
+    const WorldPoint& robot_xy, const double now_sec,
+    std::optional<double> robot_yaw) {
+    auto result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
+    if (!result.candidates.empty()) {
+        last_strict_candidate_sec_ = now_sec;
+        relaxation_active_ = false;
+        return result;
+    }
+    if (config_.no_frontier_relax_sec <= 0.0) {
+        return result;
+    }
+    if (!last_strict_candidate_sec_) {
+        last_strict_candidate_sec_ = now_sec;
+        return result;
+    }
+    if (!relaxation_active_ &&
+        now_sec - *last_strict_candidate_sec_ < config_.no_frontier_relax_sec) {
+        return result;
+    }
+
+    relaxation_active_ = true;
+    const FrontierConfig strict = config_;
+    // Footprint fields stay identical, so the cached footprint geometry
+    // remains valid across the temporary config swap.
+    config_ = relaxedConfig();
+    auto relaxed_result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
+    config_ = strict;
+    relaxed_result.relaxed = true;
+    return relaxed_result;
+}
+
+FrontierConfig FrontierExplorerCore::relaxedConfig() const {
+    FrontierConfig relaxed = config_;
+    relaxed.min_frontier_size =
+        std::min(relaxed.min_frontier_size, config_.relaxed_min_frontier_size);
+    if (config_.relaxed_max_frontier_distance > 0.0) {
+        relaxed.max_frontier_distance =
+            std::max(relaxed.max_frontier_distance,
+                     config_.relaxed_max_frontier_distance);
+    }
+    return relaxed;
+}
+
+CandidateResult FrontierExplorerCore::findCandidatesOnce(
     const WorldPoint& robot_xy, const double now_sec,
     std::optional<double> robot_yaw) {
     CandidateResult result;

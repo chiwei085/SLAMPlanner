@@ -27,6 +27,7 @@ find_package(visualization_msgs REQUIRED)
 
 add_library(yahboom_alc_bringup_lib
   src/frontier_explorer_core.cpp
+  src/planner_event.cpp
   src/planner_runtime_logger.cpp
   src/r2_cmd_vel_bridge.cpp
 )
@@ -155,6 +156,13 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_cluster_frontier_explorer
     nav_msgs
+  )
+
+  ament_add_gtest(test_planner_event
+    test/test_planner_event.cpp
+  )
+  target_link_libraries(test_planner_event
+    yahboom_alc_bringup_lib
   )
 
   ament_add_gtest(test_planner_runtime_logger

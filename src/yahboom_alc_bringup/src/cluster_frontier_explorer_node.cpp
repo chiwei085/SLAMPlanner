@@ -2,6 +2,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav2_msgs/action/spin.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nlohmann/json.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -21,6 +22,7 @@
 
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/planner_event.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -42,6 +44,7 @@ struct Nav2ValidationParams
     bool nav2_validation_enabled = true;
     double nav2_validation_timeout_sec = 2.0;
     std::string nav2_compute_path_action = "/compute_path_to_pose";
+    bool nav2_validation_blacklist_enabled = true;
 };
 
 struct RobotPose
@@ -86,7 +89,9 @@ struct descriptor<yahboom_alc_bringup::Nav2ValidationParams>
             named(&Nav2ValidationParams::nav2_validation_timeout_sec,
                   "nav2_validation_timeout_sec"),
             named(&Nav2ValidationParams::nav2_compute_path_action,
-                  "nav2_compute_path_action"));
+                  "nav2_compute_path_action"),
+            named(&Nav2ValidationParams::nav2_validation_blacklist_enabled,
+                  "nav2_validation_blacklist_enabled"));
     }
 };
 
@@ -170,7 +175,19 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::subgoal_path_tolerance_m,
                   "subgoal_path_tolerance_m"),
             named(&FrontierConfig::min_subgoal_spacing_m,
-                  "min_subgoal_spacing_m"));
+                  "min_subgoal_spacing_m"),
+            named(&FrontierConfig::no_frontier_relax_sec,
+                  "no_frontier_relax_sec"),
+            named(&FrontierConfig::relaxed_min_frontier_size,
+                  "relaxed_min_frontier_size"),
+            named(&FrontierConfig::relaxed_max_frontier_distance,
+                  "relaxed_max_frontier_distance"),
+            named(&FrontierConfig::alignment_spin_enabled,
+                  "alignment_spin_enabled"),
+            named(&FrontierConfig::alignment_spin_max_attempts,
+                  "alignment_spin_max_attempts"),
+            named(&FrontierConfig::alignment_spin_time_allowance_sec,
+                  "alignment_spin_time_allowance_sec"));
     }
 };
 
@@ -212,6 +229,8 @@ public:
     using ComputePathToPose = nav2_msgs::action::ComputePathToPose;
     using ComputePathGoalHandle =
         rclcpp_action::ClientGoalHandle<ComputePathToPose>;
+    using Spin = nav2_msgs::action::Spin;
+    using SpinGoalHandle = rclcpp_action::ClientGoalHandle<Spin>;
 
     explicit ClusterFrontierExplorerNode(
         const rclcpp::NodeOptions& options = rclcpp::NodeOptions{})
@@ -219,7 +238,8 @@ public:
           tf_buffer_(get_clock()),
           tf_listener_(tf_buffer_),
           nav_client_(rclcpp_action::create_client<NavigateToPose>(
-              this, "/navigate_to_pose")) {
+              this, "/navigate_to_pose")),
+          spin_client_(rclcpp_action::create_client<Spin>(this, "/spin")) {
         loadParams();
 
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
@@ -270,6 +290,8 @@ private:
         nav2_validation_enabled_ = nav2_params.nav2_validation_enabled;
         nav2_validation_timeout_sec_ = nav2_params.nav2_validation_timeout_sec;
         nav2_compute_path_action_ = nav2_params.nav2_compute_path_action;
+        nav2_validation_blacklist_enabled_ =
+            nav2_params.nav2_validation_blacklist_enabled;
         compute_path_client_ = rclcpp_action::create_client<ComputePathToPose>(
             this, nav2_compute_path_action_);
     }
@@ -287,7 +309,7 @@ private:
             logWaiting("Waiting for /map");
             return;
         }
-        if (alc_paused_) {
+        if (alc_gate_.paused()) {
             logWaiting("Frontier exploration paused for ALC");
             return;
         }
@@ -316,7 +338,7 @@ private:
         publishFrontierMarkers(result.candidates);
         if (result.candidates.empty()) {
             clearGoalMarker();
-            publishNoCandidateEvent(result.counts);
+            publishNoCandidateEvent(result.counts, result.relaxed);
             logWaiting(
                 "No frontier goal candidate found (free=" +
                 std::to_string(result.counts.free) +
@@ -340,6 +362,10 @@ private:
                 ", rej_unknown=" +
                 std::to_string(result.counts.rejected_unknown_ratio) + ")");
             return;
+        }
+        if (result.relaxed) {
+            publishPlannerEvent("frontier_search_relaxed",
+                                {{"candidates", result.candidates.size()}});
         }
         std::sort(
             result.candidates.begin(), result.candidates.end(),
@@ -384,7 +410,7 @@ private:
     }
 
     void validateNextCandidateRoute() {
-        if (alc_paused_) {
+        if (alc_gate_.paused()) {
             clearPendingRouteSelection();
             return;
         }
@@ -414,10 +440,11 @@ private:
             return;
         }
 
+        publishPlannerEvent("nav2_validation_failed",
+                            {{"reason", "all_candidate_routes_failed"},
+                             {"candidates_tried", pending_candidates_.size()}});
         pending_candidates_.clear();
         pending_robot_xy_.reset();
-        publishPlannerEvent("nav2_validation_failed",
-                            {{"reason", "all_candidate_routes_failed"}});
     }
 
     geometry_msgs::msg::PoseStamped poseForPoint(const WorldPoint& xy,
@@ -433,7 +460,8 @@ private:
 
     void validateRouteSegment(const int generation) {
         if (!validation_active_ || generation != validation_generation_ ||
-            alc_paused_ || !pending_robot_xy_ || !validation_final_candidate_ ||
+            alc_gate_.paused() || !pending_robot_xy_ ||
+            !validation_final_candidate_ ||
             validation_segment_index_ >= validation_route_.size()) {
             return;
         }
@@ -482,12 +510,13 @@ private:
         if (!validation_active_ || generation != validation_generation_) {
             return;
         }
-        if (alc_paused_) {
+        if (alc_gate_.paused()) {
             return;
         }
         if (!handle) {
             publishPlannerEvent("nav2_validation_failed",
-                                {{"reason", "goal_rejected"}});
+                                {{"reason", "goal_rejected"},
+                                 {"goal_xy", validationGoalJson()}});
             validateNextCandidateRoute();
         }
     }
@@ -498,7 +527,7 @@ private:
         if (!validation_active_ || generation != validation_generation_) {
             return;
         }
-        if (alc_paused_) {
+        if (alc_gate_.paused()) {
             return;
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
@@ -506,7 +535,10 @@ private:
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "empty_or_failed_path"},
                                  {"status", static_cast<int>(result.code)},
-                                 {"segment", validation_segment_index_}});
+                                 {"segment", validation_segment_index_},
+                                 {"goal_xy", validationGoalJson()},
+                                 {"waypoint_xy", validationWaypointJson()}});
+            recordValidationFailure();
             validateNextCandidateRoute();
             return;
         }
@@ -532,9 +564,12 @@ private:
             nav2_validation_timeout_sec_) {
             return;
         }
-        publishPlannerEvent(
-            "nav2_validation_failed",
-            {{"reason", "timeout"}, {"segment", validation_segment_index_}});
+        publishPlannerEvent("nav2_validation_failed",
+                            {{"reason", "timeout"},
+                             {"segment", validation_segment_index_},
+                             {"goal_xy", validationGoalJson()},
+                             {"waypoint_xy", validationWaypointJson()}});
+        recordValidationFailure();
         ++validation_generation_;
         validateNextCandidateRoute();
     }
@@ -557,6 +592,7 @@ private:
         active_waypoint_sent_time_sec_ = nowSec();
         last_alignment_robot_yaw_.reset();
         active_goal_hysteresis_retries_ = 0;
+        alignment_spin_attempts_ = 0;
         core_.noteGoalPublished(final_candidate.goal_xy,
                                 final_candidate.goal_yaw, nowSec());
         publishPlannerEvent(
@@ -600,7 +636,7 @@ private:
     }
 
     void sendGoal(const WorldPoint& goal_xy, const double goal_yaw) {
-        if (alc_paused_) {
+        if (alc_gate_.paused()) {
             return;
         }
         NavigateToPose::Goal goal;
@@ -617,20 +653,28 @@ private:
                     active_route_index_ + 1, active_route_.size(),
                     goal_xy.first, goal_xy.second);
 
+        const int generation = ++nav_goal_generation_;
         rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
         options.goal_response_callback =
-            [this](const GoalHandle::SharedPtr& handle) {
-                onGoalResponse(handle);
+            [this, generation](const GoalHandle::SharedPtr& handle) {
+                onGoalResponse(generation, handle);
             };
         options.result_callback =
-            [this](const GoalHandle::WrappedResult& result) {
-                onGoalResult(result);
+            [this, generation](const GoalHandle::WrappedResult& result) {
+                onGoalResult(generation, result);
             };
         nav_client_->async_send_goal(goal, options);
     }
 
-    void onGoalResponse(const GoalHandle::SharedPtr& handle) {
-        if (alc_paused_ || !goal_active_) {
+    void onGoalResponse(const int generation,
+                        const GoalHandle::SharedPtr& handle) {
+        if (generation != nav_goal_generation_) {
+            if (handle) {
+                nav_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (alc_gate_.paused() || !goal_active_) {
             if (handle) {
                 nav_client_->async_cancel_goal(handle);
             }
@@ -646,8 +690,10 @@ private:
         goal_handle_ = handle;
     }
 
-    void onGoalResult(const GoalHandle::WrappedResult& result) {
-        if (!goal_active_) {
+    void onGoalResult(const int generation,
+                      const GoalHandle::WrappedResult& result) {
+        if (generation != nav_goal_generation_ || !goal_active_ ||
+            spin_recovery_active_) {
             return;
         }
         const int status = static_cast<int>(result.code);
@@ -691,6 +737,10 @@ private:
 
     void checkActiveGoalProgress(const RobotPose& robot_pose) {
         const double now = nowSec();
+        if (spin_recovery_active_) {
+            checkSpinRecoveryTimeout(now);
+            return;
+        }
         const auto& config = core_.config();
         if (config.goal_timeout_sec > 0.0 &&
             now - active_goal_sent_time_sec_ >= config.goal_timeout_sec) {
@@ -718,6 +768,9 @@ private:
             }
             if (tryNearGoalHysteresis(robot_pose.xy, now)) {
                 last_alignment_robot_yaw_ = robot_pose.yaw;
+                return;
+            }
+            if (trySpinAlignmentRecovery(robot_pose, now)) {
                 return;
             }
             RCLCPP_WARN(get_logger(),
@@ -792,6 +845,121 @@ private:
         return true;
     }
 
+    bool trySpinAlignmentRecovery(const RobotPose& robot_pose,
+                                  const double now) {
+        const auto& config = core_.config();
+        if (!config.alignment_spin_enabled || !active_goal_ ||
+            alignment_spin_attempts_ >= config.alignment_spin_max_attempts) {
+            return false;
+        }
+        const auto status = core_.evaluateAlignmentGrace(
+            robot_pose.xy, robot_pose.yaw, last_alignment_robot_yaw_,
+            active_route_path_, *active_goal_,
+            now - active_waypoint_sent_time_sec_);
+        if (status.heading_error <= config.alignment_heading_threshold_rad) {
+            return false;
+        }
+        if (!spin_client_->action_server_is_ready()) {
+            return false;
+        }
+
+        ++alignment_spin_attempts_;
+        spin_recovery_active_ = true;
+        spin_started_sec_ = now;
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+            goal_handle_.reset();
+        }
+
+        const double commanded_yaw =
+            std::remainder(status.target_yaw - robot_pose.yaw, 2.0 * M_PI);
+        Spin::Goal spin_goal;
+        spin_goal.target_yaw = static_cast<float>(commanded_yaw);
+        spin_goal.time_allowance = rclcpp::Duration::from_seconds(
+            config.alignment_spin_time_allowance_sec);
+        publishPlannerEvent("alignment_spin_recovery",
+                            {{"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()},
+                             {"heading_error", rounded(status.heading_error)},
+                             {"commanded_yaw", rounded(commanded_yaw)},
+                             {"attempt", alignment_spin_attempts_}});
+        RCLCPP_WARN(get_logger(),
+                    "Spinning %.2f rad to recover alignment before retrying "
+                    "frontier waypoint",
+                    commanded_yaw);
+
+        rclcpp_action::Client<Spin>::SendGoalOptions options;
+        options.goal_response_callback =
+            [this](const SpinGoalHandle::SharedPtr& handle) {
+                onSpinResponse(handle);
+            };
+        options.result_callback =
+            [this](const SpinGoalHandle::WrappedResult& result) {
+                onSpinResult(result);
+            };
+        spin_client_->async_send_goal(spin_goal, options);
+        return true;
+    }
+
+    void onSpinResponse(const SpinGoalHandle::SharedPtr& handle) {
+        if (!spin_recovery_active_) {
+            if (handle) {
+                spin_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (!handle) {
+            finishSpinRecovery("spin_rejected");
+            return;
+        }
+        spin_goal_handle_ = handle;
+    }
+
+    void onSpinResult(const SpinGoalHandle::WrappedResult& result) {
+        if (!spin_recovery_active_) {
+            return;
+        }
+        finishSpinRecovery(result.code == rclcpp_action::ResultCode::SUCCEEDED
+                               ? "spin_completed"
+                               : "spin_failed");
+    }
+
+    void checkSpinRecoveryTimeout(const double now) {
+        const auto& config = core_.config();
+        // Allow the behavior server its own time allowance plus margin for
+        // action transport before declaring the spin lost.
+        if (now - spin_started_sec_ <
+            config.alignment_spin_time_allowance_sec + 5.0) {
+            return;
+        }
+        if (spin_goal_handle_) {
+            spin_client_->async_cancel_goal(spin_goal_handle_);
+        }
+        finishSpinRecovery("spin_timeout");
+    }
+
+    void finishSpinRecovery(const std::string& reason) {
+        const double now = nowSec();
+        const double spin_elapsed = std::max(0.0, now - spin_started_sec_);
+        spin_recovery_active_ = false;
+        spin_goal_handle_.reset();
+        spin_started_sec_ = 0.0;
+        publishPlannerEvent("alignment_spin_recovery_finished",
+                            {{"reason", reason},
+                             {"elapsed", rounded(spin_elapsed)},
+                             {"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()}});
+        if (alc_gate_.paused() || !goal_active_ ||
+            active_route_index_ >= active_route_.size()) {
+            return;
+        }
+        // The spin should not eat into route progress budgets.
+        active_goal_sent_time_sec_ += spin_elapsed;
+        last_progress_time_sec_ = now;
+        last_alignment_robot_yaw_.reset();
+        sendActiveWaypoint();
+    }
+
     bool isNearActiveGoal(const WorldPoint& robot_xy,
                           const double radius) const {
         const auto near = [&](const std::optional<WorldPoint>& goal) {
@@ -829,10 +997,9 @@ private:
     }
 
     void pauseForAlc() {
-        if (alc_paused_) {
+        if (!alc_gate_.applyPause()) {
             return;
         }
-        alc_paused_ = true;
         const auto final_goal = activeFinalGoalJson();
         const auto active_waypoint = activeGoalJson();
         clearPendingRouteSelection();
@@ -848,10 +1015,9 @@ private:
     }
 
     void resumeAfterAlc() {
-        if (!alc_paused_) {
+        if (!alc_gate_.applyResume()) {
             return;
         }
-        alc_paused_ = false;
         wait_log_count_ = 0;
         publishPlannerEvent("frontier_resumed_after_alc");
         RCLCPP_INFO(get_logger(), "Frontier exploration resumed after ALC");
@@ -860,6 +1026,13 @@ private:
     void clearActiveGoal() {
         goal_active_ = false;
         goal_handle_.reset();
+        if (spin_goal_handle_) {
+            spin_client_->async_cancel_goal(spin_goal_handle_);
+        }
+        spin_goal_handle_.reset();
+        spin_recovery_active_ = false;
+        spin_started_sec_ = 0.0;
+        alignment_spin_attempts_ = 0;
         active_goal_.reset();
         active_route_.clear();
         active_route_index_ = 0;
@@ -887,9 +1060,20 @@ private:
         if (!active_final_goal_) {
             return;
         }
-        core_.blacklistGoal(*active_final_goal_, nowSec());
-        const auto record_index =
-            core_.findGoalAttemptIndex(*active_final_goal_);
+        recordGoalFailure(*active_final_goal_);
+    }
+
+    void recordValidationFailure() {
+        if (!nav2_validation_blacklist_enabled_ ||
+            !validation_final_candidate_) {
+            return;
+        }
+        recordGoalFailure(validation_final_candidate_->goal_xy);
+    }
+
+    void recordGoalFailure(const WorldPoint& goal_xy) {
+        core_.blacklistGoal(goal_xy, nowSec());
+        const auto record_index = core_.findGoalAttemptIndex(goal_xy);
         if (!record_index) {
             return;
         }
@@ -901,6 +1085,18 @@ private:
              {"blacklisted",
               record.failures >= core_.config().failed_goal_max_retries},
              {"expires_at_sec", rounded(record.expires_at_sec)}});
+    }
+
+    nlohmann::json validationGoalJson() const {
+        return validation_final_candidate_
+                   ? pointJson(validation_final_candidate_->goal_xy)
+                   : nlohmann::json(nullptr);
+    }
+
+    nlohmann::json validationWaypointJson() const {
+        return validation_segment_index_ < validation_route_.size()
+                   ? pointJson(validation_route_[validation_segment_index_].xy)
+                   : nlohmann::json(nullptr);
     }
 
     void publishCandidateEvent(const std::string& event,
@@ -919,10 +1115,12 @@ private:
              {"reachable", candidate.reachable}});
     }
 
-    void publishNoCandidateEvent(const FrontierCounts& counts) {
+    void publishNoCandidateEvent(const FrontierCounts& counts,
+                                 const bool relaxed) {
         publishPlannerEvent(
             "no_frontier_candidate",
-            {{"counts",
+            {{"relaxed", relaxed},
+             {"counts",
               {{"free", counts.free},
                {"unknown", counts.unknown},
                {"occupied", counts.occupied},
@@ -950,26 +1148,15 @@ private:
     }
 
     void onPlannerEvent(const std_msgs::msg::String& msg) {
-        nlohmann::json payload;
-        try {
-            payload = nlohmann::json::parse(msg.data);
-        }
-        catch (const nlohmann::json::parse_error& exc) {
-            RCLCPP_DEBUG(get_logger(), "Ignoring malformed planner event: %s",
-                         exc.what());
-            return;
-        }
-        if (!payload.contains("event")) {
-            return;
-        }
-
-        const std::string event = payload["event"].dump();
-        if (event == "\"alc_started\"") {
-            pauseForAlc();
-            return;
-        }
-        if (event == "\"alc_finished\"") {
-            resumeAfterAlc();
+        switch (classifyPlannerEvent(msg.data)) {
+            case CoordinationAction::kPause:
+                pauseForAlc();
+                break;
+            case CoordinationAction::kResume:
+                resumeAfterAlc();
+                break;
+            case CoordinationAction::kNone:
+                break;
         }
     }
 
@@ -1080,7 +1267,7 @@ private:
     std::string goal_marker_topic_;
     double cycle_period_sec_ = 3.0;
     int wait_log_count_ = 0;
-    bool alc_paused_ = false;
+    AlcCoordinationGate alc_gate_;
 
     bool goal_active_ = false;
     std::optional<WorldPoint> active_goal_;
@@ -1095,8 +1282,14 @@ private:
     int active_goal_hysteresis_retries_ = 0;
     std::optional<double> last_alignment_robot_yaw_;
     GoalHandle::SharedPtr goal_handle_;
+    int nav_goal_generation_ = 0;
+    bool spin_recovery_active_ = false;
+    int alignment_spin_attempts_ = 0;
+    double spin_started_sec_ = 0.0;
+    SpinGoalHandle::SharedPtr spin_goal_handle_;
 
     bool nav2_validation_enabled_ = true;
+    bool nav2_validation_blacklist_enabled_ = true;
     double nav2_validation_timeout_sec_ = 2.0;
     std::string nav2_compute_path_action_;
     bool validation_active_ = false;
@@ -1112,6 +1305,7 @@ private:
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     rclcpp_action::Client<NavigateToPose>::SharedPtr nav_client_;
+    rclcpp_action::Client<Spin>::SharedPtr spin_client_;
     rclcpp_action::Client<ComputePathToPose>::SharedPtr compute_path_client_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr

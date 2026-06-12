@@ -521,6 +521,76 @@ TEST(ClusterFrontierExplorer, ProgressRequiresBfsArcAdvance) {
     EXPECT_LT(std::abs(lateral->arc_length - start->arc_length), 1e-6);
 }
 
+nav_msgs::msg::OccupancyGrid buildHalfUnknownGrid() {
+    auto grid = buildGrid(20, 10, 0.1);
+    for (int y = 0; y < 10; ++y) {
+        for (int x = 12; x < 20; ++x) {
+            setCell(grid, x, y, -1);
+        }
+    }
+    return grid;
+}
+
+FrontierExplorerCore makeRelaxableCore(const double relax_sec) {
+    auto core = makeCore(buildHalfUnknownGrid());
+    auto config = core.config();
+    config.min_frontier_size = 50;
+    config.unknown_overlap_max_ratio = 0.7;
+    config.no_frontier_relax_sec = relax_sec;
+    config.relaxed_min_frontier_size = 4;
+    config.relaxed_max_frontier_distance = 5.0;
+    core.setConfig(config);
+    return core;
+}
+
+TEST(ClusterFrontierExplorer, RelaxedSearchRecoversAfterNoFrontierStall) {
+    auto core = makeRelaxableCore(10.0);
+    const auto robot_xy = core.mapToWorld(2, 5);
+
+    const auto first = core.findCandidates(robot_xy, 100.0, 0.0);
+    EXPECT_TRUE(first.candidates.empty());
+    EXPECT_FALSE(first.relaxed);
+
+    const auto early = core.findCandidates(robot_xy, 105.0, 0.0);
+    EXPECT_TRUE(early.candidates.empty());
+    EXPECT_FALSE(early.relaxed);
+
+    const auto relaxed = core.findCandidates(robot_xy, 110.0, 0.0);
+    EXPECT_TRUE(relaxed.relaxed);
+    ASSERT_FALSE(relaxed.candidates.empty());
+
+    // Relaxation stays latched while strict searches keep failing, so the
+    // next cycle does not wait another relax window.
+    const auto latched = core.findCandidates(robot_xy, 111.0, 0.0);
+    EXPECT_TRUE(latched.relaxed);
+    EXPECT_FALSE(latched.candidates.empty());
+}
+
+TEST(ClusterFrontierExplorer, RelaxationDisabledKeepsStrictThreshold) {
+    auto core = makeRelaxableCore(0.0);
+    const auto robot_xy = core.mapToWorld(2, 5);
+
+    const auto first = core.findCandidates(robot_xy, 100.0, 0.0);
+    EXPECT_TRUE(first.candidates.empty());
+    EXPECT_FALSE(first.relaxed);
+
+    const auto later = core.findCandidates(robot_xy, 500.0, 0.0);
+    EXPECT_TRUE(later.candidates.empty());
+    EXPECT_FALSE(later.relaxed);
+}
+
+TEST(ClusterFrontierExplorer, StrictSuccessResetsRelaxation) {
+    auto core = makeRelaxableCore(10.0);
+    auto config = core.config();
+    config.min_frontier_size = 4;
+    core.setConfig(config);
+    const auto robot_xy = core.mapToWorld(2, 5);
+
+    const auto strict = core.findCandidates(robot_xy, 100.0, 0.0);
+    EXPECT_FALSE(strict.relaxed);
+    EXPECT_FALSE(strict.candidates.empty());
+}
+
 TEST(ClusterFrontierExplorer, HeadingErrorWrapsAcrossPi) {
     auto grid = buildGrid(10, 10, 0.1);
     auto core = makeCore(grid);

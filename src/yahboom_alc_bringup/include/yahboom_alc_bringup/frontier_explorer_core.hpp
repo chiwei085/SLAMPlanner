@@ -59,6 +59,12 @@ struct FrontierConfig
     int max_subgoals = 3;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
+    double no_frontier_relax_sec = 0.0;
+    int relaxed_min_frontier_size = 8;
+    double relaxed_max_frontier_distance = 0.0;
+    bool alignment_spin_enabled = false;
+    int alignment_spin_max_attempts = 1;
+    double alignment_spin_time_allowance_sec = 15.0;
 };
 
 struct FrontierCounts
@@ -135,6 +141,7 @@ struct CandidateResult
 {
     std::vector<FrontierCandidate> candidates;
     FrontierCounts counts;
+    bool relaxed = false;
 };
 
 struct AlignmentGraceStatus
@@ -248,6 +255,10 @@ private:
     std::vector<Cell> reconstructPath(const std::vector<int>& parent,
                                       int start_index, int goal_index,
                                       int width) const;
+    CandidateResult findCandidatesOnce(const WorldPoint& robot_xy,
+                                       double now_sec,
+                                       std::optional<double> robot_yaw);
+    FrontierConfig relaxedConfig() const;
 
     FrontierConfig config_;
     nav_msgs::msg::OccupancyGrid map_;
@@ -257,6 +268,8 @@ private:
     double last_goal_yaw_ = 0.0;
     double last_goal_time_sec_ = 0.0;
     std::vector<GoalAttemptRecord> goal_attempts_;
+    std::optional<double> last_strict_candidate_sec_;
+    bool relaxation_active_ = false;
 };
 
 }  // namespace yahboom_alc_bringup
