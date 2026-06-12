@@ -16,6 +16,7 @@
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -185,9 +186,7 @@ private:
             const auto transform = tf_buffer_.lookupTransform(
                 global_frame_, robot_frame_, tf2::TimePointZero);
             const auto& t = transform.transform.translation;
-            const auto& r = transform.transform.rotation;
-            const double yaw = std::atan2(2.0 * (r.w * r.z + r.x * r.y),
-                                          1.0 - 2.0 * (r.y * r.y + r.z * r.z));
+            const double yaw = yawFromQuaternion(transform.transform.rotation);
             return {{RobotPose{rounded(t.x), rounded(t.y), rounded(yaw)}}, {}};
         }
         catch (const tf2::TransformException& exc) {

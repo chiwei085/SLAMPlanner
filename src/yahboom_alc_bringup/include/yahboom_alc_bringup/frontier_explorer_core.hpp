@@ -135,6 +135,9 @@ struct PathProjection
 {
     double distance = 0.0;
     double arc_length = 0.0;
+    // Index i of the path segment (path[i - 1], path[i]) holding the
+    // projection; 0 for single-point paths.
+    std::size_t segment = 0;
 };
 
 struct CandidateResult

@@ -25,7 +25,6 @@ public:
     bool paused() const { return paused_; }
     bool applyPause();
     bool applyResume();
-    bool apply(CoordinationAction action);
 
 private:
     bool paused_ = false;

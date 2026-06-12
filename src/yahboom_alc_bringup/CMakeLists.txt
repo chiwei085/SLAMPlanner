@@ -22,6 +22,7 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
@@ -40,6 +41,8 @@ ament_target_dependencies(yahboom_alc_bringup_lib
   geometry_msgs
   nav_msgs
   rclcpp
+  tf2
+  tf2_ros
 )
 
 add_executable(cluster_frontier_explorer
@@ -114,7 +117,10 @@ target_link_libraries(yahboom_r2_cmd_vel_bridge
   yahboom_alc_bringup_lib
 )
 ament_target_dependencies(yahboom_r2_cmd_vel_bridge
+  nav_msgs
   rclcpp
+  tf2
+  tf2_ros
 )
 
 install(
@@ -146,6 +152,9 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_r2_cmd_vel_bridge
     yahboom_alc_bringup_lib
+  )
+  ament_target_dependencies(test_r2_cmd_vel_bridge
+    nav_msgs
   )
 
   ament_add_gtest(test_cluster_frontier_explorer

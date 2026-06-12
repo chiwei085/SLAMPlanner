@@ -19,13 +19,7 @@ double yawBetween(const WorldPoint& from, const WorldPoint& to) {
 }
 
 double headingDelta(const double from_yaw, const double to_yaw) {
-    constexpr double pi = M_PI;
-    constexpr double two_pi = 2.0 * pi;
-    double delta = std::fmod(to_yaw - from_yaw + pi, two_pi);
-    if (delta < 0.0) {
-        delta += two_pi;
-    }
-    return std::abs(delta - pi);
+    return std::abs(std::remainder(to_yaw - from_yaw, 2.0 * M_PI));
 }
 }  // namespace
 
@@ -71,12 +65,18 @@ CandidateResult FrontierExplorerCore::findCandidates(
     }
 
     relaxation_active_ = true;
-    const FrontierConfig strict = config_;
-    // Footprint fields stay identical, so the cached footprint geometry
-    // remains valid across the temporary config swap.
+    struct ConfigRestore
+    {
+        FrontierExplorerCore& core;
+        FrontierConfig strict;
+        ~ConfigRestore() {
+            core.config_ = std::move(strict);
+            core.footprint_geometry_.reset();
+        }
+    } restore{*this, config_};
     config_ = relaxedConfig();
+    footprint_geometry_.reset();
     auto relaxed_result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
-    config_ = strict;
     relaxed_result.relaxed = true;
     return relaxed_result;
 }
@@ -695,7 +695,7 @@ std::optional<PathProjection> FrontierExplorerCore::projectOntoPath(
         if (!best || dist < best->distance ||
             (std::abs(dist - best->distance) <= 1e-9 &&
              arc < best->arc_length)) {
-            best = PathProjection{dist, arc};
+            best = PathProjection{dist, arc, i};
         }
         arc_before += len;
     }
@@ -907,46 +907,14 @@ std::optional<double> FrontierExplorerCore::pathTargetYawNear(
     if (path.size() < 2) {
         return std::nullopt;
     }
-
-    std::optional<PathProjection> best;
-    std::size_t best_segment = 1;
-    double arc_before = 0.0;
-    for (std::size_t i = 1; i < path.size(); ++i) {
-        const auto a =
-            mapToWorldUnchecked(path[i - 1].first, path[i - 1].second);
-        const auto b = mapToWorldUnchecked(path[i].first, path[i].second);
-        const double dx = b.first - a.first;
-        const double dy = b.second - a.second;
-        const double len_sq = dx * dx + dy * dy;
-        if (len_sq <= 1e-12) {
-            continue;
-        }
-        const double len = std::sqrt(len_sq);
-        const double raw_t = ((robot_xy.first - a.first) * dx +
-                              (robot_xy.second - a.second) * dy) /
-                             len_sq;
-        const double t = std::clamp(raw_t, 0.0, 1.0);
-        const double px = a.first + t * dx;
-        const double py = a.second + t * dy;
-        const double dist =
-            std::hypot(robot_xy.first - px, robot_xy.second - py);
-        const double arc = arc_before + t * len;
-        if (!best || dist < best->distance ||
-            (std::abs(dist - best->distance) <= 1e-9 &&
-             arc < best->arc_length)) {
-            best = PathProjection{dist, arc};
-            best_segment = i;
-        }
-        arc_before += len;
-    }
-    if (!best) {
+    const auto projection = projectOntoPath(robot_xy, path);
+    if (!projection || projection->segment == 0) {
         return std::nullopt;
     }
-
-    const auto a = mapToWorldUnchecked(path[best_segment - 1].first,
-                                       path[best_segment - 1].second);
-    const auto b = mapToWorldUnchecked(path[best_segment].first,
-                                       path[best_segment].second);
+    const auto a = mapToWorldUnchecked(path[projection->segment - 1].first,
+                                       path[projection->segment - 1].second);
+    const auto b = mapToWorldUnchecked(path[projection->segment].first,
+                                       path[projection->segment].second);
     return yawBetween(a, b);
 }
 

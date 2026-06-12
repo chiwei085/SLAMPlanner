@@ -1,10 +1,15 @@
 #pragma once
 
 #include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rik_sd/struct_descriptor.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace yahboom_alc_bringup
@@ -24,7 +29,30 @@ struct R2CmdVelBridgeConfig
     double max_steering_rate = 0.80;
     double assumed_command_period = 0.10;
     bool arc_turn_when_stationary = true;
+    bool reverse_safety_enabled = true;
+    std::string reverse_costmap_topic = "/local_costmap/costmap";
+    std::string reverse_robot_frame = "base_footprint";
+    double reverse_costmap_max_age_sec = 1.0;
+    double reverse_check_distance_m = 0.18;
+    double reverse_safety_margin_m = 0.08;
+    bool reverse_unknown_is_blocked = true;
+    double footprint_front_m = 0.16;
+    double footprint_rear_m = 0.15;
+    double footprint_half_width_m = 0.11;
+    double footprint_padding_m = 0.05;
 };
+
+struct ReverseSafetyPose
+{
+    double x = 0.0;
+    double y = 0.0;
+    double yaw = 0.0;
+};
+
+bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
+                            const ReverseSafetyPose& pose,
+                            const double reverse_speed,
+                            const R2CmdVelBridgeConfig& config);
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
     const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config);
@@ -41,10 +69,19 @@ private:
     void onCmdVel(const geometry_msgs::msg::Twist::ConstSharedPtr& msg);
     geometry_msgs::msg::Twist limitRate(
         const geometry_msgs::msg::Twist& target);
+    geometry_msgs::msg::Twist applyReverseSafety(
+        const geometry_msgs::msg::Twist& target);
+    std::optional<ReverseSafetyPose> lookupReverseSafetyPose(
+        const nav_msgs::msg::OccupancyGrid& costmap);
+    bool isCostmapFresh(const nav_msgs::msg::OccupancyGrid& costmap);
 
     R2CmdVelBridgeConfig config_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_costmap_;
     geometry_msgs::msg::Twist last_output_;
     rclcpp::Time last_output_time_;
     std::atomic<bool> stopping_{false};
@@ -76,7 +113,28 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
             named(&R2CmdVelBridgeConfig::assumed_command_period,
                   "assumed_command_period"),
             named(&R2CmdVelBridgeConfig::arc_turn_when_stationary,
-                  "arc_turn_when_stationary"));
+                  "arc_turn_when_stationary"),
+            named(&R2CmdVelBridgeConfig::reverse_safety_enabled,
+                  "reverse_safety_enabled"),
+            named(&R2CmdVelBridgeConfig::reverse_costmap_topic,
+                  "reverse_costmap_topic"),
+            named(&R2CmdVelBridgeConfig::reverse_robot_frame,
+                  "reverse_robot_frame"),
+            named(&R2CmdVelBridgeConfig::reverse_costmap_max_age_sec,
+                  "reverse_costmap_max_age_sec"),
+            named(&R2CmdVelBridgeConfig::reverse_check_distance_m,
+                  "reverse_check_distance_m"),
+            named(&R2CmdVelBridgeConfig::reverse_safety_margin_m,
+                  "reverse_safety_margin_m"),
+            named(&R2CmdVelBridgeConfig::reverse_unknown_is_blocked,
+                  "reverse_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::footprint_front_m,
+                  "footprint_front_m"),
+            named(&R2CmdVelBridgeConfig::footprint_rear_m, "footprint_rear_m"),
+            named(&R2CmdVelBridgeConfig::footprint_half_width_m,
+                  "footprint_half_width_m"),
+            named(&R2CmdVelBridgeConfig::footprint_padding_m,
+                  "footprint_padding_m"));
     }
 };
 

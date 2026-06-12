@@ -23,6 +23,7 @@
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -198,6 +199,10 @@ namespace yahboom_alc_bringup
 
 namespace
 {
+
+// Margin granted on top of the behavior server's own spin time allowance
+// to cover action transport before declaring a spin lost.
+constexpr double kSpinTransportMarginSec = 5.0;
 
 geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     geometry_msgs::msg::Quaternion q;
@@ -460,8 +465,7 @@ private:
 
     void validateRouteSegment(const int generation) {
         if (!validation_active_ || generation != validation_generation_ ||
-            alc_gate_.paused() || !pending_robot_xy_ ||
-            !validation_final_candidate_ ||
+            !pending_robot_xy_ || !validation_final_candidate_ ||
             validation_segment_index_ >= validation_route_.size()) {
             return;
         }
@@ -510,9 +514,6 @@ private:
         if (!validation_active_ || generation != validation_generation_) {
             return;
         }
-        if (alc_gate_.paused()) {
-            return;
-        }
         if (!handle) {
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "goal_rejected"},
@@ -525,9 +526,6 @@ private:
         const int generation,
         const ComputePathGoalHandle::WrappedResult& result) {
         if (!validation_active_ || generation != validation_generation_) {
-            return;
-        }
-        if (alc_gate_.paused()) {
             return;
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
@@ -623,10 +621,8 @@ private:
             const auto transform = tf_buffer_.lookupTransform(
                 global_frame_, robot_frame_, tf2::TimePointZero);
             const auto& t = transform.transform.translation;
-            const auto& r = transform.transform.rotation;
-            const double yaw = std::atan2(2.0 * (r.w * r.z + r.x * r.y),
-                                          1.0 - 2.0 * (r.y * r.y + r.z * r.z));
-            return RobotPose{WorldPoint{t.x, t.y}, yaw};
+            return RobotPose{WorldPoint{t.x, t.y},
+                             yawFromQuaternion(transform.transform.rotation)};
         }
         catch (const tf2::TransformException& exc) {
             RCLCPP_DEBUG(get_logger(), "Waiting for robot pose TF: %s",
@@ -674,7 +670,7 @@ private:
             }
             return;
         }
-        if (alc_gate_.paused() || !goal_active_) {
+        if (!goal_active_) {
             if (handle) {
                 nav_client_->async_cancel_goal(handle);
             }
@@ -762,7 +758,8 @@ private:
         if (config.stuck_progress_timeout_sec > 0.0 &&
             now - last_progress_time_sec_ >=
                 config.stuck_progress_timeout_sec) {
-            if (tryAlignmentProgressGrace(robot_pose, now)) {
+            const auto alignment = evaluateActiveGoalAlignment(robot_pose, now);
+            if (tryAlignmentProgressGrace(robot_pose, now, alignment)) {
                 last_alignment_robot_yaw_ = robot_pose.yaw;
                 return;
             }
@@ -770,7 +767,7 @@ private:
                 last_alignment_robot_yaw_ = robot_pose.yaw;
                 return;
             }
-            if (trySpinAlignmentRecovery(robot_pose, now)) {
+            if (trySpinAlignmentRecovery(robot_pose, now, alignment)) {
                 return;
             }
             RCLCPP_WARN(get_logger(),
@@ -781,15 +778,20 @@ private:
         last_alignment_robot_yaw_ = robot_pose.yaw;
     }
 
-    bool tryAlignmentProgressGrace(const RobotPose& robot_pose,
-                                   const double now) {
+    AlignmentGraceStatus evaluateActiveGoalAlignment(
+        const RobotPose& robot_pose, const double now) const {
         if (!active_goal_) {
-            return false;
+            return {};
         }
-        const auto status = core_.evaluateAlignmentGrace(
+        return core_.evaluateAlignmentGrace(
             robot_pose.xy, robot_pose.yaw, last_alignment_robot_yaw_,
             active_route_path_, *active_goal_,
             now - active_waypoint_sent_time_sec_);
+    }
+
+    bool tryAlignmentProgressGrace(const RobotPose& robot_pose,
+                                   const double now,
+                                   const AlignmentGraceStatus& status) {
         if (!status.active) {
             return false;
         }
@@ -845,17 +847,13 @@ private:
         return true;
     }
 
-    bool trySpinAlignmentRecovery(const RobotPose& robot_pose,
-                                  const double now) {
+    bool trySpinAlignmentRecovery(const RobotPose& robot_pose, const double now,
+                                  const AlignmentGraceStatus& status) {
         const auto& config = core_.config();
         if (!config.alignment_spin_enabled || !active_goal_ ||
             alignment_spin_attempts_ >= config.alignment_spin_max_attempts) {
             return false;
         }
-        const auto status = core_.evaluateAlignmentGrace(
-            robot_pose.xy, robot_pose.yaw, last_alignment_robot_yaw_,
-            active_route_path_, *active_goal_,
-            now - active_waypoint_sent_time_sec_);
         if (status.heading_error <= config.alignment_heading_threshold_rad) {
             return false;
         }
@@ -926,10 +924,8 @@ private:
 
     void checkSpinRecoveryTimeout(const double now) {
         const auto& config = core_.config();
-        // Allow the behavior server its own time allowance plus margin for
-        // action transport before declaring the spin lost.
-        if (now - spin_started_sec_ <
-            config.alignment_spin_time_allowance_sec + 5.0) {
+        if (now - spin_started_sec_ < config.alignment_spin_time_allowance_sec +
+                                          kSpinTransportMarginSec) {
             return;
         }
         if (spin_goal_handle_) {
@@ -949,8 +945,7 @@ private:
                              {"elapsed", rounded(spin_elapsed)},
                              {"goal_xy", activeFinalGoalJson()},
                              {"active_waypoint_xy", activeGoalJson()}});
-        if (alc_gate_.paused() || !goal_active_ ||
-            active_route_index_ >= active_route_.size()) {
+        if (!goal_active_ || active_route_index_ >= active_route_.size()) {
             return;
         }
         // The spin should not eat into route progress budgets.
@@ -996,6 +991,10 @@ private:
         clearActiveGoal();
     }
 
+    // Pausing clears all in-flight validation, goal, and spin state, so
+    // async callbacks only need their validation_active_/generation/
+    // goal_active_ guards; paused() is rechecked at the entry points that
+    // start new work (onTimer, validateNextCandidateRoute, sendGoal).
     void pauseForAlc() {
         if (!alc_gate_.applyPause()) {
             return;

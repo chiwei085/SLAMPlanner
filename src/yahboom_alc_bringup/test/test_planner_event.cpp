@@ -54,14 +54,9 @@ TEST(PlannerEvent, GateTransitionsOnceOnResume) {
     EXPECT_FALSE(gate.applyResume());
 }
 
-TEST(PlannerEvent, GateAppliesClassifiedActions) {
-    AlcCoordinationGate gate;
-    EXPECT_FALSE(gate.apply(CoordinationAction::kNone));
-    EXPECT_TRUE(gate.apply(CoordinationAction::kPause));
-    EXPECT_FALSE(gate.apply(CoordinationAction::kPause));
-    EXPECT_TRUE(gate.apply(CoordinationAction::kResume));
-    EXPECT_FALSE(gate.apply(CoordinationAction::kNone));
-    EXPECT_FALSE(gate.paused());
+TEST(PlannerEvent, MalformedNumberPayloadIsIgnored) {
+    EXPECT_EQ(classifyPlannerEvent(R"({"event":"alc_started","bad":-})"),
+              CoordinationAction::kNone);
 }
 
 }  // namespace

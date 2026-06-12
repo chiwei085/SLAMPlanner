@@ -9,7 +9,9 @@ namespace
 
 using geometry_msgs::msg::Twist;
 using yahboom_alc_bringup::convertNavTwistToR2;
+using yahboom_alc_bringup::isReverseSafeInCostmap;
 using yahboom_alc_bringup::R2CmdVelBridgeConfig;
+using yahboom_alc_bringup::ReverseSafetyPose;
 
 constexpr double kTolerance = 1e-9;
 
@@ -22,7 +24,42 @@ R2CmdVelBridgeConfig defaultConfig() {
     config.linear_deadband = 0.001;
     config.angular_deadband = 0.001;
     config.arc_turn_when_stationary = true;
+    config.reverse_check_distance_m = 0.20;
+    config.reverse_safety_margin_m = 0.08;
+    config.footprint_front_m = 0.16;
+    config.footprint_rear_m = 0.15;
+    config.footprint_half_width_m = 0.11;
+    config.footprint_padding_m = 0.03;
     return config;
+}
+
+nav_msgs::msg::OccupancyGrid buildCostmap() {
+    nav_msgs::msg::OccupancyGrid map;
+    map.header.frame_id = "odom";
+    map.info.resolution = 0.05;
+    map.info.width = 60;
+    map.info.height = 60;
+    map.info.origin.position.x = -1.5;
+    map.info.origin.position.y = -1.5;
+    map.data.assign(static_cast<std::size_t>(map.info.width) *
+                        static_cast<std::size_t>(map.info.height),
+                    0);
+    return map;
+}
+
+void setWorldCell(
+    nav_msgs::msg::OccupancyGrid& map, const double wx,
+    const double wy,  // NOLINT(bugprone-easily-swappable-parameters)
+    const int8_t value) {
+    const auto mx = static_cast<int>(
+        std::floor((wx - map.info.origin.position.x) / map.info.resolution));
+    const auto my = static_cast<int>(
+        std::floor((wy - map.info.origin.position.y) / map.info.resolution));
+    ASSERT_GE(mx, 0);
+    ASSERT_GE(my, 0);
+    ASSERT_LT(mx, static_cast<int>(map.info.width));
+    ASSERT_LT(my, static_cast<int>(map.info.height));
+    map.data[static_cast<std::size_t>(my) * map.info.width + mx] = value;
 }
 
 TEST(R2CmdVelBridge, ZeroInputPublishesZeroOutput) {
@@ -104,6 +141,43 @@ TEST(R2CmdVelBridge, StationarySpinStaysZeroForwardWhenDisabled) {
     EXPECT_DOUBLE_EQ(output.linear.x, 0.0);
     EXPECT_NEAR(output.linear.y, 0.5, kTolerance);
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyAllowsFullyFreeRearFootprint) {
+    const auto costmap = buildCostmap();
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyBlocksOccupiedRearFootprint) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, 100);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyBlocksUnknownRearFootprint) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyBlocksOutOfBoundsSweep) {
+    const auto costmap = buildCostmap();
+    const ReverseSafetyPose pose{-1.32, 0.0, 0.0};
+
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyIgnoresForwardCommands) {
+    nav_msgs::msg::OccupancyGrid costmap;
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, 0.08, defaultConfig()));
 }
 
 }  // namespace

@@ -91,6 +91,18 @@ public:
         return it == object.end() ? null_json : it->second;
     }
 
+    bool is_string() const {
+        return std::holds_alternative<std::string>(value_);
+    }
+
+    template <typename T>
+    T get() const {
+        if (const T* value = std::get_if<T>(&value_)) {
+            return *value;
+        }
+        return T{};
+    }
+
     void push_back(json value) {
         if (!std::holds_alternative<array_t>(value_)) {
             value_ = array_t{};
@@ -304,7 +316,12 @@ private:
                     ++pos_;
                 }
             }
-            return json(std::stod(text_.substr(start, pos_ - start)));
+            try {
+                return json(std::stod(text_.substr(start, pos_ - start)));
+            }
+            catch (const std::exception&) {
+                throw parse_error("invalid JSON number");
+            }
         }
 
         void expect(const char expected) {

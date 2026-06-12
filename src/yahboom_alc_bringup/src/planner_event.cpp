@@ -2,29 +2,30 @@
 
 #include <nlohmann/json.hpp>
 
-#include <exception>
-
 namespace yahboom_alc_bringup
 {
 
 CoordinationAction classifyPlannerEvent(const std::string& payload) {
+    // Subscribers on the event topic see every event, including their own;
+    // skip the JSON parse unless the payload can name an ALC transition.
+    if (payload.find("alc_") == std::string::npos) {
+        return CoordinationAction::kNone;
+    }
     nlohmann::json parsed;
     try {
         parsed = nlohmann::json::parse(payload);
     }
-    // The bundled JSON shim can surface std::stod failures and similar
-    // standard exceptions for malformed payloads, not only parse_error.
-    catch (const std::exception&) {
+    catch (const nlohmann::json::parse_error&) {
         return CoordinationAction::kNone;
     }
     if (!parsed.contains("event")) {
         return CoordinationAction::kNone;
     }
-    const std::string event = parsed[std::string("event")].dump();
-    if (event == "\"alc_started\"") {
+    const auto event = parsed[std::string("event")].get<std::string>();
+    if (event == "alc_started") {
         return CoordinationAction::kPause;
     }
-    if (event == "\"alc_finished\"") {
+    if (event == "alc_finished") {
         return CoordinationAction::kResume;
     }
     return CoordinationAction::kNone;
@@ -44,18 +45,6 @@ bool AlcCoordinationGate::applyResume() {
     }
     paused_ = false;
     return true;
-}
-
-bool AlcCoordinationGate::apply(const CoordinationAction action) {
-    switch (action) {
-        case CoordinationAction::kPause:
-            return applyPause();
-        case CoordinationAction::kResume:
-            return applyResume();
-        case CoordinationAction::kNone:
-            break;
-    }
-    return false;
 }
 
 }  // namespace yahboom_alc_bringup
