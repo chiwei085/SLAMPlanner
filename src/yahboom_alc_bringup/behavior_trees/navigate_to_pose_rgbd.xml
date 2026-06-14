@@ -1,6 +1,6 @@
 <!--
   RGB-D exploration behavior tree for Yahboom R2.
-  Recovery: back up to create clearance, then spin to reorient.
+  Recovery: back up to create clearance and clear stale costmap state.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -25,7 +25,6 @@
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <Spin spin_dist="0.52"/>
           <Wait wait_duration="5"/>
         </RoundRobin>
       </ReactiveFallback>

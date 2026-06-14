@@ -27,6 +27,7 @@ find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 add_library(yahboom_alc_bringup_lib
+  src/backtrace_recovery.cpp
   src/frontier_explorer_core.cpp
   src/planner_event.cpp
   src/planner_runtime_logger.cpp
@@ -41,6 +42,7 @@ ament_target_dependencies(yahboom_alc_bringup_lib
   geometry_msgs
   nav_msgs
   rclcpp
+  std_msgs
   tf2
   tf2_ros
 )
@@ -119,6 +121,7 @@ target_link_libraries(yahboom_r2_cmd_vel_bridge
 ament_target_dependencies(yahboom_r2_cmd_vel_bridge
   nav_msgs
   rclcpp
+  std_msgs
   tf2
   tf2_ros
 )
@@ -164,6 +167,16 @@ if(BUILD_TESTING)
     yahboom_alc_bringup_lib
   )
   ament_target_dependencies(test_cluster_frontier_explorer
+    nav_msgs
+  )
+
+  ament_add_gtest(test_backtrace_recovery
+    test/test_backtrace_recovery.cpp
+  )
+  target_link_libraries(test_backtrace_recovery
+    yahboom_alc_bringup_lib
+  )
+  ament_target_dependencies(test_backtrace_recovery
     nav_msgs
   )
 
