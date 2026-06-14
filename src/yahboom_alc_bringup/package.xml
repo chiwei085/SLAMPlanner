@@ -29,6 +29,8 @@
   <exec_depend>launch_xml</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>rtabmap_ros</exec_depend>
   <exec_depend>rtabmap_slam</exec_depend>
   <exec_depend>rtabmap_sync</exec_depend>

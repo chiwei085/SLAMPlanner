@@ -1,3 +1,4 @@
+import json
 import os
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
@@ -26,6 +27,30 @@ ROBOT_FOOTPRINT_PARAMS = {
     "footprint_rear_m": 0.15,
     "footprint_half_width_m": 0.11,
     "footprint_padding_m": 0.05,
+}
+
+NAV2_RUNTIME_METADATA = {
+    "planner_plugin": "nav2_smac_planner/SmacPlannerHybrid",
+    "planner_motion_model": "REEDS_SHEPP",
+    "planner_minimum_turning_radius": 0.50,
+    "controller_plugin": (
+        "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+    ),
+    "controller_allow_reversing": True,
+    "controller_use_rotate_to_heading": False,
+    "local_inflation_radius": 0.40,
+    "global_inflation_radius": 0.40,
+    "local_footprint_padding": 0.05,
+    "global_footprint_padding": 0.05,
+    "bridge_reverse": {
+        "enabled": True,
+        "allowed_cost_max": 98,
+        "unknown_is_blocked": True,
+        "check_distance_m": 0.20,
+        "safety_margin_m": 0.08,
+        "stationary_arc_requires_forward_clearance": True,
+        "stationary_arc_check_distance_m": 0.12,
+    },
 }
 
 
@@ -87,6 +112,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
         "robot_frame": "base_footprint",
         "global_frame": "map",
         "planner_event_topic": "/planner/events",
+        "nav2_success_xy_tolerance_m": 0.40,
     }
     return [
         Node(
@@ -132,7 +158,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "alignment_heading_threshold_rad": 0.55,
                     "alignment_max_grace_sec": 8.0,
                     "alignment_min_rotation_delta_rad": 0.12,
-                    "alignment_spin_enabled": True,
+                    "alignment_spin_enabled": False,
                     "alignment_spin_max_attempts": 1,
                     "alignment_spin_time_allowance_sec": 8.0,
                     "no_frontier_relax_sec": 30.0,
@@ -149,6 +175,16 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "nav2_validation_timeout_sec": 2.0,
                     "nav2_compute_path_action": "/compute_path_to_pose",
                     "nav2_validation_blacklist_enabled": True,
+                    "backtrace_recovery_enabled": True,
+                    "backtrace_breadcrumb_max_distance_m": 2.0,
+                    "backtrace_breadcrumb_max_age_sec": 90.0,
+                    "backtrace_backup_step_m": 0.10,
+                    "backtrace_backup_speed_mps": 0.04,
+                    "backtrace_backup_time_allowance_sec": 5.0,
+                    "backtrace_max_segments": 4,
+                    "backtrace_min_actual_displacement_m": 0.03,
+                    "backtrace_cancel_timeout_sec": 1.0,
+                    "backtrace_backup_action": "/backup",
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }
@@ -398,22 +434,30 @@ def generate_launch_description():
             {
                 "input_topic": nav_cmd_vel_topic,
                 "output_topic": driver_cmd_vel_topic,
-                "min_linear_speed": 0.08,
+                "planner_event_topic": "/planner/events",
+                "min_linear_speed": 0.05,
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
+                "wheelbase_m": 0.16,
+                "min_turning_radius_m": 0.50,
+                "max_curvature": 2.0,
+                "max_steering_angle_rad": 1.25,
                 "linear_deadband": 0.001,
-                "angular_deadband": 0.04,
+                "angular_deadband": 0.005,
                 "max_linear_accel": 0.12,
                 "max_steering_rate": 1.0,
                 "assumed_command_period": 0.10,
                 "arc_turn_when_stationary": True,
+                "stationary_arc_requires_forward_clearance": True,
+                "stationary_arc_check_distance_m": 0.12,
                 "reverse_safety_enabled": True,
                 "reverse_costmap_topic": "/local_costmap/costmap",
                 "reverse_robot_frame": "base_footprint",
                 "reverse_costmap_max_age_sec": 1.0,
                 "reverse_check_distance_m": 0.20,
                 "reverse_safety_margin_m": 0.08,
+                "reverse_allowed_cost_max": 98,
                 "reverse_unknown_is_blocked": True,
                 **ROBOT_FOOTPRINT_PARAMS,
             }
@@ -436,6 +480,23 @@ def generate_launch_description():
                 "global_frame": "map",
                 "robot_frame": "base_footprint",
                 "snapshot_period_sec": 2.0,
+                "runtime_metadata_json": json.dumps(
+                    {
+                        **NAV2_RUNTIME_METADATA,
+                        "bridge": {
+                            "reverse_safety_enabled": True,
+                            "reverse_allowed_cost_max": 98,
+                            "reverse_check_distance_m": 0.20,
+                            "reverse_safety_margin_m": 0.08,
+                            "reverse_unknown_is_blocked": True,
+                            "min_turning_radius_m": 0.50,
+                            "max_curvature": 2.0,
+                        },
+                        "footprint": ROBOT_FOOTPRINT_PARAMS,
+                    }
+                ),
+                "nav2_params_file": nav2_params_file,
+                "nav2_bt_xml": nav2_bt_xml,
             }
         ],
     )
@@ -548,8 +609,8 @@ def generate_launch_description():
                 "nav2_params_file",
                 default_value=default_nav2_params,
                 description=(
-                    "Nav2 parameter YAML. Use this to tune spin behavior timing "
-                    "for the R2 arc-turn approximation."
+                    "Nav2 parameter YAML. Use this to tune the R2 planner, "
+                    "controller, and behavior server."
                 ),
             ),
             DeclareLaunchArgument(
