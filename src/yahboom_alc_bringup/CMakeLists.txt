@@ -22,11 +22,14 @@ find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 add_library(yahboom_alc_bringup_lib
+  src/backtrace_recovery.cpp
   src/frontier_explorer_core.cpp
+  src/planner_event.cpp
   src/planner_runtime_logger.cpp
   src/r2_cmd_vel_bridge.cpp
 )
@@ -39,6 +42,9 @@ ament_target_dependencies(yahboom_alc_bringup_lib
   geometry_msgs
   nav_msgs
   rclcpp
+  std_msgs
+  tf2
+  tf2_ros
 )
 
 add_executable(cluster_frontier_explorer
@@ -56,21 +62,6 @@ ament_target_dependencies(cluster_frontier_explorer
   std_msgs
   tf2_ros
   visualization_msgs
-)
-
-add_executable(simple_frontier_explorer
-  src/simple_frontier_explorer_node.cpp
-)
-target_link_libraries(simple_frontier_explorer
-  yahboom_alc_bringup_lib
-)
-ament_target_dependencies(simple_frontier_explorer
-  geometry_msgs
-  nav2_msgs
-  nav_msgs
-  rclcpp
-  rclcpp_action
-  tf2_ros
 )
 
 add_executable(planner_runtime_logger
@@ -128,7 +119,11 @@ target_link_libraries(yahboom_r2_cmd_vel_bridge
   yahboom_alc_bringup_lib
 )
 ament_target_dependencies(yahboom_r2_cmd_vel_bridge
+  nav_msgs
   rclcpp
+  std_msgs
+  tf2
+  tf2_ros
 )
 
 install(
@@ -139,7 +134,6 @@ install(
     r2_emergency_stop
     r2_safe_driver
     r2_safety_stop
-    simple_frontier_explorer
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -162,6 +156,9 @@ if(BUILD_TESTING)
   target_link_libraries(test_r2_cmd_vel_bridge
     yahboom_alc_bringup_lib
   )
+  ament_target_dependencies(test_r2_cmd_vel_bridge
+    nav_msgs
+  )
 
   ament_add_gtest(test_cluster_frontier_explorer
     test/test_cluster_frontier_explorer.cpp
@@ -171,6 +168,23 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_cluster_frontier_explorer
     nav_msgs
+  )
+
+  ament_add_gtest(test_backtrace_recovery
+    test/test_backtrace_recovery.cpp
+  )
+  target_link_libraries(test_backtrace_recovery
+    yahboom_alc_bringup_lib
+  )
+  ament_target_dependencies(test_backtrace_recovery
+    nav_msgs
+  )
+
+  ament_add_gtest(test_planner_event
+    test/test_planner_event.cpp
+  )
+  target_link_libraries(test_planner_event
+    yahboom_alc_bringup_lib
   )
 
   ament_add_gtest(test_planner_runtime_logger

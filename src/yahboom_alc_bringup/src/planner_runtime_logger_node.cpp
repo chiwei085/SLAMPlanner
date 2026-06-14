@@ -16,6 +16,7 @@
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -32,6 +33,9 @@ struct PlannerRuntimeLoggerParams
     std::string global_frame = "map";
     std::string robot_frame = "base_footprint";
     int occupied_threshold = 50;
+    std::string runtime_metadata_json = "{}";
+    std::string nav2_params_file;
+    std::string nav2_bt_xml;
 };
 
 }  // namespace yahboom_alc_bringup
@@ -58,7 +62,12 @@ struct descriptor<yahboom_alc_bringup::PlannerRuntimeLoggerParams>
             named(&PlannerRuntimeLoggerParams::global_frame, "global_frame"),
             named(&PlannerRuntimeLoggerParams::robot_frame, "robot_frame"),
             named(&PlannerRuntimeLoggerParams::occupied_threshold,
-                  "occupied_threshold"));
+                  "occupied_threshold"),
+            named(&PlannerRuntimeLoggerParams::runtime_metadata_json,
+                  "runtime_metadata_json"),
+            named(&PlannerRuntimeLoggerParams::nav2_params_file,
+                  "nav2_params_file"),
+            named(&PlannerRuntimeLoggerParams::nav2_bt_xml, "nav2_bt_xml"));
     }
 };
 
@@ -127,10 +136,22 @@ public:
         occupied_threshold_ = params.occupied_threshold;
         writer_ = std::make_unique<PlannerLogWriter>(params.log_dir);
 
+        nlohmann::json runtime_metadata = nlohmann::json::object();
+        try {
+            runtime_metadata =
+                nlohmann::json::parse(params.runtime_metadata_json);
+        }
+        catch (const nlohmann::json::parse_error&) {
+            runtime_metadata = {{"raw", params.runtime_metadata_json}};
+        }
+        runtime_metadata[std::string("nav2_params_file")] =
+            params.nav2_params_file;
+        runtime_metadata[std::string("nav2_bt_xml")] = params.nav2_bt_xml;
         writer_->write(runStartJson(
             nowSec(), params.snapshot_period_sec,
             {params.event_topic, params.map_topic, params.nav_cmd_topic,
-             params.driver_cmd_topic, params.navigate_status_topic}));
+             params.driver_cmd_topic, params.navigate_status_topic},
+            runtime_metadata));
 
         event_sub_ = create_subscription<std_msgs::msg::String>(
             params.event_topic, 10,
@@ -185,9 +206,7 @@ private:
             const auto transform = tf_buffer_.lookupTransform(
                 global_frame_, robot_frame_, tf2::TimePointZero);
             const auto& t = transform.transform.translation;
-            const auto& r = transform.transform.rotation;
-            const double yaw = std::atan2(2.0 * (r.w * r.z + r.x * r.y),
-                                          1.0 - 2.0 * (r.y * r.y + r.z * r.z));
+            const double yaw = yawFromQuaternion(transform.transform.rotation);
             return {{RobotPose{rounded(t.x), rounded(t.y), rounded(yaw)}}, {}};
         }
         catch (const tf2::TransformException& exc) {

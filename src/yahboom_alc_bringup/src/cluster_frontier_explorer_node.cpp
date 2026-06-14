@@ -1,7 +1,9 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav2_msgs/action/back_up.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav2_msgs/action/spin.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nlohmann/json.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -19,8 +21,11 @@
 #include <string>
 #include <vector>
 
+#include "yahboom_alc_bringup/backtrace_recovery.hpp"
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/planner_event.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -35,6 +40,7 @@ struct ClusterExplorerNodeParams
     std::string planner_event_topic = "/planner/events";
     std::string marker_topic = "/frontier_markers";
     std::string goal_marker_topic = "/frontier_goal_marker";
+    double nav2_success_xy_tolerance_m = 0.40;
 };
 
 struct Nav2ValidationParams
@@ -42,6 +48,13 @@ struct Nav2ValidationParams
     bool nav2_validation_enabled = true;
     double nav2_validation_timeout_sec = 2.0;
     std::string nav2_compute_path_action = "/compute_path_to_pose";
+    bool nav2_validation_blacklist_enabled = true;
+};
+
+struct RobotPose
+{
+    WorldPoint xy;
+    double yaw = 0.0;
 };
 
 }  // namespace yahboom_alc_bringup
@@ -65,7 +78,38 @@ struct descriptor<yahboom_alc_bringup::ClusterExplorerNodeParams>
                   "planner_event_topic"),
             named(&ClusterExplorerNodeParams::marker_topic, "marker_topic"),
             named(&ClusterExplorerNodeParams::goal_marker_topic,
-                  "goal_marker_topic"));
+                  "goal_marker_topic"),
+            named(&ClusterExplorerNodeParams::nav2_success_xy_tolerance_m,
+                  "nav2_success_xy_tolerance_m"));
+    }
+};
+
+template <>
+struct descriptor<yahboom_alc_bringup::BacktraceRecoveryConfig>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::BacktraceRecoveryConfig;
+        return make_descriptor(
+            named(&BacktraceRecoveryConfig::enabled,
+                  "backtrace_recovery_enabled"),
+            named(&BacktraceRecoveryConfig::breadcrumb_max_distance_m,
+                  "backtrace_breadcrumb_max_distance_m"),
+            named(&BacktraceRecoveryConfig::breadcrumb_max_age_sec,
+                  "backtrace_breadcrumb_max_age_sec"),
+            named(&BacktraceRecoveryConfig::backup_step_m,
+                  "backtrace_backup_step_m"),
+            named(&BacktraceRecoveryConfig::backup_speed_mps,
+                  "backtrace_backup_speed_mps"),
+            named(&BacktraceRecoveryConfig::backup_time_allowance_sec,
+                  "backtrace_backup_time_allowance_sec"),
+            named(&BacktraceRecoveryConfig::max_segments,
+                  "backtrace_max_segments"),
+            named(&BacktraceRecoveryConfig::min_actual_displacement_m,
+                  "backtrace_min_actual_displacement_m"),
+            named(&BacktraceRecoveryConfig::cancel_timeout_sec,
+                  "backtrace_cancel_timeout_sec"),
+            named(&BacktraceRecoveryConfig::backup_action,
+                  "backtrace_backup_action"));
     }
 };
 
@@ -80,7 +124,9 @@ struct descriptor<yahboom_alc_bringup::Nav2ValidationParams>
             named(&Nav2ValidationParams::nav2_validation_timeout_sec,
                   "nav2_validation_timeout_sec"),
             named(&Nav2ValidationParams::nav2_compute_path_action,
-                  "nav2_compute_path_action"));
+                  "nav2_compute_path_action"),
+            named(&Nav2ValidationParams::nav2_validation_blacklist_enabled,
+                  "nav2_validation_blacklist_enabled"));
     }
 };
 
@@ -130,11 +176,29 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "corner_penalty_weight"),
             named(&FrontierConfig::corridor_progress_weight,
                   "corridor_progress_weight"),
+            named(&FrontierConfig::heading_penalty_weight,
+                  "heading_penalty_weight"),
+            named(&FrontierConfig::heading_penalty_max_rad,
+                  "heading_penalty_max_rad"),
             named(&FrontierConfig::goal_timeout_sec, "goal_timeout_sec"),
             named(&FrontierConfig::stuck_progress_radius_m,
                   "stuck_progress_radius_m"),
             named(&FrontierConfig::stuck_progress_timeout_sec,
                   "stuck_progress_timeout_sec"),
+            named(&FrontierConfig::near_goal_hysteresis_radius_m,
+                  "near_goal_hysteresis_radius_m"),
+            named(&FrontierConfig::near_goal_retry_limit,
+                  "near_goal_retry_limit"),
+            named(&FrontierConfig::near_goal_hysteresis_sec,
+                  "near_goal_hysteresis_sec"),
+            named(&FrontierConfig::alignment_grace_enabled,
+                  "alignment_grace_enabled"),
+            named(&FrontierConfig::alignment_heading_threshold_rad,
+                  "alignment_heading_threshold_rad"),
+            named(&FrontierConfig::alignment_max_grace_sec,
+                  "alignment_max_grace_sec"),
+            named(&FrontierConfig::alignment_min_rotation_delta_rad,
+                  "alignment_min_rotation_delta_rad"),
             named(&FrontierConfig::failed_goal_blacklist_radius_m,
                   "failed_goal_blacklist_radius_m"),
             named(&FrontierConfig::failed_goal_blacklist_sec,
@@ -146,7 +210,19 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::subgoal_path_tolerance_m,
                   "subgoal_path_tolerance_m"),
             named(&FrontierConfig::min_subgoal_spacing_m,
-                  "min_subgoal_spacing_m"));
+                  "min_subgoal_spacing_m"),
+            named(&FrontierConfig::no_frontier_relax_sec,
+                  "no_frontier_relax_sec"),
+            named(&FrontierConfig::relaxed_min_frontier_size,
+                  "relaxed_min_frontier_size"),
+            named(&FrontierConfig::relaxed_max_frontier_distance,
+                  "relaxed_max_frontier_distance"),
+            named(&FrontierConfig::alignment_spin_enabled,
+                  "alignment_spin_enabled"),
+            named(&FrontierConfig::alignment_spin_max_attempts,
+                  "alignment_spin_max_attempts"),
+            named(&FrontierConfig::alignment_spin_time_allowance_sec,
+                  "alignment_spin_time_allowance_sec"));
     }
 };
 
@@ -158,6 +234,11 @@ namespace yahboom_alc_bringup
 namespace
 {
 
+// Margin granted on top of the behavior server's own spin time allowance
+// to cover action transport before declaring a spin lost.
+constexpr double kSpinTransportMarginSec = 5.0;
+constexpr int kReverseBlockedBacktraceThreshold = 3;
+
 geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     geometry_msgs::msg::Quaternion q;
     q.z = std::sin(yaw * 0.5);
@@ -166,6 +247,9 @@ geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
 }
 
 double rounded(const double value, const int precision = 3) {
+    if (precision == 3) {
+        return std::round(value * 1000.0) / 1000.0;
+    }
     const double scale = std::pow(10.0, precision);
     return std::round(value * scale) / scale;
 }
@@ -188,6 +272,10 @@ public:
     using ComputePathToPose = nav2_msgs::action::ComputePathToPose;
     using ComputePathGoalHandle =
         rclcpp_action::ClientGoalHandle<ComputePathToPose>;
+    using Spin = nav2_msgs::action::Spin;
+    using SpinGoalHandle = rclcpp_action::ClientGoalHandle<Spin>;
+    using BackUp = nav2_msgs::action::BackUp;
+    using BackUpGoalHandle = rclcpp_action::ClientGoalHandle<BackUp>;
 
     explicit ClusterFrontierExplorerNode(
         const rclcpp::NodeOptions& options = rclcpp::NodeOptions{})
@@ -195,8 +283,11 @@ public:
           tf_buffer_(get_clock()),
           tf_listener_(tf_buffer_),
           nav_client_(rclcpp_action::create_client<NavigateToPose>(
-              this, "/navigate_to_pose")) {
+              this, "/navigate_to_pose")),
+          spin_client_(rclcpp_action::create_client<Spin>(this, "/spin")) {
         loadParams();
+        backup_client_ = rclcpp_action::create_client<BackUp>(
+            this, backtrace_backup_action_);
 
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
         map_qos.reliable().transient_local();
@@ -214,6 +305,11 @@ public:
             goal_marker_topic_, marker_qos);
         event_pub_ =
             create_publisher<std_msgs::msg::String>(planner_event_topic_, 10);
+        event_sub_ = create_subscription<std_msgs::msg::String>(
+            planner_event_topic_, 10,
+            [this](const std_msgs::msg::String::SharedPtr msg) {
+                onPlannerEvent(*msg);
+            });
         timer_ =
             create_wall_timer(std::chrono::duration<double>(cycle_period_sec_),
                               [this]() { onTimer(); });
@@ -231,6 +327,7 @@ private:
         planner_event_topic_ = node_params.planner_event_topic;
         marker_topic_ = node_params.marker_topic;
         goal_marker_topic_ = node_params.goal_marker_topic;
+        nav2_success_xy_tolerance_m_ = node_params.nav2_success_xy_tolerance_m;
 
         auto config = core_.config();
         loadDeclaredParametersInto(*this, config);
@@ -241,8 +338,16 @@ private:
         nav2_validation_enabled_ = nav2_params.nav2_validation_enabled;
         nav2_validation_timeout_sec_ = nav2_params.nav2_validation_timeout_sec;
         nav2_compute_path_action_ = nav2_params.nav2_compute_path_action;
+        nav2_validation_blacklist_enabled_ =
+            nav2_params.nav2_validation_blacklist_enabled;
         compute_path_client_ = rclcpp_action::create_client<ComputePathToPose>(
             this, nav2_compute_path_action_);
+
+        backtrace_config_ =
+            loadDeclaredParameters<BacktraceRecoveryConfig>(*this);
+        breadcrumb_trail_.setConfig(backtrace_config_);
+        backtrace_planner_.setConfig(backtrace_config_);
+        backtrace_backup_action_ = backtrace_config_.backup_action;
     }
 
     void onMap(const nav_msgs::msg::OccupancyGrid& msg) {
@@ -258,10 +363,18 @@ private:
             logWaiting("Waiting for /map");
             return;
         }
+        if (alc_gate_.paused()) {
+            logWaiting("Frontier exploration paused for ALC");
+            return;
+        }
+        if (backtrace_recovery_active_) {
+            checkBacktraceRecovery();
+            return;
+        }
         if (goal_active_) {
-            const auto robot_xy = lookupRobotPose();
-            if (robot_xy) {
-                checkActiveGoalProgress(*robot_xy);
+            const auto robot_pose = lookupRobotPose();
+            if (robot_pose) {
+                checkActiveGoalProgress(*robot_pose);
             }
             return;
         }
@@ -273,16 +386,17 @@ private:
             logWaiting("Waiting for /navigate_to_pose action server");
             return;
         }
-        const auto robot_xy = lookupRobotPose();
-        if (!robot_xy) {
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
             return;
         }
 
-        auto result = core_.findCandidates(*robot_xy, nowSec());
+        auto result =
+            core_.findCandidates(robot_pose->xy, nowSec(), robot_pose->yaw);
         publishFrontierMarkers(result.candidates);
         if (result.candidates.empty()) {
             clearGoalMarker();
-            publishNoCandidateEvent(result.counts);
+            publishNoCandidateEvent(result.counts, result.relaxed);
             logWaiting(
                 "No frontier goal candidate found (free=" +
                 std::to_string(result.counts.free) +
@@ -292,6 +406,12 @@ private:
                 ", clusters=" + std::to_string(result.counts.clusters) +
                 ", rej_no_opts=" +
                 std::to_string(result.counts.rejected_no_options) +
+                ", rej_blacklist=" +
+                std::to_string(result.counts.rejected_blacklist) +
+                ", rej_too_near=" +
+                std::to_string(result.counts.rejected_too_near) +
+                ", rej_too_far=" +
+                std::to_string(result.counts.rejected_too_far) +
                 ", rej_no_path=" +
                 std::to_string(result.counts.rejected_no_path) +
                 ", rej_footprint=" +
@@ -301,6 +421,10 @@ private:
                 std::to_string(result.counts.rejected_unknown_ratio) + ")");
             return;
         }
+        if (result.relaxed) {
+            publishPlannerEvent("frontier_search_relaxed",
+                                {{"candidates", result.candidates.size()}});
+        }
         std::sort(
             result.candidates.begin(), result.candidates.end(),
             [](const auto& a, const auto& b) { return a.score < b.score; });
@@ -309,7 +433,7 @@ private:
             publishCandidateEvent("goal_suppressed", *best);
             return;
         }
-        beginRouteSelection(*robot_xy, result.candidates);
+        beginRouteSelection(robot_pose->xy, result.candidates);
     }
 
     struct RouteWaypoint
@@ -344,6 +468,10 @@ private:
     }
 
     void validateNextCandidateRoute() {
+        if (alc_gate_.paused()) {
+            clearPendingRouteSelection();
+            return;
+        }
         validation_active_ = false;
         validation_route_.clear();
         validation_final_candidate_.reset();
@@ -370,10 +498,11 @@ private:
             return;
         }
 
+        publishPlannerEvent("nav2_validation_failed",
+                            {{"reason", "all_candidate_routes_failed"},
+                             {"candidates_tried", pending_candidates_.size()}});
         pending_candidates_.clear();
         pending_robot_xy_.reset();
-        publishPlannerEvent("nav2_validation_failed",
-                            {{"reason", "all_candidate_routes_failed"}});
     }
 
     geometry_msgs::msg::PoseStamped poseForPoint(const WorldPoint& xy,
@@ -440,7 +569,8 @@ private:
         }
         if (!handle) {
             publishPlannerEvent("nav2_validation_failed",
-                                {{"reason", "goal_rejected"}});
+                                {{"reason", "goal_rejected"},
+                                 {"goal_xy", validationGoalJson()}});
             validateNextCandidateRoute();
         }
     }
@@ -456,7 +586,10 @@ private:
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "empty_or_failed_path"},
                                  {"status", static_cast<int>(result.code)},
-                                 {"segment", validation_segment_index_}});
+                                 {"segment", validation_segment_index_},
+                                 {"goal_xy", validationGoalJson()},
+                                 {"waypoint_xy", validationWaypointJson()}});
+            recordValidationFailure();
             validateNextCandidateRoute();
             return;
         }
@@ -482,9 +615,12 @@ private:
             nav2_validation_timeout_sec_) {
             return;
         }
-        publishPlannerEvent(
-            "nav2_validation_failed",
-            {{"reason", "timeout"}, {"segment", validation_segment_index_}});
+        publishPlannerEvent("nav2_validation_failed",
+                            {{"reason", "timeout"},
+                             {"segment", validation_segment_index_},
+                             {"goal_xy", validationGoalJson()},
+                             {"waypoint_xy", validationWaypointJson()}});
+        recordValidationFailure();
         ++validation_generation_;
         validateNextCandidateRoute();
     }
@@ -504,6 +640,14 @@ private:
         last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
         last_progress_time_sec_ = nowSec();
         active_goal_sent_time_sec_ = nowSec();
+        active_waypoint_sent_time_sec_ = nowSec();
+        last_alignment_robot_yaw_.reset();
+        active_goal_hysteresis_retries_ = 0;
+        alignment_spin_attempts_ = 0;
+        breadcrumb_trail_.clear();
+        breadcrumb_trail_.add({robot_xy, 0.0, nowSec()});
+        backtrace_planner_.reset();
+        consecutive_reverse_blocked_ = 0;
         core_.noteGoalPublished(final_candidate.goal_xy,
                                 final_candidate.goal_yaw, nowSec());
         publishPlannerEvent(
@@ -519,22 +663,20 @@ private:
             return;
         }
         const auto& waypoint = active_route_[active_route_index_];
-        FrontierCandidate event_candidate;
-        event_candidate.goal_xy = waypoint.xy;
-        event_candidate.goal_yaw = waypoint.yaw;
-        event_candidate.path = active_route_path_;
-        event_candidate.reachable = true;
-        publishCandidateEvent(waypoint.final ? "goal_sent" : "subgoal_sent",
-                              event_candidate);
+        publishPlannerEvent(waypoint.final ? "goal_sent" : "subgoal_sent",
+                            {{"goal_xy", pointJson(waypoint.xy)},
+                             {"goal_yaw", rounded(waypoint.yaw)},
+                             {"index", active_route_index_}});
         sendGoal(waypoint.xy, waypoint.yaw);
     }
 
-    std::optional<WorldPoint> lookupRobotPose() {
+    std::optional<RobotPose> lookupRobotPose() {
         try {
             const auto transform = tf_buffer_.lookupTransform(
                 global_frame_, robot_frame_, tf2::TimePointZero);
-            return WorldPoint{transform.transform.translation.x,
-                              transform.transform.translation.y};
+            const auto& t = transform.transform.translation;
+            return RobotPose{WorldPoint{t.x, t.y},
+                             yawFromQuaternion(transform.transform.rotation)};
         }
         catch (const tf2::TransformException& exc) {
             RCLCPP_DEBUG(get_logger(), "Waiting for robot pose TF: %s",
@@ -544,11 +686,16 @@ private:
     }
 
     void sendGoal(const WorldPoint& goal_xy, const double goal_yaw) {
+        if (alc_gate_.paused()) {
+            return;
+        }
         NavigateToPose::Goal goal;
         goal.pose = poseForPoint(goal_xy, goal_yaw);
 
         goal_active_ = true;
         active_goal_ = goal_xy;
+        active_waypoint_sent_time_sec_ = nowSec();
+        last_alignment_robot_yaw_.reset();
         wait_log_count_ = 0;
         publishGoalMarker(goal_xy, goal_yaw);
         RCLCPP_INFO(get_logger(),
@@ -556,19 +703,33 @@ private:
                     active_route_index_ + 1, active_route_.size(),
                     goal_xy.first, goal_xy.second);
 
+        const int generation = ++nav_goal_generation_;
         rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
         options.goal_response_callback =
-            [this](const GoalHandle::SharedPtr& handle) {
-                onGoalResponse(handle);
+            [this, generation](const GoalHandle::SharedPtr& handle) {
+                onGoalResponse(generation, handle);
             };
         options.result_callback =
-            [this](const GoalHandle::WrappedResult& result) {
-                onGoalResult(result);
+            [this, generation](const GoalHandle::WrappedResult& result) {
+                onGoalResult(generation, result);
             };
         nav_client_->async_send_goal(goal, options);
     }
 
-    void onGoalResponse(const GoalHandle::SharedPtr& handle) {
+    void onGoalResponse(const int generation,
+                        const GoalHandle::SharedPtr& handle) {
+        if (generation != nav_goal_generation_) {
+            if (handle) {
+                nav_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (!goal_active_) {
+            if (handle) {
+                nav_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
         if (!handle) {
             RCLCPP_WARN(get_logger(), "Cluster frontier goal rejected");
             publishPlannerEvent("goal_rejected",
@@ -579,14 +740,38 @@ private:
         goal_handle_ = handle;
     }
 
-    void onGoalResult(const GoalHandle::WrappedResult& result) {
+    void onGoalResult(const int generation,
+                      const GoalHandle::WrappedResult& result) {
+        if (generation != nav_goal_generation_ || !goal_active_ ||
+            spin_recovery_active_) {
+            return;
+        }
         const int status = static_cast<int>(result.code);
         RCLCPP_INFO(get_logger(),
                     "Cluster frontier goal finished with status %d", status);
         publishPlannerEvent(
             "goal_result", {{"status", status}, {"goal_xy", activeGoalJson()}});
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-            abandonActiveGoal("nav2_result_failed");
+            startBacktraceRecovery("nav2_result_failed");
+            return;
+        }
+
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
+            startBacktraceRecovery("missing_pose_after_success");
+            return;
+        }
+        const double goal_distance =
+            active_goal_ ? distanceBetween(robot_pose->xy, *active_goal_) : 0.0;
+        if (active_goal_ &&
+            !withinDistanceTolerance(robot_pose->xy, *active_goal_,
+                                     nav2_success_xy_tolerance_m_)) {
+            publishPlannerEvent(
+                "nav2_success_pose_mismatch",
+                {{"goal_xy", activeGoalJson()},
+                 {"distance_m", rounded(goal_distance)},
+                 {"tolerance_m", rounded(nav2_success_xy_tolerance_m_)}});
+            startBacktraceRecovery("nav2_success_pose_mismatch");
             return;
         }
 
@@ -597,18 +782,15 @@ private:
             goal_handle_.reset();
             goal_active_ = false;
             ++active_route_index_;
-            const auto robot_xy = lookupRobotPose();
-            if (robot_xy) {
-                const auto projection =
-                    core_.projectOntoPath(*robot_xy, active_route_path_);
-                if (projection) {
-                    last_progress_arc_length_ = projection->arc_length;
-                }
-                last_progress_time_sec_ = nowSec();
-                sendActiveWaypoint();
-                return;
+            const auto projection =
+                core_.projectOntoPath(robot_pose->xy, active_route_path_);
+            if (projection) {
+                last_progress_arc_length_ = projection->arc_length;
             }
-            abandonActiveGoal("missing_pose_after_subgoal");
+            last_progress_time_sec_ = nowSec();
+            active_waypoint_sent_time_sec_ = nowSec();
+            last_alignment_robot_yaw_.reset();
+            sendActiveWaypoint();
             return;
         }
 
@@ -617,8 +799,13 @@ private:
         clearActiveGoal();
     }
 
-    void checkActiveGoalProgress(const WorldPoint& robot_xy) {
+    void checkActiveGoalProgress(const RobotPose& robot_pose) {
         const double now = nowSec();
+        breadcrumb_trail_.add({robot_pose.xy, robot_pose.yaw, now});
+        if (spin_recovery_active_) {
+            checkSpinRecoveryTimeout(now);
+            return;
+        }
         const auto& config = core_.config();
         if (config.goal_timeout_sec > 0.0 &&
             now - active_goal_sent_time_sec_ >= config.goal_timeout_sec) {
@@ -627,11 +814,13 @@ private:
             return;
         }
         const auto projection =
-            core_.projectOntoPath(robot_xy, active_route_path_);
+            core_.projectOntoPath(robot_pose.xy, active_route_path_);
         if (projection && projection->arc_length - last_progress_arc_length_ >=
                               config.stuck_progress_radius_m) {
             last_progress_arc_length_ = projection->arc_length;
             last_progress_time_sec_ = now;
+            last_alignment_robot_yaw_.reset();
+            consecutive_reverse_blocked_ = 0;
             RCLCPP_DEBUG(get_logger(), "Route progress arc=%.3f",
                          last_progress_arc_length_);
             return;
@@ -639,10 +828,367 @@ private:
         if (config.stuck_progress_timeout_sec > 0.0 &&
             now - last_progress_time_sec_ >=
                 config.stuck_progress_timeout_sec) {
+            const auto alignment = evaluateActiveGoalAlignment(robot_pose, now);
+            if (tryAlignmentProgressGrace(robot_pose, now, alignment)) {
+                last_alignment_robot_yaw_ = robot_pose.yaw;
+                return;
+            }
+            if (tryNearGoalHysteresis(robot_pose.xy, now)) {
+                last_alignment_robot_yaw_ = robot_pose.yaw;
+                return;
+            }
+            if (trySpinAlignmentRecovery(robot_pose, now, alignment)) {
+                return;
+            }
             RCLCPP_WARN(get_logger(),
                         "Abandoning frontier goal after no progress");
-            abandonActiveGoal("no_progress");
+            startBacktraceRecovery("no_progress");
+            return;
         }
+        last_alignment_robot_yaw_ = robot_pose.yaw;
+    }
+
+    AlignmentGraceStatus evaluateActiveGoalAlignment(
+        const RobotPose& robot_pose, const double now) const {
+        if (!active_goal_) {
+            return {};
+        }
+        return core_.evaluateAlignmentGrace(
+            robot_pose.xy, robot_pose.yaw, last_alignment_robot_yaw_,
+            active_route_path_, *active_goal_,
+            now - active_waypoint_sent_time_sec_);
+    }
+
+    bool tryAlignmentProgressGrace(const RobotPose& robot_pose,
+                                   const double now,
+                                   const AlignmentGraceStatus& status) {
+        if (!status.active) {
+            return false;
+        }
+
+        const auto& config = core_.config();
+        const double last_progress_age = now - last_progress_time_sec_;
+        // Backdate so no_progress won't re-fire until alignment_max_grace_sec
+        // has elapsed from when this waypoint was sent.
+        const double capped_progress_time = active_waypoint_sent_time_sec_ +
+                                            config.alignment_max_grace_sec -
+                                            config.stuck_progress_timeout_sec;
+        last_progress_time_sec_ =
+            std::max(last_progress_time_sec_, capped_progress_time);
+        publishPlannerEvent(
+            "alignment_progress_grace",
+            {{"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()},
+             {"robot_xy", pointJson(robot_pose.xy)},
+             {"heading_error", rounded(status.heading_error)},
+             {"target_yaw", rounded(status.target_yaw)},
+             {"elapsed_since_waypoint_sent",
+              rounded(now - active_waypoint_sent_time_sec_)},
+             {"last_progress_age", rounded(last_progress_age)}});
+        RCLCPP_DEBUG(get_logger(),
+                     "Holding frontier goal for alignment heading_error=%.3f",
+                     status.heading_error);
+        return true;
+    }
+
+    bool tryNearGoalHysteresis(const WorldPoint& robot_xy, const double now) {
+        const auto& config = core_.config();
+        if (config.near_goal_retry_limit <= 0 ||
+            active_goal_hysteresis_retries_ >= config.near_goal_retry_limit ||
+            config.near_goal_hysteresis_radius_m <= 0.0) {
+            return false;
+        }
+        if (!isNearActiveGoal(robot_xy, config.near_goal_hysteresis_radius_m)) {
+            return false;
+        }
+
+        ++active_goal_hysteresis_retries_;
+        extendActiveGoalTimers(now);
+        publishPlannerEvent("no_progress_hysteresis_retry",
+                            {{"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()},
+                             {"retry", active_goal_hysteresis_retries_},
+                             {"retry_limit", config.near_goal_retry_limit},
+                             {"robot_xy", pointJson(robot_xy)}});
+        RCLCPP_WARN(get_logger(),
+                    "Holding near frontier goal after no progress retry %d/%d",
+                    active_goal_hysteresis_retries_,
+                    config.near_goal_retry_limit);
+        return true;
+    }
+
+    bool trySpinAlignmentRecovery(const RobotPose& robot_pose, const double now,
+                                  const AlignmentGraceStatus& status) {
+        const auto& config = core_.config();
+        if (!config.alignment_spin_enabled || !active_goal_ ||
+            alignment_spin_attempts_ >= config.alignment_spin_max_attempts) {
+            return false;
+        }
+        if (status.heading_error <= config.alignment_heading_threshold_rad) {
+            return false;
+        }
+        if (!spin_client_->action_server_is_ready()) {
+            return false;
+        }
+
+        ++alignment_spin_attempts_;
+        spin_recovery_active_ = true;
+        spin_started_sec_ = now;
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+            goal_handle_.reset();
+        }
+
+        const double commanded_yaw =
+            std::remainder(status.target_yaw - robot_pose.yaw, 2.0 * M_PI);
+        Spin::Goal spin_goal;
+        spin_goal.target_yaw = static_cast<float>(commanded_yaw);
+        spin_goal.time_allowance = rclcpp::Duration::from_seconds(
+            config.alignment_spin_time_allowance_sec);
+        publishPlannerEvent("alignment_spin_recovery",
+                            {{"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()},
+                             {"heading_error", rounded(status.heading_error)},
+                             {"commanded_yaw", rounded(commanded_yaw)},
+                             {"attempt", alignment_spin_attempts_}});
+        RCLCPP_WARN(get_logger(),
+                    "Spinning %.2f rad to recover alignment before retrying "
+                    "frontier waypoint",
+                    commanded_yaw);
+
+        rclcpp_action::Client<Spin>::SendGoalOptions options;
+        options.goal_response_callback =
+            [this](const SpinGoalHandle::SharedPtr& handle) {
+                onSpinResponse(handle);
+            };
+        options.result_callback =
+            [this](const SpinGoalHandle::WrappedResult& result) {
+                onSpinResult(result);
+            };
+        spin_client_->async_send_goal(spin_goal, options);
+        return true;
+    }
+
+    void onSpinResponse(const SpinGoalHandle::SharedPtr& handle) {
+        if (!spin_recovery_active_) {
+            if (handle) {
+                spin_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (!handle) {
+            finishSpinRecovery("spin_rejected");
+            return;
+        }
+        spin_goal_handle_ = handle;
+    }
+
+    void onSpinResult(const SpinGoalHandle::WrappedResult& result) {
+        if (!spin_recovery_active_) {
+            return;
+        }
+        finishSpinRecovery(result.code == rclcpp_action::ResultCode::SUCCEEDED
+                               ? "spin_completed"
+                               : "spin_failed");
+    }
+
+    void checkSpinRecoveryTimeout(const double now) {
+        const auto& config = core_.config();
+        if (now - spin_started_sec_ < config.alignment_spin_time_allowance_sec +
+                                          kSpinTransportMarginSec) {
+            return;
+        }
+        if (spin_goal_handle_) {
+            spin_client_->async_cancel_goal(spin_goal_handle_);
+        }
+        finishSpinRecovery("spin_timeout");
+    }
+
+    void finishSpinRecovery(const std::string& reason) {
+        const double now = nowSec();
+        const double spin_elapsed = std::max(0.0, now - spin_started_sec_);
+        spin_recovery_active_ = false;
+        spin_goal_handle_.reset();
+        spin_started_sec_ = 0.0;
+        publishPlannerEvent("alignment_spin_recovery_finished",
+                            {{"reason", reason},
+                             {"elapsed", rounded(spin_elapsed)},
+                             {"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()}});
+        if (!goal_active_ || active_route_index_ >= active_route_.size()) {
+            return;
+        }
+        // The spin should not eat into route progress budgets.
+        active_goal_sent_time_sec_ += spin_elapsed;
+        last_progress_time_sec_ = now;
+        last_alignment_robot_yaw_.reset();
+        sendActiveWaypoint();
+    }
+
+    bool isNearActiveGoal(const WorldPoint& robot_xy,
+                          const double radius) const {
+        const auto near = [&](const std::optional<WorldPoint>& goal) {
+            return goal && withinDistanceTolerance(robot_xy, *goal, radius);
+        };
+        return near(active_goal_) || near(active_final_goal_);
+    }
+
+    void extendActiveGoalTimers(const double now) {
+        const auto& config = core_.config();
+        const double grace = config.near_goal_hysteresis_sec > 0.0
+                                 ? config.near_goal_hysteresis_sec
+                                 : config.stuck_progress_timeout_sec;
+        if (config.stuck_progress_timeout_sec > 0.0) {
+            last_progress_time_sec_ =
+                now - std::max(0.0, config.stuck_progress_timeout_sec - grace);
+        }
+        if (config.goal_timeout_sec > 0.0) {
+            active_goal_sent_time_sec_ =
+                now - std::max(0.0, config.goal_timeout_sec - grace);
+        }
+    }
+
+    void startBacktraceRecovery(const std::string& reason) {
+        if (backtrace_recovery_active_) {
+            return;
+        }
+        if (!backtrace_planner_.canStart(breadcrumb_trail_) ||
+            !backup_client_->action_server_is_ready()) {
+            abandonActiveGoal(reason);
+            return;
+        }
+
+        backtrace_recovery_active_ = true;
+        backtrace_waiting_for_cancel_ = true;
+        backtrace_backup_active_ = false;
+        backtrace_reason_ = reason;
+        backtrace_cancel_started_sec_ = nowSec();
+        ++nav_goal_generation_;
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+            goal_handle_.reset();
+        }
+        goal_active_ = false;
+        publishPlannerEvent(
+            "backtrace_recovery_started",
+            {{"reason", reason},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()},
+             {"breadcrumbs", breadcrumb_trail_.poses().size()}});
+    }
+
+    void checkBacktraceRecovery() {
+        if (!backtrace_recovery_active_) {
+            return;
+        }
+        if (backtrace_backup_active_) {
+            return;
+        }
+        if (backtrace_waiting_for_cancel_) {
+            if (nowSec() - backtrace_cancel_started_sec_ <
+                backtrace_config_.cancel_timeout_sec) {
+                return;
+            }
+            backtrace_waiting_for_cancel_ = false;
+        }
+        sendNextBacktraceSegment();
+    }
+
+    void sendNextBacktraceSegment() {
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
+            finishBacktraceRecovery(false, "missing_pose");
+            return;
+        }
+        const auto distance = backtrace_planner_.nextBackupDistance(
+            breadcrumb_trail_, robot_pose->xy);
+        if (!distance) {
+            finishBacktraceRecovery(true, "complete");
+            return;
+        }
+        if (!backtrace_planner_.noteSegmentStarted(robot_pose->xy, *distance)) {
+            finishBacktraceRecovery(true, "segment_limit");
+            return;
+        }
+
+        BackUp::Goal goal;
+        goal.target.x = *distance;
+        goal.speed = static_cast<float>(backtrace_config_.backup_speed_mps);
+        goal.time_allowance = rclcpp::Duration::from_seconds(
+            backtrace_config_.backup_time_allowance_sec);
+        backtrace_backup_active_ = true;
+        publishPlannerEvent(
+            "backtrace_recovery_segment",
+            {{"segment", backtrace_planner_.state().segments_attempted},
+             {"distance_m", rounded(*distance)},
+             {"speed_mps", rounded(backtrace_config_.backup_speed_mps)}});
+
+        rclcpp_action::Client<BackUp>::SendGoalOptions options;
+        options.goal_response_callback =
+            [this](const BackUpGoalHandle::SharedPtr& handle) {
+                onBacktraceGoalResponse(handle);
+            };
+        options.result_callback =
+            [this](const BackUpGoalHandle::WrappedResult& result) {
+                onBacktraceResult(result);
+            };
+        backup_client_->async_send_goal(goal, options);
+    }
+
+    void onBacktraceGoalResponse(const BackUpGoalHandle::SharedPtr& handle) {
+        if (!backtrace_recovery_active_) {
+            if (handle) {
+                backup_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (!handle) {
+            backtrace_backup_active_ = false;
+            finishBacktraceRecovery(false, "backup_rejected");
+            return;
+        }
+        backup_goal_handle_ = handle;
+    }
+
+    void onBacktraceResult(const BackUpGoalHandle::WrappedResult& result) {
+        if (!backtrace_recovery_active_) {
+            return;
+        }
+        backup_goal_handle_.reset();
+        backtrace_backup_active_ = false;
+        if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+            finishBacktraceRecovery(false, "backup_failed");
+            return;
+        }
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
+            finishBacktraceRecovery(false, "missing_pose_after_backup");
+            return;
+        }
+        if (!backtrace_planner_.noteSegmentFinished(robot_pose->xy)) {
+            finishBacktraceRecovery(false, "insufficient_motion");
+            return;
+        }
+        sendNextBacktraceSegment();
+    }
+
+    void finishBacktraceRecovery(const bool success,
+                                 const std::string& reason) {
+        publishPlannerEvent(
+            success ? "backtrace_recovery_finished"
+                    : "backtrace_recovery_failed",
+            {{"reason", reason},
+             {"trigger", backtrace_reason_},
+             {"segments", backtrace_planner_.state().segments_attempted},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()}});
+        blacklistActiveGoal();
+        backtrace_recovery_active_ = false;
+        backtrace_waiting_for_cancel_ = false;
+        backtrace_backup_active_ = false;
+        backtrace_reason_.clear();
+        backtrace_planner_.reset();
+        clearActiveGoal();
     }
 
     void abandonActiveGoal(const std::string& reason) {
@@ -657,24 +1203,100 @@ private:
         clearActiveGoal();
     }
 
+    // Pausing clears all in-flight validation, goal, and spin state, so
+    // async callbacks only need their validation_active_/generation/
+    // goal_active_ guards; paused() is rechecked at the entry points that
+    // start new work (onTimer, validateNextCandidateRoute, sendGoal).
+    void pauseForAlc() {
+        if (!alc_gate_.applyPause()) {
+            return;
+        }
+        const auto final_goal = activeFinalGoalJson();
+        const auto active_waypoint = activeGoalJson();
+        clearPendingRouteSelection();
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+        }
+        clearActiveGoal();
+        clearGoalMarker();
+        publishPlannerEvent(
+            "frontier_paused_for_alc",
+            {{"goal_xy", final_goal}, {"active_waypoint_xy", active_waypoint}});
+        RCLCPP_INFO(get_logger(), "Frontier exploration paused for ALC");
+    }
+
+    void resumeAfterAlc() {
+        if (!alc_gate_.applyResume()) {
+            return;
+        }
+        wait_log_count_ = 0;
+        publishPlannerEvent("frontier_resumed_after_alc");
+        RCLCPP_INFO(get_logger(), "Frontier exploration resumed after ALC");
+    }
+
     void clearActiveGoal() {
+        if (backup_goal_handle_) {
+            backup_client_->async_cancel_goal(backup_goal_handle_);
+        }
+        backup_goal_handle_.reset();
+        backtrace_recovery_active_ = false;
+        backtrace_waiting_for_cancel_ = false;
+        backtrace_backup_active_ = false;
+        backtrace_cancel_started_sec_ = 0.0;
+        backtrace_reason_.clear();
+        backtrace_planner_.reset();
         goal_active_ = false;
         goal_handle_.reset();
+        if (spin_goal_handle_) {
+            spin_client_->async_cancel_goal(spin_goal_handle_);
+        }
+        spin_goal_handle_.reset();
+        spin_recovery_active_ = false;
+        spin_started_sec_ = 0.0;
+        alignment_spin_attempts_ = 0;
         active_goal_.reset();
         active_route_.clear();
         active_route_index_ = 0;
         active_final_goal_.reset();
         active_route_path_.clear();
         last_progress_arc_length_ = 0.0;
+        active_goal_hysteresis_retries_ = 0;
+        active_waypoint_sent_time_sec_ = 0.0;
+        last_alignment_robot_yaw_.reset();
+        breadcrumb_trail_.clear();
+        consecutive_reverse_blocked_ = 0;
+    }
+
+    void clearPendingRouteSelection() {
+        validation_active_ = false;
+        ++validation_generation_;
+        validation_segment_index_ = 0;
+        validation_segment_started_sec_ = 0.0;
+        pending_robot_xy_.reset();
+        pending_candidates_.clear();
+        pending_candidate_index_ = 0;
+        validation_final_candidate_.reset();
+        validation_route_.clear();
     }
 
     void blacklistActiveGoal() {
         if (!active_final_goal_) {
             return;
         }
-        core_.blacklistGoal(*active_final_goal_, nowSec());
-        const auto record_index =
-            core_.findGoalAttemptIndex(*active_final_goal_);
+        recordGoalFailure(*active_final_goal_);
+    }
+
+    void recordValidationFailure() {
+        if (!nav2_validation_blacklist_enabled_ ||
+            !validation_final_candidate_) {
+            return;
+        }
+        recordGoalFailure(validation_final_candidate_->goal_xy);
+    }
+
+    void recordGoalFailure(const WorldPoint& goal_xy) {
+        core_.blacklistGoal(goal_xy, nowSec());
+        const auto record_index = core_.findGoalAttemptIndex(goal_xy);
         if (!record_index) {
             return;
         }
@@ -686,6 +1308,18 @@ private:
              {"blacklisted",
               record.failures >= core_.config().failed_goal_max_retries},
              {"expires_at_sec", rounded(record.expires_at_sec)}});
+    }
+
+    nlohmann::json validationGoalJson() const {
+        return validation_final_candidate_
+                   ? pointJson(validation_final_candidate_->goal_xy)
+                   : nlohmann::json(nullptr);
+    }
+
+    nlohmann::json validationWaypointJson() const {
+        return validation_segment_index_ < validation_route_.size()
+                   ? pointJson(validation_route_[validation_segment_index_].xy)
+                   : nlohmann::json(nullptr);
     }
 
     void publishCandidateEvent(const std::string& event,
@@ -700,17 +1334,29 @@ private:
              {"cluster_size", candidate.cells.size()},
              {"unknown_overlap", rounded(candidate.unknown_overlap_ratio)},
              {"wall_clearance", rounded(candidate.wall_clearance)},
+             {"heading_delta", rounded(candidate.heading_delta)},
              {"reachable", candidate.reachable}});
     }
 
-    void publishNoCandidateEvent(const FrontierCounts& counts) {
-        publishPlannerEvent("no_frontier_candidate",
-                            {{"counts",
-                              {{"free", counts.free},
-                               {"unknown", counts.unknown},
-                               {"occupied", counts.occupied},
-                               {"frontier", counts.frontier},
-                               {"clusters", counts.clusters}}}});
+    void publishNoCandidateEvent(const FrontierCounts& counts,
+                                 const bool relaxed) {
+        publishPlannerEvent(
+            "no_frontier_candidate",
+            {{"relaxed", relaxed},
+             {"counts",
+              {{"free", counts.free},
+               {"unknown", counts.unknown},
+               {"occupied", counts.occupied},
+               {"frontier", counts.frontier},
+               {"clusters", counts.clusters},
+               {"rejected_no_options", counts.rejected_no_options},
+               {"rejected_blacklist", counts.rejected_blacklist},
+               {"rejected_too_near", counts.rejected_too_near},
+               {"rejected_too_far", counts.rejected_too_far},
+               {"rejected_no_path", counts.rejected_no_path},
+               {"rejected_footprint", counts.rejected_footprint},
+               {"rejected_swept", counts.rejected_swept},
+               {"rejected_unknown_ratio", counts.rejected_unknown_ratio}}}});
     }
 
     void publishPlannerEvent(
@@ -722,6 +1368,43 @@ private:
         payload[std::string("time_sec")] = rounded(nowSec());
         msg.data = payload.dump();
         event_pub_->publish(msg);
+    }
+
+    void onPlannerEvent(const std_msgs::msg::String& msg) {
+        handleReverseBlockedEvent(msg.data);
+        switch (classifyPlannerEvent(msg.data)) {
+            case CoordinationAction::kPause:
+                pauseForAlc();
+                break;
+            case CoordinationAction::kResume:
+                resumeAfterAlc();
+                break;
+            case CoordinationAction::kNone:
+                break;
+        }
+    }
+
+    void handleReverseBlockedEvent(const std::string& data) {
+        if (!goal_active_ || backtrace_recovery_active_) {
+            return;
+        }
+        if (data.find("\"reverse_blocked\"") == std::string::npos) {
+            return;
+        }
+        try {
+            const auto payload = nlohmann::json::parse(data);
+            if (!payload.contains("event") || !payload["event"].is_string() ||
+                payload["event"].get<std::string>() != "reverse_blocked") {
+                return;
+            }
+        }
+        catch (const nlohmann::json::parse_error&) {
+            return;
+        }
+        ++consecutive_reverse_blocked_;
+        if (consecutive_reverse_blocked_ >= kReverseBlockedBacktraceThreshold) {
+            startBacktraceRecovery("reverse_blocked");
+        }
     }
 
     void publishFrontierMarkers(
@@ -765,11 +1448,7 @@ private:
     }
 
     void publishGoalMarker(const WorldPoint& goal_xy, const double yaw) {
-        auto marker = makeGoalMarker(goal_xy, yaw);
-        goal_marker_pub_->publish(marker);
-        visualization_msgs::msg::MarkerArray marker_array;
-        marker_array.markers.push_back(marker);
-        marker_pub_->publish(marker_array);
+        goal_marker_pub_->publish(makeGoalMarker(goal_xy, yaw));
     }
 
     visualization_msgs::msg::Marker makeGoalMarker(const WorldPoint& goal_xy,
@@ -830,7 +1509,9 @@ private:
     std::string marker_topic_;
     std::string goal_marker_topic_;
     double cycle_period_sec_ = 3.0;
+    double nav2_success_xy_tolerance_m_ = 0.40;
     int wait_log_count_ = 0;
+    AlcCoordinationGate alc_gate_;
 
     bool goal_active_ = false;
     std::optional<WorldPoint> active_goal_;
@@ -839,11 +1520,31 @@ private:
     std::size_t active_route_index_ = 0;
     std::vector<Cell> active_route_path_;
     double active_goal_sent_time_sec_ = 0.0;
+    double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
     double last_progress_arc_length_ = 0.0;
+    int active_goal_hysteresis_retries_ = 0;
+    std::optional<double> last_alignment_robot_yaw_;
     GoalHandle::SharedPtr goal_handle_;
+    int nav_goal_generation_ = 0;
+    bool spin_recovery_active_ = false;
+    int alignment_spin_attempts_ = 0;
+    double spin_started_sec_ = 0.0;
+    SpinGoalHandle::SharedPtr spin_goal_handle_;
+    BacktraceRecoveryConfig backtrace_config_;
+    BreadcrumbTrail breadcrumb_trail_;
+    BacktraceRecoveryPlanner backtrace_planner_;
+    std::string backtrace_backup_action_ = "/backup";
+    bool backtrace_recovery_active_ = false;
+    bool backtrace_waiting_for_cancel_ = false;
+    bool backtrace_backup_active_ = false;
+    double backtrace_cancel_started_sec_ = 0.0;
+    std::string backtrace_reason_;
+    int consecutive_reverse_blocked_ = 0;
+    BackUpGoalHandle::SharedPtr backup_goal_handle_;
 
     bool nav2_validation_enabled_ = true;
+    bool nav2_validation_blacklist_enabled_ = true;
     double nav2_validation_timeout_sec_ = 2.0;
     std::string nav2_compute_path_action_;
     bool validation_active_ = false;
@@ -859,6 +1560,8 @@ private:
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     rclcpp_action::Client<NavigateToPose>::SharedPtr nav_client_;
+    rclcpp_action::Client<Spin>::SharedPtr spin_client_;
+    rclcpp_action::Client<BackUp>::SharedPtr backup_client_;
     rclcpp_action::Client<ComputePathToPose>::SharedPtr compute_path_client_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
@@ -866,6 +1569,7 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr
         goal_marker_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

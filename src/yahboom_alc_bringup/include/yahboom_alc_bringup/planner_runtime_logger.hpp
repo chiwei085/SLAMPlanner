@@ -62,7 +62,8 @@ nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
                            const SourceHealth& driver_cmd,
                            const SourceHealth& navigate_status);
 nlohmann::json runStartJson(double time_sec, double snapshot_period_sec,
-                            const LoggerTopics& topics);
+                            const LoggerTopics& topics,
+                            const nlohmann::json& runtime_metadata = {});
 std::string makeRunLogName();
 
 class PlannerLogWriter

@@ -74,12 +74,16 @@ public:
         return object.find(key) != object.end();
     }
 
+    bool contains(const char* key) const { return contains(std::string(key)); }
+
     json& operator[](const std::string& key) {
         if (!std::holds_alternative<object_t>(value_)) {
             value_ = object_t{};
         }
         return std::get<object_t>(value_)[key];
     }
+
+    json& operator[](const char* key) { return operator[](std::string(key)); }
 
     const json& operator[](const std::string& key) const {
         static const json null_json;
@@ -89,6 +93,22 @@ public:
         const auto& object = std::get<object_t>(value_);
         const auto it = object.find(key);
         return it == object.end() ? null_json : it->second;
+    }
+
+    const json& operator[](const char* key) const {
+        return operator[](std::string(key));
+    }
+
+    bool is_string() const {
+        return std::holds_alternative<std::string>(value_);
+    }
+
+    template <typename T>
+    T get() const {
+        if (const T* value = std::get_if<T>(&value_)) {
+            return *value;
+        }
+        return T{};
     }
 
     void push_back(json value) {
@@ -304,7 +324,12 @@ private:
                     ++pos_;
                 }
             }
-            return json(std::stod(text_.substr(start, pos_ - start)));
+            try {
+                return json(std::stod(text_.substr(start, pos_ - start)));
+            }
+            catch (const std::exception&) {
+                throw parse_error("invalid JSON number");
+            }
         }
 
         void expect(const char expected) {

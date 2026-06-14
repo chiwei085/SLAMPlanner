@@ -40,9 +40,18 @@ struct FrontierConfig
     double wall_clearance_m = 0.22;
     double corner_penalty_weight = 1.0;
     double corridor_progress_weight = 0.4;
+    double heading_penalty_weight = 0.0;
+    double heading_penalty_max_rad = 3.141592653589793;
     double goal_timeout_sec = 45.0;
     double stuck_progress_radius_m = 0.12;
     double stuck_progress_timeout_sec = 12.0;
+    double near_goal_hysteresis_radius_m = 0.35;
+    int near_goal_retry_limit = 0;
+    double near_goal_hysteresis_sec = 0.0;
+    bool alignment_grace_enabled = true;
+    double alignment_heading_threshold_rad = 0.35;
+    double alignment_max_grace_sec = 12.0;
+    double alignment_min_rotation_delta_rad = 0.05;
     double failed_goal_blacklist_radius_m = 0.45;
     double failed_goal_blacklist_sec = 60.0;
     int failed_goal_max_retries = 1;
@@ -50,6 +59,12 @@ struct FrontierConfig
     int max_subgoals = 3;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
+    double no_frontier_relax_sec = 0.0;
+    int relaxed_min_frontier_size = 8;
+    double relaxed_max_frontier_distance = 0.0;
+    bool alignment_spin_enabled = false;
+    int alignment_spin_max_attempts = 1;
+    double alignment_spin_time_allowance_sec = 15.0;
 };
 
 struct FrontierCounts
@@ -60,6 +75,9 @@ struct FrontierCounts
     int frontier = 0;
     int clusters = 0;
     int rejected_no_options = 0;
+    int rejected_blacklist = 0;
+    int rejected_too_near = 0;
+    int rejected_too_far = 0;
     int rejected_no_path = 0;
     int rejected_footprint = 0;
     int rejected_swept = 0;
@@ -109,6 +127,7 @@ struct FrontierCandidate
     bool reachable = false;
     double unknown_overlap_ratio = 0.0;
     double wall_clearance = 0.0;
+    double heading_delta = 0.0;
     double score = 0.0;
 };
 
@@ -116,12 +135,25 @@ struct PathProjection
 {
     double distance = 0.0;
     double arc_length = 0.0;
+    // Index i of the path segment (path[i - 1], path[i]) holding the
+    // projection; 0 for single-point paths.
+    std::size_t segment = 0;
 };
 
 struct CandidateResult
 {
     std::vector<FrontierCandidate> candidates;
     FrontierCounts counts;
+    bool relaxed = false;
+};
+
+struct AlignmentGraceStatus
+{
+    bool active = false;
+    double target_yaw = 0.0;
+    double heading_error = 0.0;
+    double previous_heading_error = 0.0;
+    double heading_error_delta = 0.0;
 };
 
 class FrontierExplorerCore
@@ -134,11 +166,14 @@ public:
     void setMap(const nav_msgs::msg::OccupancyGrid& map);
     const nav_msgs::msg::OccupancyGrid& map() const { return map_; }
 
-    CandidateResult findCandidates(const WorldPoint& robot_xy, double now_sec);
+    CandidateResult findCandidates(
+        const WorldPoint& robot_xy, double now_sec,
+        std::optional<double> robot_yaw = std::nullopt);
     std::optional<FrontierCandidate> makeCandidate(
         const std::vector<Cell>& cluster, const Cell& start_cell,
         const WorldPoint& robot_xy, const std::vector<bool>& blocked, int width,
-        int height, FrontierCounts& counts);
+        int height, FrontierCounts& counts,
+        std::optional<double> robot_yaw = std::nullopt);
 
     std::vector<Cell> findFrontierCells(int width, int height) const;
     std::vector<std::vector<Cell>> clusterFrontiers(
@@ -195,6 +230,17 @@ public:
     bool hasUnknownNeighbor(int width, int index) const;
     bool hasOccupiedClearance(int x, int y, int width, int height,
                               int radius) const;
+    double headingError(double from_yaw, double to_yaw) const;
+    std::optional<double> pathTargetYawNear(
+        const WorldPoint& robot_xy, const std::vector<Cell>& path) const;
+    AlignmentGraceStatus evaluateAlignmentGrace(
+        const WorldPoint& robot_xy, double robot_yaw,
+        std::optional<double> previous_robot_yaw, const std::vector<Cell>& path,
+        const WorldPoint& active_goal_xy,
+        double elapsed_since_waypoint_sent_sec) const;
+    double pathInitialYaw(const std::vector<Cell>& path,
+                          const WorldPoint& robot_xy,
+                          const WorldPoint& goal_xy) const;
     double pathGoalYaw(const std::vector<Cell>& path,
                        const WorldPoint& robot_xy,
                        const WorldPoint& goal_xy) const;
@@ -212,6 +258,10 @@ private:
     std::vector<Cell> reconstructPath(const std::vector<int>& parent,
                                       int start_index, int goal_index,
                                       int width) const;
+    CandidateResult findCandidatesOnce(const WorldPoint& robot_xy,
+                                       double now_sec,
+                                       std::optional<double> robot_yaw);
+    FrontierConfig relaxedConfig() const;
 
     FrontierConfig config_;
     nav_msgs::msg::OccupancyGrid map_;
@@ -221,6 +271,8 @@ private:
     double last_goal_yaw_ = 0.0;
     double last_goal_time_sec_ = 0.0;
     std::vector<GoalAttemptRecord> goal_attempts_;
+    std::optional<double> last_strict_candidate_sec_;
+    bool relaxation_active_ = false;
 };
 
 }  // namespace yahboom_alc_bringup

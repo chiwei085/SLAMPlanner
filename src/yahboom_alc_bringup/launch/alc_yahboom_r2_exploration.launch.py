@@ -1,3 +1,4 @@
+import json
 import os
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
@@ -17,6 +18,40 @@ from launch.substitutions import Command, LaunchConfiguration
 from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+# Single source for the R2 chassis footprint used by both the frontier
+# explorer and the cmd_vel bridge. Keep in sync with the footprint string in
+# params/nav2_rgbd_params.yaml.
+ROBOT_FOOTPRINT_PARAMS = {
+    "footprint_front_m": 0.16,
+    "footprint_rear_m": 0.15,
+    "footprint_half_width_m": 0.11,
+    "footprint_padding_m": 0.05,
+}
+
+NAV2_RUNTIME_METADATA = {
+    "planner_plugin": "nav2_smac_planner/SmacPlannerHybrid",
+    "planner_motion_model": "REEDS_SHEPP",
+    "planner_minimum_turning_radius": 0.50,
+    "controller_plugin": (
+        "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+    ),
+    "controller_allow_reversing": True,
+    "controller_use_rotate_to_heading": False,
+    "local_inflation_radius": 0.40,
+    "global_inflation_radius": 0.40,
+    "local_footprint_padding": 0.05,
+    "global_footprint_padding": 0.05,
+    "bridge_reverse": {
+        "enabled": True,
+        "allowed_cost_max": 98,
+        "unknown_is_blocked": True,
+        "check_distance_m": 0.20,
+        "safety_margin_m": 0.08,
+        "stationary_arc_requires_forward_clearance": True,
+        "stationary_arc_check_distance_m": 0.12,
+    },
+}
 
 
 def launch_lidar(context, *args, **kwargs):
@@ -71,87 +106,91 @@ def launch_frontier_explorer(context, *args, **kwargs):
     if enabled not in ("1", "true", "yes", "on"):
         return []
 
-    explorer_type = LaunchConfiguration("frontier_explorer_type").perform(context)
     common_parameters = {
         "enabled": True,
         "map_topic": "/map",
         "robot_frame": "base_footprint",
         "global_frame": "map",
+        "planner_event_topic": "/planner/events",
+        "nav2_success_xy_tolerance_m": 0.40,
     }
-    if explorer_type == "simple":
-        return [
-            Node(
-                package="yahboom_alc_bringup",
-                executable="simple_frontier_explorer",
-                name="simple_frontier_explorer",
-                output="screen",
-                parameters=[
-                    {
-                        **common_parameters,
-                        "cycle_period_sec": 5.0,
-                        "min_goal_distance": 0.45,
-                        "max_goal_distance": 2.5,
-                        "frontier_stride": 3,
-                    }
-                ],
-            )
-        ]
-    if explorer_type == "cluster":
-        return [
-            Node(
-                package="yahboom_alc_bringup",
-                executable="cluster_frontier_explorer",
-                name="cluster_frontier_explorer",
-                output="screen",
-                parameters=[
-                    {
-                        **common_parameters,
-                        "cycle_period_sec": 3.0,
-                        "min_frontier_size": 14,
-                        "min_clearance_cells": 2,
-                        "path_clearance_cells": 2,
-                        "min_frontier_distance": 0.45,
-                        "max_frontier_distance": 3.5,
-                        "frontier_goal_search_radius": 0.6,
-                        "robot_start_search_radius": 2.0,
-                        "information_radius": 1.5,
-                        "path_weight": 1.0,
-                        "information_weight": 0.02,
-                        "frontier_size_weight": 0.02,
-                        "unreachable_goal_penalty": 3.0,
-                        "allow_unreachable_goal": False,
-                        "goal_update_distance": 0.5,
-                        "goal_publish_period": 3.0,
-                        "footprint_front_m": 0.16,
-                        "footprint_rear_m": 0.15,
-                        "footprint_half_width_m": 0.11,
-                        "footprint_padding_m": 0.03,
-                        "swept_step_m": 0.05,
-                        "unknown_overlap_max_ratio": 0.70,
-                        "unknown_overlap_weight": 4.0,
-                        "wall_clearance_m": 0.22,
-                        "corner_penalty_weight": 1.0,
-                        "corridor_progress_weight": 0.4,
-                        "goal_timeout_sec": 20.0,
-                        "stuck_progress_radius_m": 0.12,
-                        "stuck_progress_timeout_sec": 8.0,
-                        "failed_goal_blacklist_radius_m": 0.45,
-                        "failed_goal_blacklist_sec": 60.0,
-                        "failed_goal_max_retries": 1,
-                        "enable_subgoals": True,
-                        "max_subgoals": 3,
-                        "subgoal_path_tolerance_m": 0.30,
-                        "min_subgoal_spacing_m": 0.45,
-                        "nav2_validation_enabled": True,
-                        "nav2_validation_timeout_sec": 2.0,
-                        "nav2_compute_path_action": "/compute_path_to_pose",
-                        "marker_topic": "/waypoints",
-                        "goal_marker_topic": "/frontier_goal_marker",
-                    }
-                ],
-            )
-        ]
-    raise ValueError("frontier_explorer_type must be 'cluster' or 'simple'")
+    return [
+        Node(
+            package="yahboom_alc_bringup",
+            executable="cluster_frontier_explorer",
+            name="cluster_frontier_explorer",
+            output="screen",
+            parameters=[
+                {
+                    **common_parameters,
+                    "cycle_period_sec": 3.0,
+                    "min_frontier_size": 14,
+                    "min_clearance_cells": 2,
+                    "path_clearance_cells": 2,
+                    "min_frontier_distance": 0.45,
+                    "max_frontier_distance": 3.5,
+                    "frontier_goal_search_radius": 0.6,
+                    "robot_start_search_radius": 2.0,
+                    "information_radius": 1.5,
+                    "path_weight": 1.0,
+                    "information_weight": 0.02,
+                    "frontier_size_weight": 0.02,
+                    "unreachable_goal_penalty": 3.0,
+                    "allow_unreachable_goal": False,
+                    "goal_update_distance": 0.5,
+                    "goal_publish_period": 3.0,
+                    **ROBOT_FOOTPRINT_PARAMS,
+                    "swept_step_m": 0.05,
+                    "unknown_overlap_max_ratio": 0.70,
+                    "unknown_overlap_weight": 4.0,
+                    "wall_clearance_m": 0.28,
+                    "corner_penalty_weight": 1.0,
+                    "corridor_progress_weight": 0.4,
+                    "heading_penalty_weight": 1.2,
+                    "heading_penalty_max_rad": 3.141592653589793,
+                    "goal_timeout_sec": 35.0,
+                    "stuck_progress_radius_m": 0.08,
+                    "stuck_progress_timeout_sec": 9.0,
+                    "near_goal_hysteresis_radius_m": 0.52,
+                    "near_goal_retry_limit": 1,
+                    "near_goal_hysteresis_sec": 12.0,
+                    "alignment_grace_enabled": True,
+                    "alignment_heading_threshold_rad": 0.55,
+                    "alignment_max_grace_sec": 8.0,
+                    "alignment_min_rotation_delta_rad": 0.12,
+                    "alignment_spin_enabled": False,
+                    "alignment_spin_max_attempts": 1,
+                    "alignment_spin_time_allowance_sec": 8.0,
+                    "no_frontier_relax_sec": 30.0,
+                    "relaxed_min_frontier_size": 8,
+                    "relaxed_max_frontier_distance": 5.0,
+                    "failed_goal_blacklist_radius_m": 0.45,
+                    "failed_goal_blacklist_sec": 60.0,
+                    "failed_goal_max_retries": 2,
+                    "enable_subgoals": True,
+                    "max_subgoals": 3,
+                    "subgoal_path_tolerance_m": 0.30,
+                    "min_subgoal_spacing_m": 0.45,
+                    "nav2_validation_enabled": True,
+                    "nav2_validation_timeout_sec": 2.0,
+                    "nav2_compute_path_action": "/compute_path_to_pose",
+                    "nav2_validation_blacklist_enabled": True,
+                    "backtrace_recovery_enabled": True,
+                    "backtrace_breadcrumb_max_distance_m": 2.0,
+                    "backtrace_breadcrumb_max_age_sec": 90.0,
+                    "backtrace_backup_step_m": 0.10,
+                    "backtrace_backup_speed_mps": 0.04,
+                    "backtrace_backup_time_allowance_sec": 5.0,
+                    "backtrace_max_segments": 4,
+                    "backtrace_min_actual_displacement_m": 0.03,
+                    "backtrace_cancel_timeout_sec": 1.0,
+                    "backtrace_backup_action": "/backup",
+                    "marker_topic": "/waypoints",
+                    "goal_marker_topic": "/frontier_goal_marker",
+                }
+            ],
+        )
+    ]
 
 
 def generate_launch_description():
@@ -381,6 +420,7 @@ def generate_launch_description():
                 "map_dist_min_revisit": 0.75,
                 "navigation_timeout_sec": 120.0,
                 "use_approach_heading": True,
+                "planner_event_topic": "/planner/events",
             }
         ],
     )
@@ -394,16 +434,32 @@ def generate_launch_description():
             {
                 "input_topic": nav_cmd_vel_topic,
                 "output_topic": driver_cmd_vel_topic,
-                "min_linear_speed": 0.02,
+                "planner_event_topic": "/planner/events",
+                "min_linear_speed": 0.05,
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
+                "wheelbase_m": 0.16,
+                "min_turning_radius_m": 0.50,
+                "max_curvature": 2.0,
+                "max_steering_angle_rad": 1.25,
                 "linear_deadband": 0.001,
-                "angular_deadband": 0.001,
-                "max_linear_accel": 0.08,
-                "max_steering_rate": 0.35,
+                "angular_deadband": 0.005,
+                "max_linear_accel": 0.12,
+                "max_steering_rate": 1.0,
                 "assumed_command_period": 0.10,
                 "arc_turn_when_stationary": True,
+                "stationary_arc_requires_forward_clearance": True,
+                "stationary_arc_check_distance_m": 0.12,
+                "reverse_safety_enabled": True,
+                "reverse_costmap_topic": "/local_costmap/costmap",
+                "reverse_robot_frame": "base_footprint",
+                "reverse_costmap_max_age_sec": 1.0,
+                "reverse_check_distance_m": 0.20,
+                "reverse_safety_margin_m": 0.08,
+                "reverse_allowed_cost_max": 98,
+                "reverse_unknown_is_blocked": True,
+                **ROBOT_FOOTPRINT_PARAMS,
             }
         ],
     )
@@ -424,6 +480,23 @@ def generate_launch_description():
                 "global_frame": "map",
                 "robot_frame": "base_footprint",
                 "snapshot_period_sec": 2.0,
+                "runtime_metadata_json": json.dumps(
+                    {
+                        **NAV2_RUNTIME_METADATA,
+                        "bridge": {
+                            "reverse_safety_enabled": True,
+                            "reverse_allowed_cost_max": 98,
+                            "reverse_check_distance_m": 0.20,
+                            "reverse_safety_margin_m": 0.08,
+                            "reverse_unknown_is_blocked": True,
+                            "min_turning_radius_m": 0.50,
+                            "max_curvature": 2.0,
+                        },
+                        "footprint": ROBOT_FOOTPRINT_PARAMS,
+                    }
+                ),
+                "nav2_params_file": nav2_params_file,
+                "nav2_bt_xml": nav2_bt_xml,
             }
         ],
     )
@@ -498,11 +571,6 @@ def generate_launch_description():
                 description="Automatically send frontier goals to Nav2.",
             ),
             DeclareLaunchArgument(
-                "frontier_explorer_type",
-                default_value="cluster",
-                description="Frontier explorer implementation: cluster or simple.",
-            ),
-            DeclareLaunchArgument(
                 "rviz",
                 default_value="false",
                 description="Launch RViz2 for remote visualization.",
@@ -541,8 +609,8 @@ def generate_launch_description():
                 "nav2_params_file",
                 default_value=default_nav2_params,
                 description=(
-                    "Nav2 parameter YAML. Use this to tune spin behavior timing "
-                    "for the R2 arc-turn approximation."
+                    "Nav2 parameter YAML. Use this to tune the R2 planner, "
+                    "controller, and behavior server."
                 ),
             ),
             DeclareLaunchArgument(

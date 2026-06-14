@@ -73,15 +73,21 @@ nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
 
 nlohmann::json runStartJson(const double time_sec,
                             const double snapshot_period_sec,
-                            const LoggerTopics& topics) {
-    return {{"type", "run_start"},
-            {"time_sec", rounded(time_sec)},
-            {"snapshot_period_sec", snapshot_period_sec},
-            {"event_topic", topics.event_topic},
-            {"map_topic", topics.map_topic},
-            {"nav_cmd_topic", topics.nav_cmd_topic},
-            {"driver_cmd_topic", topics.driver_cmd_topic},
-            {"navigate_status_topic", topics.navigate_status_topic}};
+                            const LoggerTopics& topics,
+                            const nlohmann::json& runtime_metadata) {
+    auto record =
+        nlohmann::json{{"type", "run_start"},
+                       {"time_sec", rounded(time_sec)},
+                       {"snapshot_period_sec", snapshot_period_sec},
+                       {"event_topic", topics.event_topic},
+                       {"map_topic", topics.map_topic},
+                       {"nav_cmd_topic", topics.nav_cmd_topic},
+                       {"driver_cmd_topic", topics.driver_cmd_topic},
+                       {"navigate_status_topic", topics.navigate_status_topic}};
+    if (runtime_metadata.dump() != "null" && runtime_metadata.dump() != "{}") {
+        record[std::string("runtime_metadata")] = runtime_metadata;
+    }
+    return record;
 }
 
 std::string makeRunLogName() {

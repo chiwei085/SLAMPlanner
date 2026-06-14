@@ -12,6 +12,15 @@ namespace yahboom_alc_bringup
 
 namespace
 {
+using yahboom_alc_bringup::WorldPoint;
+
+double yawBetween(const WorldPoint& from, const WorldPoint& to) {
+    return std::atan2(to.second - from.second, to.first - from.first);
+}
+
+double headingDelta(const double from_yaw, const double to_yaw) {
+    return std::abs(std::remainder(to_yaw - from_yaw, 2.0 * M_PI));
+}
 }  // namespace
 
 double FootprintCheck::unknownRatio() const {
@@ -24,6 +33,8 @@ FrontierExplorerCore::FrontierExplorerCore(FrontierConfig config)
 void FrontierExplorerCore::setConfig(const FrontierConfig& config) {
     config_ = config;
     footprint_geometry_.reset();
+    last_strict_candidate_sec_.reset();
+    relaxation_active_ = false;
 }
 
 void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
@@ -32,8 +43,59 @@ void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
     footprint_geometry_.reset();
 }
 
-CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
-                                                     const double now_sec) {
+CandidateResult FrontierExplorerCore::findCandidates(
+    const WorldPoint& robot_xy, const double now_sec,
+    std::optional<double> robot_yaw) {
+    auto result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
+    if (!result.candidates.empty()) {
+        last_strict_candidate_sec_ = now_sec;
+        relaxation_active_ = false;
+        return result;
+    }
+    if (config_.no_frontier_relax_sec <= 0.0) {
+        return result;
+    }
+    if (!last_strict_candidate_sec_) {
+        last_strict_candidate_sec_ = now_sec;
+        return result;
+    }
+    if (!relaxation_active_ &&
+        now_sec - *last_strict_candidate_sec_ < config_.no_frontier_relax_sec) {
+        return result;
+    }
+
+    relaxation_active_ = true;
+    struct ConfigRestore
+    {
+        FrontierExplorerCore& core;
+        FrontierConfig strict;
+        ~ConfigRestore() {
+            core.config_ = std::move(strict);
+            core.footprint_geometry_.reset();
+        }
+    } restore{*this, config_};
+    config_ = relaxedConfig();
+    footprint_geometry_.reset();
+    auto relaxed_result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
+    relaxed_result.relaxed = true;
+    return relaxed_result;
+}
+
+FrontierConfig FrontierExplorerCore::relaxedConfig() const {
+    FrontierConfig relaxed = config_;
+    relaxed.min_frontier_size =
+        std::min(relaxed.min_frontier_size, config_.relaxed_min_frontier_size);
+    if (config_.relaxed_max_frontier_distance > 0.0) {
+        relaxed.max_frontier_distance =
+            std::max(relaxed.max_frontier_distance,
+                     config_.relaxed_max_frontier_distance);
+    }
+    return relaxed;
+}
+
+CandidateResult FrontierExplorerCore::findCandidatesOnce(
+    const WorldPoint& robot_xy, const double now_sec,
+    std::optional<double> robot_yaw) {
     CandidateResult result;
     const int width = static_cast<int>(map_.info.width);
     const int height = static_cast<int>(map_.info.height);
@@ -82,7 +144,7 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 
     for (const auto& cluster : clusters) {
         auto candidate = makeCandidate(cluster, *start_cell, robot_xy, blocked,
-                                       width, height, result.counts);
+                                       width, height, result.counts, robot_yaw);
         if (!candidate) {
             continue;
         }
@@ -104,7 +166,8 @@ CandidateResult FrontierExplorerCore::findCandidates(const WorldPoint& robot_xy,
 std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
     const std::vector<Cell>& cluster, const Cell& start_cell,
     const WorldPoint& robot_xy, const std::vector<bool>& blocked,
-    const int width, const int height, FrontierCounts& counts) {
+    const int width, const int height, FrontierCounts& counts,
+    std::optional<double> robot_yaw) {
     const auto goal_options =
         goalOptionsForCluster(cluster, blocked, width, height);
     if (goal_options.empty()) {
@@ -120,15 +183,18 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         const auto goal_xy =
             mapToWorldUnchecked(goal_cell.first, goal_cell.second);
         if (isBlacklisted(goal_xy)) {
+            ++counts.rejected_blacklist;
             continue;
         }
         const double goal_distance = std::hypot(
             goal_xy.first - robot_xy.first, goal_xy.second - robot_xy.second);
         if (goal_distance < config_.min_frontier_distance) {
+            ++counts.rejected_too_near;
             continue;
         }
         if (config_.max_frontier_distance > 0.0 &&
             goal_distance > config_.max_frontier_distance) {
+            ++counts.rejected_too_far;
             continue;
         }
 
@@ -179,6 +245,15 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         if (!reachable) {
             score += config_.unreachable_goal_penalty;
         }
+        double heading_delta = 0.0;
+        if (robot_yaw && config_.heading_penalty_weight > 0.0 &&
+            config_.heading_penalty_max_rad > 0.0) {
+            heading_delta = headingError(
+                *robot_yaw, pathInitialYaw(*path, robot_xy, goal_xy));
+            score += config_.heading_penalty_weight *
+                     std::min(heading_delta, config_.heading_penalty_max_rad) /
+                     config_.heading_penalty_max_rad;
+        }
 
         FrontierCandidate candidate;
         candidate.cells = cluster;
@@ -191,6 +266,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
         candidate.reachable = reachable;
         candidate.unknown_overlap_ratio = unknown_ratio;
         candidate.wall_clearance = obstacle.wall_clearance;
+        candidate.heading_delta = heading_delta;
         candidate.score = score;
         if (!best || candidate.score < best->score) {
             best = std::move(candidate);
@@ -619,7 +695,7 @@ std::optional<PathProjection> FrontierExplorerCore::projectOntoPath(
         if (!best || dist < best->distance ||
             (std::abs(dist - best->distance) <= 1e-9 &&
              arc < best->arc_length)) {
-            best = PathProjection{dist, arc};
+            best = PathProjection{dist, arc, i};
         }
         arc_before += len;
     }
@@ -821,17 +897,83 @@ bool FrontierExplorerCore::hasOccupiedClearance(const int x, const int y,
     return true;
 }
 
+double FrontierExplorerCore::headingError(const double from_yaw,
+                                          const double to_yaw) const {
+    return headingDelta(from_yaw, to_yaw);
+}
+
+std::optional<double> FrontierExplorerCore::pathTargetYawNear(
+    const WorldPoint& robot_xy, const std::vector<Cell>& path) const {
+    if (path.size() < 2) {
+        return std::nullopt;
+    }
+    const auto projection = projectOntoPath(robot_xy, path);
+    if (!projection || projection->segment == 0) {
+        return std::nullopt;
+    }
+    const auto a = mapToWorldUnchecked(path[projection->segment - 1].first,
+                                       path[projection->segment - 1].second);
+    const auto b = mapToWorldUnchecked(path[projection->segment].first,
+                                       path[projection->segment].second);
+    return yawBetween(a, b);
+}
+
+AlignmentGraceStatus FrontierExplorerCore::evaluateAlignmentGrace(
+    const WorldPoint& robot_xy, const double robot_yaw,
+    const std::optional<double> previous_robot_yaw,
+    const std::vector<Cell>& path, const WorldPoint& active_goal_xy,
+    const double elapsed_since_waypoint_sent_sec) const {
+    AlignmentGraceStatus status;
+    if (!config_.alignment_grace_enabled ||
+        config_.alignment_max_grace_sec <= 0.0) {
+        return status;
+    }
+
+    const auto target_yaw = pathTargetYawNear(robot_xy, path);
+    status.target_yaw =
+        target_yaw ? *target_yaw : yawBetween(robot_xy, active_goal_xy);
+    status.heading_error = headingError(robot_yaw, status.target_yaw);
+    status.previous_heading_error =
+        previous_robot_yaw
+            ? headingError(*previous_robot_yaw, status.target_yaw)
+            : status.heading_error;
+    status.heading_error_delta =
+        status.previous_heading_error - status.heading_error;
+
+    if (elapsed_since_waypoint_sent_sec >= config_.alignment_max_grace_sec) {
+        return status;
+    }
+    if (status.heading_error <= config_.alignment_heading_threshold_rad) {
+        return status;
+    }
+    if (!previous_robot_yaw ||
+        status.heading_error_delta < config_.alignment_min_rotation_delta_rad) {
+        return status;
+    }
+
+    status.active = true;
+    return status;
+}
+
+double FrontierExplorerCore::pathInitialYaw(const std::vector<Cell>& path,
+                                            const WorldPoint& robot_xy,
+                                            const WorldPoint& goal_xy) const {
+    if (path.size() >= 2) {
+        const auto next_xy = mapToWorldUnchecked(path[1].first, path[1].second);
+        return yawBetween(robot_xy, next_xy);
+    }
+    return yawBetween(robot_xy, goal_xy);
+}
+
 double FrontierExplorerCore::pathGoalYaw(const std::vector<Cell>& path,
                                          const WorldPoint& robot_xy,
                                          const WorldPoint& goal_xy) const {
     if (path.size() >= 2) {
         const auto prev_xy = mapToWorldUnchecked(path[path.size() - 2].first,
                                                  path[path.size() - 2].second);
-        return std::atan2(goal_xy.second - prev_xy.second,
-                          goal_xy.first - prev_xy.first);
+        return yawBetween(prev_xy, goal_xy);
     }
-    return std::atan2(goal_xy.second - robot_xy.second,
-                      goal_xy.first - robot_xy.first);
+    return yawBetween(robot_xy, goal_xy);
 }
 
 std::vector<Cell> FrontierExplorerCore::neighborCells(const int x,

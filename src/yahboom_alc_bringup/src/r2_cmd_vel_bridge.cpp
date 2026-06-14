@@ -1,10 +1,17 @@
 #include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
 
+#include <nlohmann/json.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <string>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -21,7 +28,175 @@ double signOf(const double value) {
     return value < 0.0 ? -1.0 : 1.0;
 }
 
+bool worldToMap(const nav_msgs::msg::OccupancyGrid& costmap, const double wx,
+                const double wy, int& mx, int& my) {
+    const double resolution = costmap.info.resolution;
+    if (resolution <= 0.0) {
+        return false;
+    }
+    const double origin_x = costmap.info.origin.position.x;
+    const double origin_y = costmap.info.origin.position.y;
+    mx = static_cast<int>(std::floor((wx - origin_x) / resolution));
+    my = static_cast<int>(std::floor((wy - origin_y) / resolution));
+    return mx >= 0 && my >= 0 && mx < static_cast<int>(costmap.info.width) &&
+           my < static_cast<int>(costmap.info.height);
+}
+
+bool isFreeCostmapCell(const int value, const R2CmdVelBridgeConfig& config) {
+    if (value < 0) {
+        return !config.reverse_unknown_is_blocked;
+    }
+    return value <= config.reverse_allowed_cost_max;
+}
+
+enum class FootprintSafetyStatus : std::uint8_t
+{
+    kSafe,
+    kOutOfBounds,
+    kBlocked,
+};
+
+struct FootprintExtensions
+{
+    double front_m = 0.0;
+    double rear_m = 0.0;
+};
+
+FootprintExtensions frontExtension(const double distance_m) {
+    FootprintExtensions extensions;
+    extensions.front_m = distance_m;
+    return extensions;
+}
+
+FootprintExtensions rearExtension(const double distance_m) {
+    FootprintExtensions extensions;
+    extensions.rear_m = distance_m;
+    return extensions;
+}
+
+const char* safetyReason(const FootprintSafetyStatus status,
+                         const char* blocked_reason) {
+    switch (status) {
+        case FootprintSafetyStatus::kOutOfBounds:
+            return "out_of_bounds";
+        case FootprintSafetyStatus::kBlocked:
+            return blocked_reason;
+        case FootprintSafetyStatus::kSafe:
+            return "safe";
+    }
+    return blocked_reason;
+}
+
+FootprintSafetyStatus footprintSafetyStatus(
+    const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
+    const FootprintExtensions extensions, const R2CmdVelBridgeConfig& config) {
+    const double resolution = costmap.info.resolution;
+    if (resolution <= 0.0 || costmap.data.empty()) {
+        return FootprintSafetyStatus::kBlocked;
+    }
+
+    int center_x = 0;
+    int center_y = 0;
+    if (!worldToMap(costmap, pose.x, pose.y, center_x, center_y)) {
+        return FootprintSafetyStatus::kOutOfBounds;
+    }
+
+    const double front = config.footprint_front_m + config.footprint_padding_m +
+                         extensions.front_m;
+    const double rear = config.footprint_rear_m + config.footprint_padding_m +
+                        extensions.rear_m;
+    const double half_width =
+        config.footprint_half_width_m + config.footprint_padding_m;
+    const int radius_cells = std::max(
+        1, static_cast<int>(std::ceil(
+               std::hypot(std::max(front, rear), half_width) / resolution)));
+    const double cos_yaw = std::cos(pose.yaw);
+    const double sin_yaw = std::sin(pose.yaw);
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+        for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+            const int mx = center_x + dx;
+            const int my = center_y + dy;
+            const double cell_x = costmap.info.origin.position.x +
+                                  (static_cast<double>(mx) + 0.5) * resolution;
+            const double cell_y = costmap.info.origin.position.y +
+                                  (static_cast<double>(my) + 0.5) * resolution;
+            const double rel_x = cell_x - pose.x;
+            const double rel_y = cell_y - pose.y;
+            const double body_x = cos_yaw * rel_x + sin_yaw * rel_y;
+            const double body_y = -sin_yaw * rel_x + cos_yaw * rel_y;
+            if (body_x < -rear || body_x > front) {
+                continue;
+            }
+            if (std::abs(body_y) > half_width) {
+                continue;
+            }
+            if (mx < 0 || my < 0 ||
+                mx >= static_cast<int>(costmap.info.width) ||
+                my >= static_cast<int>(costmap.info.height)) {
+                return FootprintSafetyStatus::kOutOfBounds;
+            }
+
+            const auto index =
+                static_cast<std::size_t>(my) * costmap.info.width + mx;
+            if (index >= costmap.data.size() ||
+                !isFreeCostmapCell(costmap.data[index], config)) {
+                return FootprintSafetyStatus::kBlocked;
+            }
+        }
+    }
+    return FootprintSafetyStatus::kSafe;
+}
+
+double clampAngularForCurvature(const double angular, const double linear_x,
+                                const R2CmdVelBridgeConfig& config) {
+    if (angular == 0.0 || linear_x == 0.0) {
+        return 0.0;
+    }
+    double curvature_limit = std::abs(config.max_curvature);
+    if (config.min_turning_radius_m > 0.0) {
+        const double radius_curvature = 1.0 / config.min_turning_radius_m;
+        curvature_limit = curvature_limit > 0.0
+                              ? std::min(curvature_limit, radius_curvature)
+                              : radius_curvature;
+    }
+    if (curvature_limit <= 0.0) {
+        return angular;
+    }
+    const double angular_limit = std::abs(linear_x) * curvature_limit;
+    return std::clamp(angular, -angular_limit, angular_limit);
+}
+
 }  // namespace
+
+bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
+                            const ReverseSafetyPose& pose,
+                            const double reverse_speed,
+                            const R2CmdVelBridgeConfig& config) {
+    if (reverse_speed >= 0.0) {
+        return true;
+    }
+    const double check_distance =
+        std::max(config.reverse_check_distance_m,
+                 std::abs(reverse_speed) * config.assumed_command_period +
+                     config.reverse_safety_margin_m);
+    // Backing up keeps the yaw constant, so the area swept by the footprint
+    // is exactly the footprint rectangle with the rear extended by the
+    // check distance.
+    return footprintSafetyStatus(costmap, pose, rearExtension(check_distance),
+                                 config) == FootprintSafetyStatus::kSafe;
+}
+
+bool isStationaryArcForwardSafeInCostmap(
+    const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
+    const double forward_speed, const R2CmdVelBridgeConfig& config) {
+    if (forward_speed <= 0.0) {
+        return true;
+    }
+    const double check_distance =
+        std::max(0.0, config.stationary_arc_check_distance_m);
+    return footprintSafetyStatus(costmap, pose, frontExtension(check_distance),
+                                 config) == FootprintSafetyStatus::kSafe;
+}
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
     const geometry_msgs::msg::Twist& input,
@@ -46,11 +221,18 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
         linear_x = std::abs(config.min_linear_speed);
     }
 
+    const double curvature_limited_angular =
+        clampAngularForCurvature(requested_angular, linear_x, config);
+
     double steering = 0.0;
-    if (requested_angular != 0.0) {
+    if (curvature_limited_angular != 0.0) {
         const double requested_steering =
-            requested_angular * config.steering_gain;
-        const double steering_limit = std::abs(config.max_steering);
+            curvature_limited_angular * config.steering_gain;
+        double steering_limit = std::abs(config.max_steering);
+        if (config.max_steering_angle_rad > 0.0) {
+            steering_limit = std::min(steering_limit,
+                                      std::abs(config.max_steering_angle_rad));
+        }
         steering =
             std::clamp(requested_steering, -steering_limit, steering_limit);
     }
@@ -69,6 +251,8 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
       config_(loadConfig()) {
     publisher_ = create_publisher<geometry_msgs::msg::Twist>(
         config_.output_topic, rclcpp::SystemDefaultsQoS());
+    event_pub_ = create_publisher<std_msgs::msg::String>(
+        config_.planner_event_topic, 10);
 
     rclcpp::QoS input_qos{rclcpp::KeepLast(1)};
     input_qos.best_effort();
@@ -77,15 +261,36 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         [this](const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
             onCmdVel(msg);
         });
+    const bool costmap_safety_enabled =
+        config_.reverse_safety_enabled ||
+        config_.stationary_arc_requires_forward_clearance;
+    if (costmap_safety_enabled) {
+        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+        tf_listener_ =
+            std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
+        rclcpp::QoS costmap_qos{rclcpp::KeepLast(1)};
+        costmap_qos.transient_local().reliable();
+        costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+            config_.reverse_costmap_topic, costmap_qos,
+            [this](const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& msg) {
+                latest_costmap_ = msg;
+            });
+    }
 
-    RCLCPP_INFO(get_logger(),
-                "Yahboom R2 cmd_vel bridge: %s -> %s, min_linear=%.3f, "
-                "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f, "
-                "max_linear_accel=%.3f, max_steering_rate=%.3f",
-                config_.input_topic.c_str(), config_.output_topic.c_str(),
-                config_.min_linear_speed, config_.max_linear_speed,
-                config_.steering_gain, config_.max_steering,
-                config_.max_linear_accel, config_.max_steering_rate);
+    RCLCPP_INFO(
+        get_logger(),
+        "Yahboom R2 cmd_vel bridge: %s -> %s, min_linear=%.3f, "
+        "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f, "
+        "max_linear_accel=%.3f, max_steering_rate=%.3f, "
+        "reverse_safety=%s, stationary_arc_forward_clearance=%s, "
+        "shared_costmap=%s",
+        config_.input_topic.c_str(), config_.output_topic.c_str(),
+        config_.min_linear_speed, config_.max_linear_speed,
+        config_.steering_gain, config_.max_steering, config_.max_linear_accel,
+        config_.max_steering_rate,
+        config_.reverse_safety_enabled ? "true" : "false",
+        config_.stationary_arc_requires_forward_clearance ? "true" : "false",
+        config_.reverse_costmap_topic.c_str());
 }
 
 R2CmdVelBridgeConfig R2CmdVelBridgeNode::loadConfig() {
@@ -98,11 +303,157 @@ void R2CmdVelBridgeNode::onCmdVel(
         return;
     }
 
-    publisher_->publish(limitRate(convertNavTwistToR2(*msg, config_)));
+    const double requested_linear =
+        applyDeadband(msg->linear.x, config_.linear_deadband);
+    const double requested_angular =
+        applyDeadband(msg->angular.z, config_.angular_deadband);
+    const bool stationary_arc_command = requested_linear == 0.0 &&
+                                        requested_angular != 0.0 &&
+                                        config_.arc_turn_when_stationary;
+
+    publisher_->publish(
+        limitRate(convertNavTwistToR2(*msg, config_), stationary_arc_command));
+}
+
+geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
+    const geometry_msgs::msg::Twist& target) {
+    if (!config_.reverse_safety_enabled || target.linear.x >= 0.0) {
+        return target;
+    }
+
+    geometry_msgs::msg::Twist output = target;
+    const auto costmap = latest_costmap_;
+    if (!costmap || !isCostmapFresh(*costmap)) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("reverse_blocked", "stale_costmap");
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "reverse_blocked_unsafe_space: local costmap unavailable or stale");
+        return output;
+    }
+
+    const auto pose =
+        lookupReverseSafetyPose(*costmap, "reverse_blocked_unsafe_space");
+    if (!pose) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("reverse_blocked", "tf_unavailable");
+        return output;
+    }
+    const double check_distance =
+        std::max(config_.reverse_check_distance_m,
+                 std::abs(target.linear.x) * config_.assumed_command_period +
+                     config_.reverse_safety_margin_m);
+    const auto status = footprintSafetyStatus(
+        *costmap, *pose, rearExtension(check_distance), config_);
+    if (status != FootprintSafetyStatus::kSafe) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("reverse_blocked", safetyReason(status, "rear_blocked"));
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "reverse_blocked_unsafe_space: rear footprint is not fully free");
+    }
+    return output;
+}
+
+geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
+    const geometry_msgs::msg::Twist& target) {
+    if (!config_.stationary_arc_requires_forward_clearance ||
+        target.linear.x <= 0.0) {
+        return target;
+    }
+
+    geometry_msgs::msg::Twist output = target;
+    const auto costmap = latest_costmap_;
+    if (!costmap || !isCostmapFresh(*costmap)) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("stationary_arc_blocked", "stale_costmap");
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "stationary_arc_blocked: local costmap unavailable or stale");
+        return output;
+    }
+
+    const auto pose =
+        lookupReverseSafetyPose(*costmap, "stationary_arc_blocked");
+    if (!pose) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("stationary_arc_blocked", "tf_unavailable");
+        return output;
+    }
+
+    const double check_distance =
+        std::max(0.0, config_.stationary_arc_check_distance_m);
+    const auto status = footprintSafetyStatus(
+        *costmap, *pose, frontExtension(check_distance), config_);
+    if (status != FootprintSafetyStatus::kSafe) {
+        output.linear.x = 0.0;
+        output.linear.y = 0.0;
+        publishPlannerEvent("stationary_arc_blocked",
+                            safetyReason(status, "front_blocked"));
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "stationary_arc_blocked: front footprint is not fully free");
+    }
+    return output;
+}
+
+std::optional<ReverseSafetyPose> R2CmdVelBridgeNode::lookupReverseSafetyPose(
+    const nav_msgs::msg::OccupancyGrid& costmap, const char* warning_label) {
+    if (!tf_buffer_) {
+        return std::nullopt;
+    }
+    try {
+        const auto transform = tf_buffer_->lookupTransform(
+            costmap.header.frame_id, config_.reverse_robot_frame,
+            tf2::TimePointZero);
+        return ReverseSafetyPose{
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            yawFromQuaternion(transform.transform.rotation)};
+    }
+    catch (const tf2::TransformException& ex) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "%s: TF %s -> %s unavailable: %s", warning_label,
+                             costmap.header.frame_id.c_str(),
+                             config_.reverse_robot_frame.c_str(), ex.what());
+        return std::nullopt;
+    }
+}
+
+bool R2CmdVelBridgeNode::isCostmapFresh(
+    const nav_msgs::msg::OccupancyGrid& costmap) {
+    if (config_.reverse_costmap_max_age_sec <= 0.0) {
+        return true;
+    }
+    const rclcpp::Time stamp{costmap.header.stamp};
+    if (stamp.nanoseconds() == 0) {
+        return false;
+    }
+    return (get_clock()->now() - stamp).seconds() <=
+           config_.reverse_costmap_max_age_sec;
+}
+
+void R2CmdVelBridgeNode::publishPlannerEvent(const std::string& event,
+                                             const std::string& reason) {
+    if (!event_pub_) {
+        return;
+    }
+    std_msgs::msg::String msg;
+    msg.data = nlohmann::json{{"event", event},
+                              {"reason", reason},
+                              {"time_sec", get_clock()->now().seconds()}}
+                   .dump();
+    event_pub_->publish(msg);
 }
 
 geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
-    const geometry_msgs::msg::Twist& target) {
+    const geometry_msgs::msg::Twist& target,
+    const bool apply_stationary_arc_safety) {
     const rclcpp::Time now = get_clock()->now();
 
     double dt = config_.assumed_command_period;
@@ -125,6 +476,10 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
         std::clamp(target.linear.y, last_output_.linear.y - max_steering_delta,
                    last_output_.linear.y + max_steering_delta);
 
+    output = applyReverseSafety(output);
+    if (apply_stationary_arc_safety) {
+        output = applyStationaryArcSafety(output);
+    }
     last_output_ = output;
     last_output_time_ = now;
     return output;
