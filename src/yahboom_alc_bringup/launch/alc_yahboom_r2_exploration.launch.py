@@ -23,31 +23,33 @@ from launch_ros.parameter_descriptions import ParameterValue
 # explorer and the cmd_vel bridge. Keep in sync with the footprint string in
 # params/nav2_rgbd_params.yaml.
 ROBOT_FOOTPRINT_PARAMS = {
-    "footprint_front_m": 0.16,
-    "footprint_rear_m": 0.15,
-    "footprint_half_width_m": 0.11,
-    "footprint_padding_m": 0.05,
+    "footprint_front_m": 0.19,
+    "footprint_rear_m": 0.19,
+    "footprint_half_width_m": 0.115,
+    "footprint_padding_m": 0.02,
 }
 
 NAV2_RUNTIME_METADATA = {
     "planner_plugin": "nav2_smac_planner/SmacPlannerHybrid",
     "planner_motion_model": "REEDS_SHEPP",
     "planner_minimum_turning_radius": 0.50,
+    "planner_reverse_penalty": 1.8,
+    "planner_change_penalty": 0.0,
     "controller_plugin": (
         "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
     ),
     "controller_allow_reversing": True,
     "controller_use_rotate_to_heading": False,
-    "local_inflation_radius": 0.40,
-    "global_inflation_radius": 0.40,
-    "local_footprint_padding": 0.05,
-    "global_footprint_padding": 0.05,
+    "local_inflation_radius": 0.45,
+    "global_inflation_radius": 0.45,
+    "local_footprint_padding": 0.02,
+    "global_footprint_padding": 0.02,
     "bridge_reverse": {
         "enabled": True,
         "allowed_cost_max": 98,
         "unknown_is_blocked": True,
-        "check_distance_m": 0.20,
-        "safety_margin_m": 0.08,
+        "check_distance_m": 0.12,
+        "safety_margin_m": 0.0,
         "stationary_arc_requires_forward_clearance": True,
         "stationary_arc_check_distance_m": 0.12,
     },
@@ -112,7 +114,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
         "robot_frame": "base_footprint",
         "global_frame": "map",
         "planner_event_topic": "/planner/events",
-        "nav2_success_xy_tolerance_m": 0.40,
+        "nav2_success_xy_tolerance_m": 0.55,
     }
     return [
         Node(
@@ -144,6 +146,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "unknown_overlap_max_ratio": 0.70,
                     "unknown_overlap_weight": 4.0,
                     "wall_clearance_m": 0.28,
+                    "min_wall_clearance_m": 0.0,
                     "corner_penalty_weight": 1.0,
                     "corridor_progress_weight": 0.4,
                     "heading_penalty_weight": 1.2,
@@ -164,8 +167,8 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "no_frontier_relax_sec": 30.0,
                     "relaxed_min_frontier_size": 8,
                     "relaxed_max_frontier_distance": 5.0,
-                    "failed_goal_blacklist_radius_m": 0.45,
-                    "failed_goal_blacklist_sec": 60.0,
+                    "failed_goal_blacklist_radius_m": 0.35,
+                    "failed_goal_blacklist_sec": 600.0,
                     "failed_goal_max_retries": 2,
                     "enable_subgoals": True,
                     "max_subgoals": 3,
@@ -184,6 +187,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "backtrace_max_segments": 4,
                     "backtrace_min_actual_displacement_m": 0.03,
                     "backtrace_cancel_timeout_sec": 1.0,
+                    "backtrace_backup_stall_check_sec": 1.5,
                     "backtrace_backup_action": "/backup",
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
@@ -455,11 +459,39 @@ def generate_launch_description():
                 "reverse_costmap_topic": "/local_costmap/costmap",
                 "reverse_robot_frame": "base_footprint",
                 "reverse_costmap_max_age_sec": 1.0,
-                "reverse_check_distance_m": 0.20,
-                "reverse_safety_margin_m": 0.08,
+                "reverse_check_distance_m": 0.12,
+                "reverse_safety_margin_m": 0.0,
                 "reverse_allowed_cost_max": 98,
-                "reverse_unknown_is_blocked": True,
+                "reverse_unknown_is_blocked": False,
                 **ROBOT_FOOTPRINT_PARAMS,
+            }
+        ],
+    )
+
+    r2_stall_detector = Node(
+        package="yahboom_alc_bringup",
+        executable="r2_stall_detector",
+        name="r2_stall_detector",
+        output="screen",
+        parameters=[
+            {
+                "nav_cmd_topic": nav_cmd_vel_topic,
+                "driver_cmd_topic": driver_cmd_vel_topic,
+                "wheel_odom_topic": "/odom",
+                "imu_topic": "/imu/data",
+                "planner_event_topic": "/planner/events",
+                "slam_global_frame": "map",
+                "robot_frame": "base_footprint",
+                "forward_command_min_duration_sec": 0.5,
+                "command_vx_threshold_mps": 0.08,
+                "wheel_odom_delta_threshold_m": 0.05,
+                "slam_delta_max_m": 0.02,
+                "imu_linear_accel_threshold_mps2": 0.25,
+                "imu_yaw_rate_threshold_radps": 0.08,
+                "stale_observation_timeout_sec": 0.5,
+                "zero_burst_duration_sec": 0.5,
+                "zero_burst_rate_hz": 30.0,
+                "retrigger_cooldown_sec": 3.0,
             }
         ],
     )
@@ -486,11 +518,18 @@ def generate_launch_description():
                         "bridge": {
                             "reverse_safety_enabled": True,
                             "reverse_allowed_cost_max": 98,
-                            "reverse_check_distance_m": 0.20,
-                            "reverse_safety_margin_m": 0.08,
-                            "reverse_unknown_is_blocked": True,
+                            "reverse_check_distance_m": 0.12,
+                            "reverse_safety_margin_m": 0.0,
+                            "reverse_unknown_is_blocked": False,
                             "min_turning_radius_m": 0.50,
                             "max_curvature": 2.0,
+                        },
+                        "stall_detector": {
+                            "enabled": True,
+                            "forward_command_min_duration_sec": 0.5,
+                            "command_vx_threshold_mps": 0.08,
+                            "wheel_odom_delta_threshold_m": 0.05,
+                            "slam_delta_max_m": 0.02,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }
@@ -657,6 +696,7 @@ def generate_launch_description():
             ),
             TimerAction(period=nav2_start_delay_sec, actions=[nav2]),
             r2_bridge,
+            r2_stall_detector,
             r2_safety_stop,
             planner_runtime_logger,
             TimerAction(

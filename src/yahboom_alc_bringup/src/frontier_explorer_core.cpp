@@ -7,21 +7,10 @@
 #include <queue>
 #include <stdexcept>
 
+#include "yahboom_alc_bringup/math_util.hpp"
+
 namespace yahboom_alc_bringup
 {
-
-namespace
-{
-using yahboom_alc_bringup::WorldPoint;
-
-double yawBetween(const WorldPoint& from, const WorldPoint& to) {
-    return std::atan2(to.second - from.second, to.first - from.first);
-}
-
-double headingDelta(const double from_yaw, const double to_yaw) {
-    return std::abs(std::remainder(to_yaw - from_yaw, 2.0 * M_PI));
-}
-}  // namespace
 
 double FootprintCheck::unknownRatio() const {
     return total <= 0 ? 1.0 : static_cast<double>(unknown) / total;
@@ -230,6 +219,11 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
             std::max(footprint.unknownRatio(), *swept_unknown_ratio);
         if (unknown_ratio > config_.unknown_overlap_max_ratio) {
             ++counts.rejected_unknown_ratio;
+            continue;
+        }
+        if (config_.min_wall_clearance_m > 0.0 &&
+            obstacle.wall_clearance < config_.min_wall_clearance_m) {
+            ++counts.rejected_clearance;
             continue;
         }
         double score = config_.path_weight * path_length -
@@ -626,11 +620,81 @@ std::optional<double> FrontierExplorerCore::sweptPathUnknownRatio(
     return max_ratio;
 }
 
+std::optional<double> FrontierExplorerCore::findClearestEscapeDirection(
+    const WorldPoint& pos, const double max_dist_m,
+    const int num_angles) const {
+    if (!has_map_ || max_dist_m <= 0.0 || num_angles <= 0 ||
+        mapResolution() <= 0.0) {
+        return std::nullopt;
+    }
+    const int width = static_cast<int>(map_.info.width);
+    const int height = static_cast<int>(map_.info.height);
+    if (width <= 0 || height <= 0 || map_.data.empty()) {
+        return std::nullopt;
+    }
+    const auto start = worldToMap(pos.first, pos.second);
+    if (!start) {
+        return std::nullopt;
+    }
+
+    std::optional<double> best_yaw;
+    int best_free_cells = 0;
+    double best_clear_distance = 0.0;
+    const double step = mapResolution();
+    const int samples =
+        std::max(1, static_cast<int>(std::ceil(max_dist_m / step)));
+
+    for (int angle_index = 0; angle_index < num_angles; ++angle_index) {
+        const double yaw = evenlySpacedYaw(angle_index, num_angles);
+        int free_cells = 0;
+        double clear_distance = 0.0;
+        std::optional<Cell> previous_cell;
+
+        for (int sample = 1; sample <= samples; ++sample) {
+            const double distance =
+                std::min(max_dist_m, static_cast<double>(sample) * step);
+            const auto point = projectPoint(pos, yaw, distance);
+            const auto cell = worldToMap(point.first, point.second);
+            if (!cell) {
+                break;
+            }
+            if (previous_cell && *previous_cell == *cell) {
+                continue;
+            }
+            previous_cell = cell;
+
+            const int value =
+                map_.data[index(cell->first, cell->second, width)];
+            if (isOccupiedValue(value)) {
+                break;
+            }
+            clear_distance = distance;
+            if (isFreeValue(value) && *cell != *start) {
+                ++free_cells;
+            }
+        }
+
+        if (free_cells > best_free_cells ||
+            (free_cells == best_free_cells &&
+             clear_distance > best_clear_distance)) {
+            best_free_cells = free_cells;
+            best_clear_distance = clear_distance;
+            best_yaw = yaw;
+        }
+    }
+
+    if (best_free_cells <= 0) {
+        return std::nullopt;
+    }
+    return best_yaw;
+}
+
 ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
     const Cell& cell, const int width, const int height) const {
-    const int radius_cells =
-        std::max(1, static_cast<int>(
-                        std::ceil(config_.wall_clearance_m / mapResolution())));
+    const double search_radius_m =
+        std::max(config_.wall_clearance_m, config_.min_wall_clearance_m);
+    const int radius_cells = std::max(
+        1, static_cast<int>(std::ceil(search_radius_m / mapResolution())));
     double best = std::numeric_limits<double>::infinity();
     uint8_t quadrant_mask = 0;
     for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
@@ -653,7 +717,7 @@ ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
         }
     }
     ObstacleNeighborhood result;
-    result.wall_clearance = std::isinf(best) ? config_.wall_clearance_m : best;
+    result.wall_clearance = std::isinf(best) ? search_radius_m : best;
     result.corner_penalty = std::max(
         0.0, static_cast<double>(std::bitset<4>(quadrant_mask).count()) - 1.0);
     return result;
@@ -834,7 +898,6 @@ void FrontierExplorerCore::blacklistGoal(const WorldPoint& goal_xy,
         return;
     }
     auto& record = goal_attempts_[*existing];
-    record.xy = goal_xy;
     ++record.failures;
     record.expires_at_sec = expires_at;
 }

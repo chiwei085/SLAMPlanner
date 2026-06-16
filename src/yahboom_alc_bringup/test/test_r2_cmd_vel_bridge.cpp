@@ -30,12 +30,12 @@ R2CmdVelBridgeConfig defaultConfig() {
     config.arc_turn_when_stationary = true;
     config.stationary_arc_requires_forward_clearance = true;
     config.stationary_arc_check_distance_m = 0.12;
-    config.reverse_check_distance_m = 0.20;
-    config.reverse_safety_margin_m = 0.08;
-    config.footprint_front_m = 0.16;
-    config.footprint_rear_m = 0.15;
-    config.footprint_half_width_m = 0.11;
-    config.footprint_padding_m = 0.03;
+    config.reverse_check_distance_m = 0.12;
+    config.reverse_safety_margin_m = 0.0;
+    config.footprint_front_m = 0.19;
+    config.footprint_rear_m = 0.19;
+    config.footprint_half_width_m = 0.115;
+    config.footprint_padding_m = 0.02;
     return config;
 }
 
@@ -207,6 +207,14 @@ TEST(R2CmdVelBridge, ReverseSafetyBlocksHighRearFootprintCost) {
 TEST(R2CmdVelBridge, ReverseSafetyBlocksUnknownRearFootprint) {
     auto costmap = buildCostmap();
     setWorldCell(costmap, -0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyBlocksSweptRearCorner) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.30, 0.12, 100);
     const ReverseSafetyPose pose{0.0, 0.0, 0.0};
 
     EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));

@@ -34,6 +34,39 @@ Default limits follow the lowest gear in
 `yahboom_joy_R2_v2.py`: `min_linear_speed=0.05`,
 `steering_gain=1.25`, and `max_steering=1.25`.
 
+## Reeds-Shepp Reverse Safety
+
+Nav2 uses `SmacPlannerHybrid` with `REEDS_SHEPP`, so global plans may include
+forward and reverse segments. The local and global costmaps, frontier
+pre-checks, and command bridge share a conservative R2 footprint of about
+`0.38 x 0.23 m`, plus inflation in Nav2.
+
+The bridge is the final gate for reverse motion. Every negative `linear.x`
+command is fail-closed against the local costmap: stale costmap, missing TF,
+unknown cells, out-of-bounds swept footprint, or any footprint cell above the
+configured cost threshold publishes zero `/cmd_vel` and emits
+`reverse_blocked`. The check covers the full short swept footprint volume
+behind the robot, not only the rear centerline.
+
+Because this profile assumes front RGB-D only, Nav2 `BackUp` recovery is kept
+short and slow. Repeated reverse safety failures mark the current frontier as
+`REVERSE_UNSAFE` and force frontier reselection instead of retrying the same
+viewpoint.
+
+## Stall Detection
+
+`r2_stall_detector` handles the case where forward commands and wheel odometry
+show progress but independent observations do not. It compares `/alc/nav_cmd_vel`,
+wheel `/odom`, the SLAM `map -> base_footprint` TF, and `/imu/data`. When a
+forward command persists, wheel odom advances, but SLAM/IMU motion does not
+match, it publishes a zero command burst and emits `stall_or_slip`.
+
+The frontier explorer treats `stall_or_slip` as a front blockage signal, cancels
+the active Nav2 goal, marks the viewpoint `STALL_OR_SLIP`, and selects a new
+frontier. Nav2 `SimpleProgressChecker` remains enabled as a Nav2-level timeout,
+but it is not the only stuck detector because wheel odometry can be fooled by
+slip.
+
 ## Spin Compatibility
 
 ALC-Planner sends Nav2 `/spin` goals with `target_yaw = 2*pi`. Yahboom R2

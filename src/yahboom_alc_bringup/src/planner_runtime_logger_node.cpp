@@ -8,6 +8,8 @@
 
 #include <array>
 #include <cmath>
+#include <exception>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -155,15 +157,13 @@ public:
 
         event_sub_ = create_subscription<std_msgs::msg::String>(
             params.event_topic, 10,
-            [this](const std_msgs::msg::String::SharedPtr msg) {
-                onEvent(*msg);
-            });
+            [this](const std_msgs::msg::String& msg) { onEvent(msg); });
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
         map_qos.reliable().transient_local();
         map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             params.map_topic, map_qos,
-            [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-                latest_map_ = *msg;
+            [this](const nav_msgs::msg::OccupancyGrid& msg) {
+                latest_map_ = msg;
                 map_time_ = get_clock()->now();
                 ++map_message_count_;
             });
@@ -171,24 +171,24 @@ public:
         cmd_qos.best_effort();
         nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.nav_cmd_topic, cmd_qos,
-            [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
-                latest_nav_cmd_ = summarizeTwist(*msg);
+            [this](const geometry_msgs::msg::Twist& msg) {
+                latest_nav_cmd_ = summarizeTwist(msg);
                 nav_cmd_time_ = get_clock()->now();
                 ++nav_cmd_message_count_;
             });
         driver_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.driver_cmd_topic, cmd_qos,
-            [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
-                latest_driver_cmd_ = summarizeTwist(*msg);
+            [this](const geometry_msgs::msg::Twist& msg) {
+                latest_driver_cmd_ = summarizeTwist(msg);
                 driver_cmd_time_ = get_clock()->now();
                 ++driver_cmd_message_count_;
             });
         navigate_status_sub_ =
             create_subscription<action_msgs::msg::GoalStatusArray>(
                 params.navigate_status_topic, 10,
-                [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
-                    detectStatusChanges(*msg);
-                    latest_status_ = *msg;
+                [this](const action_msgs::msg::GoalStatusArray& msg) {
+                    detectStatusChanges(msg);
+                    latest_status_ = msg;
                     status_time_ = get_clock()->now();
                     ++status_message_count_;
                 });
@@ -401,9 +401,18 @@ private:
 }  // namespace yahboom_alc_bringup
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(
-        std::make_shared<yahboom_alc_bringup::PlannerRuntimeLoggerNode>());
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        rclcpp::spin(
+            std::make_shared<yahboom_alc_bringup::PlannerRuntimeLoggerNode>());
+        rclcpp::shutdown();
+        return 0;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "planner_runtime_logger failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <exception>
+#include <iostream>
 #include <string>
 #include <thread>
 
@@ -168,13 +170,23 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    // Install after rclcpp::init() so our handler overwrites rclcpp's.
-    // This keeps rclcpp::ok() true during the stop burst so spin_some() works.
-    std::signal(SIGINT, handleSignal);
-    std::signal(SIGTERM, handleSignal);
-    auto node = std::make_shared<R2SafeDriverSupervisor>();
-    const int status = node->run();
-    rclcpp::shutdown();
-    return status;
+    try {
+        rclcpp::init(argc, argv);
+        // Install after rclcpp::init() so our handler overwrites rclcpp's.
+        // This keeps rclcpp::ok() true during the stop burst so spin_some()
+        // works.
+        std::signal(SIGINT, handleSignal);
+        std::signal(SIGTERM, handleSignal);
+        auto node = std::make_shared<R2SafeDriverSupervisor>();
+        const int status = node->run();
+        rclcpp::shutdown();
+        return status;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "r2_safe_driver failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

@@ -33,6 +33,7 @@ def generate_launch_description():
         "bt_navigator",
         "waypoint_follower",
         "velocity_smoother",
+        "collision_monitor",
     ]
 
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
@@ -44,6 +45,7 @@ def generate_launch_description():
                 "use_sim_time": use_sim_time,
                 "autostart": autostart,
                 "default_bt_xml_filename": bt_xml_filename,
+                "cmd_vel_out_topic": nav_cmd_vel_topic,
             },
             convert_types=True,
         ),
@@ -56,7 +58,7 @@ def generate_launch_description():
     behavior_remaps = remappings + [("cmd_vel", nav_cmd_vel_topic)]
     velocity_smoother_remaps = remappings + [
         ("cmd_vel", "cmd_vel_nav"),
-        ("cmd_vel_smoothed", nav_cmd_vel_topic),
+        ("cmd_vel_smoothed", "cmd_vel_smoothed_raw"),
     ]
 
     load_nodes = GroupAction(
@@ -139,6 +141,17 @@ def generate_launch_description():
                 remappings=velocity_smoother_remaps,
             ),
             Node(
+                package="nav2_collision_monitor",
+                executable="collision_monitor",
+                name="collision_monitor",
+                output="screen",
+                respawn=use_respawn,
+                respawn_delay=2.0,
+                parameters=[configured_params],
+                arguments=common_node_args,
+                remappings=remappings,
+            ),
+            Node(
                 package="nav2_lifecycle_manager",
                 executable="lifecycle_manager",
                 name="lifecycle_manager_navigation",
@@ -205,6 +218,13 @@ def generate_launch_description():
                 name="velocity_smoother",
                 parameters=[configured_params],
                 remappings=velocity_smoother_remaps,
+            ),
+            ComposableNode(
+                package="nav2_collision_monitor",
+                plugin="nav2_collision_monitor::CollisionMonitor",
+                name="collision_monitor",
+                parameters=[configured_params],
+                remappings=remappings,
             ),
             ComposableNode(
                 package="nav2_lifecycle_manager",
