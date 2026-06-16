@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <optional>
+#include <stdexcept>
+
 #include "yahboom_alc_bringup/backtrace_recovery.hpp"
 
 namespace yahboom_alc_bringup
@@ -16,6 +19,15 @@ BacktraceRecoveryConfig testConfig() {
     config.max_segments = 4;
     config.min_actual_displacement_m = 0.03;
     return config;
+}
+
+template <typename T>
+const T& requireValue(const std::optional<T>& value) {
+    if (!value) {
+        ADD_FAILURE() << "expected optional value";
+        throw std::logic_error("expected optional value");
+    }
+    return value.value();
 }
 
 TEST(BacktraceRecovery, BreadcrumbTrailKeepsRecentDistanceWindow) {
@@ -58,7 +70,7 @@ TEST(BacktraceRecovery, LimitsSegmentsAndDetectsInsufficientMotion) {
 
     const auto distance = planner.nextBackupDistance(trail, {0.2, 0.0});
     ASSERT_TRUE(distance);
-    EXPECT_TRUE(planner.noteSegmentStarted({0.2, 0.0}, *distance));
+    EXPECT_TRUE(planner.noteSegmentStarted({0.2, 0.0}, requireValue(distance)));
     EXPECT_FALSE(planner.noteSegmentFinished({0.18, 0.0}));
 
     planner.reset();

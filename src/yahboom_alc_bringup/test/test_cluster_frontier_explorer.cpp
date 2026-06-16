@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <stdexcept>
 
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 
@@ -9,21 +12,25 @@ namespace yahboom_alc_bringup
 namespace
 {
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 nav_msgs::msg::OccupancyGrid buildGrid(const int width, const int height,
-                                       const double resolution = 0.1,
-                                       const int default_value = 0) {
+                                       const float resolution = 0.1F,
+                                       const std::int8_t default_value = 0) {
     nav_msgs::msg::OccupancyGrid grid;
-    grid.info.width = width;
-    grid.info.height = height;
+    grid.info.width = static_cast<unsigned int>(width);
+    grid.info.height = static_cast<unsigned int>(height);
     grid.info.resolution = resolution;
     grid.info.origin.orientation.w = 1.0;
-    grid.data.assign(width * height, default_value);
+    grid.data.assign(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
+        default_value);
     return grid;
 }
 
 void setCell(nav_msgs::msg::OccupancyGrid& grid, const int x, const int y,
-             const int value) {
-    grid.data[y * grid.info.width + x] = value;
+             const std::int8_t value) {
+    grid.data[static_cast<std::size_t>(y) * grid.info.width +
+              static_cast<std::size_t>(x)] = value;
 }
 
 FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
@@ -74,17 +81,33 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     return core;
 }
 
-FrontierCandidate makeCandidateAt(FrontierExplorerCore& core, const int x,
-                                  const int y, const double score) {
+struct CandidateSpec
+{
+    int x;
+    int y;
+    double score;
+};
+
+FrontierCandidate makeCandidateAt(FrontierExplorerCore& core,
+                                  const CandidateSpec& spec) {
     FrontierCandidate candidate;
-    candidate.goal_cell = {x, y};
-    candidate.goal_xy = core.mapToWorld(x, y);
+    candidate.goal_cell = {spec.x, spec.y};
+    candidate.goal_xy = core.mapToWorld(spec.x, spec.y);
     candidate.goal_yaw = 0.0;
-    candidate.path = {{2, 5}, {x, y}};
+    candidate.path = {{2, 5}, {spec.x, spec.y}};
     candidate.path_length = core.pathLength(candidate.path);
     candidate.reachable = true;
-    candidate.score = score;
+    candidate.score = spec.score;
     return candidate;
+}
+
+template <typename T>
+const T& requireValue(const std::optional<T>& value) {
+    if (!value) {
+        ADD_FAILURE() << "expected optional value";
+        throw std::logic_error("expected optional value");
+    }
+    return value.value();
 }
 
 TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
@@ -99,6 +122,7 @@ TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
 
     const std::vector<Cell> small_corner{{6, 5}, {6, 6}};
     std::vector<Cell> large_corridor;
+    large_corridor.reserve(12);
     for (int i = 0; i < 12; ++i) {
         large_corridor.emplace_back(8 + i, 5);
     }
@@ -113,7 +137,9 @@ TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
 
     ASSERT_TRUE(small);
     ASSERT_TRUE(large);
-    EXPECT_LT(large->score, small->score);
+    const auto& small_candidate = requireValue(small);
+    const auto& large_candidate = requireValue(large);
+    EXPECT_LT(large_candidate.score, small_candidate.score);
 }
 
 TEST(ClusterFrontierExplorer, OccupiedFootprintOverlapRejectsCandidate) {
@@ -145,8 +171,10 @@ TEST(ClusterFrontierExplorer, LimitedUnknownOverlapPenalizesScore) {
 
     ASSERT_TRUE(free_candidate);
     ASSERT_TRUE(unknown_candidate);
-    EXPECT_GT(unknown_candidate->unknown_overlap_ratio, 0.0);
-    EXPECT_GT(unknown_candidate->score, free_candidate->score);
+    const auto& free = requireValue(free_candidate);
+    const auto& unknown = requireValue(unknown_candidate);
+    EXPECT_GT(unknown.unknown_overlap_ratio, 0.0);
+    EXPECT_GT(unknown.score, free.score);
 }
 
 TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapRejectsCandidate) {
@@ -167,7 +195,7 @@ TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapRejectsCandidate) {
 
     const auto ratio = core.sweptPathUnknownRatio({{5, 12}, {12, 12}});
     ASSERT_TRUE(ratio);
-    EXPECT_GT(*ratio, 0.0);
+    EXPECT_GT(requireValue(ratio), 0.0);
 
     FrontierCounts counts3;
     const auto candidate = core.makeCandidate(
@@ -299,8 +327,10 @@ TEST(ClusterFrontierExplorer, HeadingPenaltyPrefersForwardCandidate) {
 
     ASSERT_TRUE(forward);
     ASSERT_TRUE(behind);
-    EXPECT_LT(forward->heading_delta, behind->heading_delta);
-    EXPECT_LT(forward->score, behind->score);
+    const auto& forward_candidate = requireValue(forward);
+    const auto& behind_candidate = requireValue(behind);
+    EXPECT_LT(forward_candidate.heading_delta, behind_candidate.heading_delta);
+    EXPECT_LT(forward_candidate.score, behind_candidate.score);
 }
 
 TEST(ClusterFrontierExplorer, CandidateRejectionCountsIncludeFilters) {
@@ -433,11 +463,13 @@ TEST(ClusterFrontierExplorer, ProjectsPointOntoBfsPolylineInWorldMeters) {
         core.projectOntoPath(core.mapToWorld(10, 8), path);
 
     ASSERT_TRUE(near_first_segment);
-    EXPECT_NEAR(near_first_segment->distance, 0.2, 1e-6);
-    EXPECT_NEAR(near_first_segment->arc_length, 0.3, 1e-6);
+    const auto& first_projection = requireValue(near_first_segment);
+    EXPECT_NEAR(first_projection.distance, 0.2, 1e-6);
+    EXPECT_NEAR(first_projection.arc_length, 0.3, 1e-6);
     ASSERT_TRUE(near_second_segment);
-    EXPECT_NEAR(near_second_segment->distance, 0.2, 1e-6);
-    EXPECT_NEAR(near_second_segment->arc_length, 0.9, 1e-6);
+    const auto& second_projection = requireValue(near_second_segment);
+    EXPECT_NEAR(second_projection.distance, 0.2, 1e-6);
+    EXPECT_NEAR(second_projection.arc_length, 0.9, 1e-6);
 }
 
 TEST(ClusterFrontierExplorer, BuildsSubgoalsNearBfsPathOnly) {
@@ -448,10 +480,10 @@ TEST(ClusterFrontierExplorer, BuildsSubgoalsNearBfsPathOnly) {
     config.min_subgoal_spacing_m = 0.3;
     core.setConfig(config);
 
-    auto final_goal = makeCandidateAt(core, 18, 5, 1.0);
+    auto final_goal = makeCandidateAt(core, {18, 5, 1.0});
     final_goal.path = {{2, 5}, {18, 5}};
-    auto near_path = makeCandidateAt(core, 8, 6, 2.0);
-    auto off_path = makeCandidateAt(core, 10, 9, 3.0);
+    auto near_path = makeCandidateAt(core, {8, 6, 2.0});
+    auto off_path = makeCandidateAt(core, {10, 9, 3.0});
     const std::vector<FrontierCandidate> candidates{final_goal, off_path,
                                                     near_path};
 
@@ -469,10 +501,10 @@ TEST(ClusterFrontierExplorer, SortsAcceptedSubgoalsByBfsArcLength) {
     config.min_subgoal_spacing_m = 0.2;
     core.setConfig(config);
 
-    auto final_goal = makeCandidateAt(core, 18, 5, 1.0);
+    auto final_goal = makeCandidateAt(core, {18, 5, 1.0});
     final_goal.path = {{2, 5}, {18, 5}};
-    auto later = makeCandidateAt(core, 14, 5, 2.0);
-    auto earlier = makeCandidateAt(core, 6, 5, 3.0);
+    auto later = makeCandidateAt(core, {14, 5, 2.0});
+    auto earlier = makeCandidateAt(core, {6, 5, 3.0});
 
     const auto subgoals =
         core.buildSubgoalsForRoute(final_goal, {final_goal, later, earlier});
@@ -491,12 +523,12 @@ TEST(ClusterFrontierExplorer, EnforcesSubgoalSpacingAndLimit) {
     config.min_subgoal_spacing_m = 0.45;
     core.setConfig(config);
 
-    auto final_goal = makeCandidateAt(core, 24, 5, 1.0);
+    auto final_goal = makeCandidateAt(core, {24, 5, 1.0});
     final_goal.path = {{2, 5}, {24, 5}};
-    auto first = makeCandidateAt(core, 6, 5, 2.0);
-    auto duplicate = makeCandidateAt(core, 8, 5, 3.0);
-    auto second = makeCandidateAt(core, 13, 5, 4.0);
-    auto over_limit = makeCandidateAt(core, 19, 5, 5.0);
+    auto first = makeCandidateAt(core, {6, 5, 2.0});
+    auto duplicate = makeCandidateAt(core, {8, 5, 3.0});
+    auto second = makeCandidateAt(core, {13, 5, 4.0});
+    auto over_limit = makeCandidateAt(core, {19, 5, 5.0});
 
     const auto subgoals = core.buildSubgoalsForRoute(
         final_goal, {final_goal, first, duplicate, second, over_limit});
@@ -517,8 +549,14 @@ TEST(ClusterFrontierExplorer, ProgressRequiresBfsArcAdvance) {
     ASSERT_TRUE(start);
     ASSERT_TRUE(forward);
     ASSERT_TRUE(lateral);
-    EXPECT_GE(forward->arc_length - start->arc_length, 0.12);
-    EXPECT_LT(std::abs(lateral->arc_length - start->arc_length), 1e-6);
+    const auto& start_projection = requireValue(start);
+    const auto& forward_projection = requireValue(forward);
+    const auto& lateral_projection = requireValue(lateral);
+    EXPECT_GE(forward_projection.arc_length - start_projection.arc_length,
+              0.12);
+    EXPECT_LT(
+        std::abs(lateral_projection.arc_length - start_projection.arc_length),
+        1e-6);
 }
 
 nav_msgs::msg::OccupancyGrid buildHalfUnknownGrid() {
@@ -611,8 +649,8 @@ TEST(ClusterFrontierExplorer, PathTargetYawUsesNearestPathSegment) {
 
     ASSERT_TRUE(first_segment);
     ASSERT_TRUE(second_segment);
-    EXPECT_NEAR(*first_segment, 0.0, 1e-6);
-    EXPECT_NEAR(*second_segment, M_PI_2, 1e-6);
+    EXPECT_NEAR(requireValue(first_segment), 0.0, 1e-6);
+    EXPECT_NEAR(requireValue(second_segment), M_PI_2, 1e-6);
 }
 
 TEST(ClusterFrontierExplorer, AlignmentGraceFallsBackToActiveGoalYaw) {

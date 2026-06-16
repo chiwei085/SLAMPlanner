@@ -1,12 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
 namespace yahboom_alc_bringup
 {
 
-enum class CoordinationAction
+enum class CoordinationAction : std::uint8_t
 {
     kNone,
     kPause,

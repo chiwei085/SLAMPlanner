@@ -1,8 +1,12 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <chrono>
-#include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <thread>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
@@ -65,14 +69,9 @@ public:
                         "No %s subscriber found, starting %s/%s for stop",
                         cmd_vel_topic_.c_str(), driver_package_.c_str(),
                         driver_executable_.c_str());
-            driver_process_started_ = true;
-            const std::string command = "ros2 run " + driver_package_ + ' ' +
-                                        driver_executable_ +
-                                        " >/tmp/r2_emergency_driver.log 2>&1 &";
-            const int start_status = std::system(command.c_str());
-            if (start_status != 0) {
-                RCLCPP_WARN(get_logger(), "Driver start command returned %d",
-                            start_status);
+            const pid_t start_status = startDriverProcess();
+            if (start_status < 0) {
+                RCLCPP_WARN(get_logger(), "Failed to fork driver process");
             }
             const auto deadline =
                 now() + rclcpp::Duration::from_seconds(driver_wait_sec_);
@@ -100,6 +99,27 @@ private:
         return !get_subscriptions_info_by_topic(cmd_vel_topic_).empty();
     }
 
+    pid_t startDriverProcess() {
+        // Double-fork: the intermediate child exits immediately so the parent
+        // can waitpid() on it without blocking.  The grandchild is adopted by
+        // PID 1 and never becomes a zombie.
+        const pid_t mid = fork();
+        if (mid < 0) {
+            return mid;
+        }
+        if (mid == 0) {
+            if (fork() == 0) {
+                setsid();
+                execlp("ros2", "ros2", "run", driver_package_.c_str(),
+                       driver_executable_.c_str(), static_cast<char*>(nullptr));
+            }
+            _exit(0);
+        }
+        waitpid(mid, nullptr, 0);
+        driver_process_started_ = true;
+        return mid;
+    }
+
     std::string cmd_vel_topic_;
     std::string driver_package_;
     std::string driver_executable_;
@@ -111,9 +131,18 @@ private:
 };
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<R2EmergencyStopNode>();
-    node->run();
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        auto node = std::make_shared<R2EmergencyStopNode>();
+        node->run();
+        rclcpp::shutdown();
+        return 0;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "r2_emergency_stop failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

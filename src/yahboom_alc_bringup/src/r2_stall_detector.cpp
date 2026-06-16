@@ -11,6 +11,8 @@
 #include <tf2_ros/transform_listener.h>
 
 #include <chrono>
+#include <exception>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -35,20 +37,20 @@ public:
         cmd_qos.best_effort();
         nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             config_.nav_cmd_topic, cmd_qos,
-            [this](const geometry_msgs::msg::Twist::ConstSharedPtr msg) {
-                latest_cmd_ = *msg;
+            [this](const geometry_msgs::msg::Twist& msg) {
+                latest_cmd_ = msg;
                 latest_cmd_time_ = get_clock()->now();
             });
         wheel_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
             config_.wheel_odom_topic, rclcpp::SystemDefaultsQoS(),
-            [this](const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
-                latest_odom_ = *msg;
+            [this](const nav_msgs::msg::Odometry& msg) {
+                latest_odom_ = msg;
                 latest_odom_time_ = get_clock()->now();
             });
         imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
             config_.imu_topic, rclcpp::SensorDataQoS(),
-            [this](const sensor_msgs::msg::Imu::ConstSharedPtr msg) {
-                latest_imu_ = *msg;
+            [this](const sensor_msgs::msg::Imu& msg) {
+                latest_imu_ = msg;
                 latest_imu_time_ = get_clock()->now();
             });
         stop_pub_ = create_publisher<geometry_msgs::msg::Twist>(
@@ -91,13 +93,19 @@ private:
     }
 
     std::optional<StallDetectorObservation> makeObservation() {
-        if (!latest_cmd_ || !latest_odom_ || !latest_imu_) {
+        if (!latest_cmd_ || !latest_odom_ || !latest_imu_ ||
+            !latest_cmd_time_ || !latest_odom_time_ || !latest_imu_time_) {
             return std::nullopt;
         }
+        const auto& latest_cmd = latest_cmd_.value();
+        const auto& latest_odom = latest_odom_.value();
+        const auto& latest_imu = latest_imu_.value();
+        const auto& latest_cmd_time = latest_cmd_time_.value();
+        const auto& latest_odom_time = latest_odom_time_.value();
+        const auto& latest_imu_time = latest_imu_time_.value();
         const auto now = get_clock()->now();
-        if (isStale(*latest_cmd_time_, now) ||
-            isStale(*latest_odom_time_, now) ||
-            isStale(*latest_imu_time_, now)) {
+        if (isStale(latest_cmd_time, now) || isStale(latest_odom_time, now) ||
+            isStale(latest_imu_time, now)) {
             core_.reset();
             return std::nullopt;
         }
@@ -109,13 +117,13 @@ private:
 
         StallDetectorObservation observation;
         observation.time_sec = now.seconds();
-        observation.cmd_vx = latest_cmd_->linear.x;
-        observation.wheel_odom_x = latest_odom_->pose.pose.position.x;
-        observation.wheel_odom_y = latest_odom_->pose.pose.position.y;
+        observation.cmd_vx = latest_cmd.linear.x;
+        observation.wheel_odom_x = latest_odom.pose.pose.position.x;
+        observation.wheel_odom_y = latest_odom.pose.pose.position.y;
         observation.slam_x = slam_pose->first;
         observation.slam_y = slam_pose->second;
-        observation.imu_linear_accel_x = latest_imu_->linear_acceleration.x;
-        observation.imu_yaw_rate = latest_imu_->angular_velocity.z;
+        observation.imu_linear_accel_x = latest_imu.linear_acceleration.x;
+        observation.imu_yaw_rate = latest_imu.angular_velocity.z;
         return observation;
     }
 
@@ -144,7 +152,11 @@ private:
     }
 
     void publishPendingStop() {
-        if (!stop_until_ || get_clock()->now() > *stop_until_) {
+        const auto stop_until = stop_until_;
+        if (!stop_until) {
+            return;
+        }
+        if (get_clock()->now() > *stop_until) {
             stop_until_.reset();
             return;
         }
@@ -189,8 +201,18 @@ private:
 }  // namespace yahboom_alc_bringup
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<yahboom_alc_bringup::R2StallDetectorNode>());
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        rclcpp::spin(
+            std::make_shared<yahboom_alc_bringup::R2StallDetectorNode>());
+        rclcpp::shutdown();
+        return 0;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "r2_stall_detector failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

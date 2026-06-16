@@ -14,10 +14,6 @@ using WorldPoint = std::pair<double, double>;
 
 struct FrontierConfig
 {
-    int min_frontier_size = 8;
-    int occupied_threshold = 50;
-    int min_clearance_cells = 2;
-    int path_clearance_cells = 2;
     double min_frontier_distance = 0.45;
     double max_frontier_distance = 2.5;
     double frontier_goal_search_radius = 0.6;
@@ -27,7 +23,6 @@ struct FrontierConfig
     double information_weight = 0.02;
     double frontier_size_weight = 0.02;
     double unreachable_goal_penalty = 3.0;
-    bool allow_unreachable_goal = false;
     double goal_update_distance = 0.5;
     double goal_publish_period = 3.0;
     double footprint_front_m = 0.19;
@@ -46,25 +41,30 @@ struct FrontierConfig
     double stuck_progress_radius_m = 0.12;
     double stuck_progress_timeout_sec = 12.0;
     double near_goal_hysteresis_radius_m = 0.35;
-    int near_goal_retry_limit = 0;
     double near_goal_hysteresis_sec = 0.0;
-    bool alignment_grace_enabled = true;
     double alignment_heading_threshold_rad = 0.35;
     double alignment_max_grace_sec = 12.0;
     double alignment_min_rotation_delta_rad = 0.05;
     double failed_goal_blacklist_radius_m = 0.45;
     double failed_goal_blacklist_sec = 60.0;
-    int failed_goal_max_retries = 1;
-    bool enable_subgoals = true;
-    int max_subgoals = 3;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
     double no_frontier_relax_sec = 0.0;
-    int relaxed_min_frontier_size = 8;
     double relaxed_max_frontier_distance = 0.0;
-    bool alignment_spin_enabled = false;
-    int alignment_spin_max_attempts = 1;
     double alignment_spin_time_allowance_sec = 15.0;
+    int min_frontier_size = 8;
+    int occupied_threshold = 50;
+    int min_clearance_cells = 2;
+    int path_clearance_cells = 2;
+    int near_goal_retry_limit = 0;
+    int failed_goal_max_retries = 1;
+    int max_subgoals = 3;
+    int relaxed_min_frontier_size = 8;
+    int alignment_spin_max_attempts = 1;
+    bool allow_unreachable_goal = false;
+    bool alignment_grace_enabled = true;
+    bool enable_subgoals = true;
+    bool alignment_spin_enabled = false;
 };
 
 struct FrontierCounts

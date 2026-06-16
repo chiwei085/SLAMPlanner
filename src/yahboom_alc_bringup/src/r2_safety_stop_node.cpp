@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <exception>
+#include <iostream>
 #include <memory>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
@@ -107,14 +109,23 @@ void handleSignal(int) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<R2SafetyStopNode>();
-    g_node = node;
-    std::signal(SIGINT, handleSignal);
-    std::signal(SIGTERM, handleSignal);
-    rclcpp::spin(node);
-    node->requestStop();
-    node->publishStopBurst();
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        auto node = std::make_shared<R2SafetyStopNode>();
+        g_node = node;
+        std::signal(SIGINT, handleSignal);
+        std::signal(SIGTERM, handleSignal);
+        rclcpp::spin(node);
+        node->requestStop();
+        node->publishStopBurst();
+        rclcpp::shutdown();
+        return 0;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "r2_safety_stop failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

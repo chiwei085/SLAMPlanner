@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -248,12 +250,8 @@ geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     return q;
 }
 
-double rounded(const double value, const int precision = 3) {
-    if (precision == 3) {
-        return std::round(value * 1000.0) / 1000.0;
-    }
-    const double scale = std::pow(10.0, precision);
-    return std::round(value * scale) / scale;
+double rounded(const double value) {
+    return std::round(value * 1000.0) / 1000.0;
 }
 
 nlohmann::json pointJson(const WorldPoint& point) {
@@ -295,9 +293,7 @@ public:
         map_qos.reliable().transient_local();
         map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             map_topic_, map_qos,
-            [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-                onMap(*msg);
-            });
+            [this](const nav_msgs::msg::OccupancyGrid& msg) { onMap(msg); });
 
         rclcpp::QoS marker_qos{rclcpp::KeepLast(1)};
         marker_qos.reliable().transient_local();
@@ -309,9 +305,7 @@ public:
             create_publisher<std_msgs::msg::String>(planner_event_topic_, 10);
         event_sub_ = create_subscription<std_msgs::msg::String>(
             planner_event_topic_, 10,
-            [this](const std_msgs::msg::String::SharedPtr msg) {
-                onPlannerEvent(*msg);
-            });
+            [this](const std_msgs::msg::String& msg) { onPlannerEvent(msg); });
         timer_ =
             create_wall_timer(std::chrono::duration<double>(cycle_period_sec_),
                               [this]() { onTimer(); });
@@ -490,8 +484,15 @@ private:
             validation_final_candidate_ = candidate;
             validation_route_ = buildRoute(candidate, pending_candidates_);
             if (!nav2_validation_enabled_) {
-                startRoute(pending_robot_pose_->xy,
-                           *validation_final_candidate_, validation_route_);
+                const auto pending_robot_pose = pending_robot_pose_;
+                const auto validation_final_candidate =
+                    validation_final_candidate_;
+                if (!pending_robot_pose || !validation_final_candidate) {
+                    clearPendingRouteSelection();
+                    return;
+                }
+                startRoute(pending_robot_pose->xy, *validation_final_candidate,
+                           validation_route_);
                 return;
             }
             validation_active_ = true;
@@ -1631,9 +1632,18 @@ private:
 }  // namespace yahboom_alc_bringup
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(
-        std::make_shared<yahboom_alc_bringup::ClusterFrontierExplorerNode>());
-    rclcpp::shutdown();
-    return 0;
+    try {
+        rclcpp::init(argc, argv);
+        rclcpp::spin(std::make_shared<
+                     yahboom_alc_bringup::ClusterFrontierExplorerNode>());
+        rclcpp::shutdown();
+        return 0;
+    }
+    catch (const std::exception& exc) {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+        std::cerr << "cluster_frontier_explorer failed: " << exc.what() << '\n';
+        return 1;
+    }
 }

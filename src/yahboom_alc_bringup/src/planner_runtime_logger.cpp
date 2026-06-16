@@ -47,9 +47,10 @@ nlohmann::json twistSummaryJson(const std::optional<TwistSummary>& twist) {
 }
 
 nlohmann::json twistSummaryJson(const TwistSummary& twist) {
-    return nlohmann::json{{"linear_x", rounded(twist.linear_x, 4)},
-                          {"linear_y", rounded(twist.linear_y, 4)},
-                          {"angular_z", rounded(twist.angular_z, 4)}};
+    return nlohmann::json{
+        {"linear_x", rounded(twist.linear_x, DecimalPlaces{4})},
+        {"linear_y", rounded(twist.linear_y, DecimalPlaces{4})},
+        {"angular_z", rounded(twist.angular_z, DecimalPlaces{4})}};
 }
 
 nlohmann::json sourceHealthJson(const SourceHealth& health) {
