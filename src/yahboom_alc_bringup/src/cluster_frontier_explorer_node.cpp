@@ -25,6 +25,7 @@
 
 #include "yahboom_alc_bringup/backtrace_recovery.hpp"
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
+#include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
@@ -42,7 +43,7 @@ struct ClusterExplorerNodeParams
     std::string planner_event_topic = "/planner/events";
     std::string marker_topic = "/frontier_markers";
     std::string goal_marker_topic = "/frontier_goal_marker";
-    double nav2_success_xy_tolerance_m = 0.40;
+    double nav2_success_xy_tolerance_m = 0.55;
 };
 
 struct Nav2ValidationParams
@@ -51,6 +52,8 @@ struct Nav2ValidationParams
     double nav2_validation_timeout_sec = 2.0;
     std::string nav2_compute_path_action = "/compute_path_to_pose";
     bool nav2_validation_blacklist_enabled = true;
+    int nav2_validation_rejected_retry_max = 10;
+    double nav2_validation_rejected_retry_delay_sec = 3.0;
 };
 
 struct RobotPose
@@ -130,7 +133,12 @@ struct descriptor<yahboom_alc_bringup::Nav2ValidationParams>
             named(&Nav2ValidationParams::nav2_compute_path_action,
                   "nav2_compute_path_action"),
             named(&Nav2ValidationParams::nav2_validation_blacklist_enabled,
-                  "nav2_validation_blacklist_enabled"));
+                  "nav2_validation_blacklist_enabled"),
+            named(&Nav2ValidationParams::nav2_validation_rejected_retry_max,
+                  "nav2_validation_rejected_retry_max"),
+            named(
+                &Nav2ValidationParams::nav2_validation_rejected_retry_delay_sec,
+                "nav2_validation_rejected_retry_delay_sec"));
     }
 };
 
@@ -176,6 +184,8 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::unknown_overlap_weight,
                   "unknown_overlap_weight"),
             named(&FrontierConfig::wall_clearance_m, "wall_clearance_m"),
+            named(&FrontierConfig::min_wall_clearance_m,
+                  "min_wall_clearance_m"),
             named(&FrontierConfig::corner_penalty_weight,
                   "corner_penalty_weight"),
             named(&FrontierConfig::corridor_progress_weight,
@@ -242,16 +252,22 @@ namespace
 // to cover action transport before declaring a spin lost.
 constexpr double kSpinTransportMarginSec = 5.0;
 constexpr int kReverseBlockedBacktraceThreshold = 3;
+constexpr int kForwardEscapeThreshold = 5;
+constexpr double kForwardEscapeDistanceM = 1.5;
+constexpr double kImmediateReverseBlockWindowSec = 3.0;
+// After this many consecutive backup_stalled failures, the rear is blocked;
+// skip backtrace and directly abandon to avoid spinning wheels in place.
+constexpr int kBacktraceStallSkipThreshold = 3;
+// If nav2 declares SUCCEEDED in under this many seconds the robot was already
+// at the goal and didn't actually navigate anywhere.  Blacklist the goal to
+// break the "frontier never clears" cycling loop.
+constexpr double kTrivialSuccessThresholdSec = 2.0;
 
 geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     geometry_msgs::msg::Quaternion q;
     q.z = std::sin(yaw * 0.5);
     q.w = std::cos(yaw * 0.5);
     return q;
-}
-
-double rounded(const double value) {
-    return std::round(value * 1000.0) / 1000.0;
 }
 
 nlohmann::json pointJson(const WorldPoint& point) {
@@ -336,6 +352,10 @@ private:
         nav2_compute_path_action_ = nav2_params.nav2_compute_path_action;
         nav2_validation_blacklist_enabled_ =
             nav2_params.nav2_validation_blacklist_enabled;
+        nav2_validation_rejected_retry_max_ =
+            nav2_params.nav2_validation_rejected_retry_max;
+        nav2_validation_rejected_retry_delay_sec_ =
+            nav2_params.nav2_validation_rejected_retry_delay_sec;
         compute_path_client_ = rclcpp_action::create_client<ComputePathToPose>(
             this, nav2_compute_path_action_);
 
@@ -382,6 +402,16 @@ private:
             logWaiting("Waiting for /navigate_to_pose action server");
             return;
         }
+        if (consecutive_immediate_reverse_streak_ >= kForwardEscapeThreshold) {
+            const auto escape_pose = lookupRobotPose();
+            if (escape_pose) {
+                triggerForwardEscape(*escape_pose);
+            }
+            else {
+                consecutive_immediate_reverse_streak_ = 0;
+            }
+            return;
+        }
         const auto robot_pose = lookupRobotPose();
         if (!robot_pose) {
             return;
@@ -414,7 +444,9 @@ private:
                 std::to_string(result.counts.rejected_footprint) +
                 ", rej_swept=" + std::to_string(result.counts.rejected_swept) +
                 ", rej_unknown=" +
-                std::to_string(result.counts.rejected_unknown_ratio) + ")");
+                std::to_string(result.counts.rejected_unknown_ratio) +
+                ", rej_clearance=" +
+                std::to_string(result.counts.rejected_clearance) + ")");
             return;
         }
         if (result.relaxed) {
@@ -468,6 +500,8 @@ private:
             clearPendingRouteSelection();
             return;
         }
+        validation_rejection_retry_timer_.reset();
+        validation_rejection_count_ = 0;
         validation_active_ = false;
         validation_route_.clear();
         validation_final_candidate_.reset();
@@ -483,6 +517,7 @@ private:
             publishCandidateEvent("best_candidate", candidate);
             validation_final_candidate_ = candidate;
             validation_route_ = buildRoute(candidate, pending_candidates_);
+            publishGoalMarker(candidate.goal_xy, candidate.goal_yaw);
             if (!nav2_validation_enabled_) {
                 const auto pending_robot_pose = pending_robot_pose_;
                 const auto validation_final_candidate =
@@ -504,6 +539,7 @@ private:
         publishPlannerEvent("nav2_validation_failed",
                             {{"reason", "all_candidate_routes_failed"},
                              {"candidates_tried", pending_candidates_.size()}});
+        clearGoalMarker();
         pending_candidates_.clear();
         pending_robot_pose_.reset();
     }
@@ -571,6 +607,27 @@ private:
             return;
         }
         if (!handle) {
+            ++validation_rejection_count_;
+            if (nav2_validation_rejected_retry_max_ > 0 &&
+                validation_rejection_count_ <=
+                    nav2_validation_rejected_retry_max_) {
+                publishPlannerEvent("nav2_validation_failed",
+                                    {{"reason", "goal_rejected_retrying"},
+                                     {"retry", validation_rejection_count_},
+                                     {"goal_xy", validationGoalJson()}});
+                const auto delay_ms = static_cast<int>(
+                    nav2_validation_rejected_retry_delay_sec_ * 1000.0);
+                validation_segment_started_sec_ = nowSec();
+                validation_rejection_retry_timer_ = create_wall_timer(
+                    std::chrono::milliseconds(delay_ms), [this, generation]() {
+                        validation_rejection_retry_timer_.reset();
+                        if (validation_active_ &&
+                            generation == validation_generation_) {
+                            validateRouteSegment(generation);
+                        }
+                    });
+                return;
+            }
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "goal_rejected"},
                                  {"goal_xy", validationGoalJson()}});
@@ -612,6 +669,9 @@ private:
 
     void checkValidationTimeout() {
         if (!validation_active_ || nav2_validation_timeout_sec_ <= 0.0) {
+            return;
+        }
+        if (validation_rejection_retry_timer_) {
             return;
         }
         if (nowSec() - validation_segment_started_sec_ <
@@ -797,8 +857,25 @@ private:
             return;
         }
 
+        const double route_duration = nowSec() - active_goal_sent_time_sec_;
+        if (route_duration < kTrivialSuccessThresholdSec) {
+            // Robot was already within nav2's tolerance of the goal — it never
+            // actually moved.  The frontier won't self-clear, so blacklist it
+            // rather than marking it completed, otherwise the same cell gets
+            // selected every goal_publish_period seconds indefinitely.
+            publishPlannerEvent("route_trivial_success",
+                                {{"goal_xy", activeFinalGoalJson()},
+                                 {"duration_sec", rounded(route_duration)}});
+            blacklistActiveGoal();
+            consecutive_immediate_reverse_streak_ = 0;
+            consecutive_backtrace_stall_count_ = 0;
+            clearActiveGoal();
+            return;
+        }
         publishPlannerEvent("route_completed",
                             {{"goal_xy", activeFinalGoalJson()}});
+        consecutive_immediate_reverse_streak_ = 0;
+        consecutive_backtrace_stall_count_ = 0;
         clearActiveGoal();
     }
 
@@ -1055,6 +1132,19 @@ private:
         if (backtrace_recovery_active_) {
             return;
         }
+        // Rear persistently blocked: skip futile backup attempts that only
+        // spin wheels in place and pollute odometry / SLAM.
+        if (consecutive_backtrace_stall_count_ >=
+            kBacktraceStallSkipThreshold) {
+            publishPlannerEvent(
+                "backtrace_skipped_stall",
+                {{"stall_count", consecutive_backtrace_stall_count_},
+                 {"reason", reason},
+                 {"goal_xy", activeFinalGoalJson()}});
+            consecutive_backtrace_stall_count_ = 0;
+            abandonActiveGoal(reason);
+            return;
+        }
         if (!backtrace_planner_.canStart(breadcrumb_trail_) ||
             !backup_client_->action_server_is_ready()) {
             abandonActiveGoal(reason);
@@ -1210,6 +1300,16 @@ private:
              {"goal_xy", activeFinalGoalJson()},
              {"active_waypoint_xy", activeGoalJson()}});
         blacklistActiveGoal();
+        if (success) {
+            consecutive_immediate_reverse_streak_ = 0;
+            consecutive_backtrace_stall_count_ = 0;
+        }
+        else if (reason == "backup_stalled") {
+            ++consecutive_backtrace_stall_count_;
+        }
+        else {
+            consecutive_backtrace_stall_count_ = 0;
+        }
         backtrace_recovery_active_ = false;
         backtrace_waiting_for_cancel_ = false;
         backtrace_backup_active_ = false;
@@ -1219,6 +1319,15 @@ private:
     }
 
     void abandonActiveGoal(const std::string& reason) {
+        if (reason == "REVERSE_UNSAFE") {
+            if (nowSec() - active_waypoint_sent_time_sec_ <
+                kImmediateReverseBlockWindowSec) {
+                ++consecutive_immediate_reverse_streak_;
+            }
+        }
+        else {
+            consecutive_immediate_reverse_streak_ = 0;
+        }
         publishPlannerEvent("route_abandoned",
                             {{"reason", reason},
                              {"goal_xy", activeFinalGoalJson()},
@@ -1334,6 +1443,8 @@ private:
              {"failures", record.failures},
              {"blacklisted",
               record.failures >= core_.config().failed_goal_max_retries},
+             {"blacklist_radius_m",
+              rounded(core_.config().failed_goal_blacklist_radius_m)},
              {"expires_at_sec", rounded(record.expires_at_sec)}});
     }
 
@@ -1383,7 +1494,8 @@ private:
                {"rejected_no_path", counts.rejected_no_path},
                {"rejected_footprint", counts.rejected_footprint},
                {"rejected_swept", counts.rejected_swept},
-               {"rejected_unknown_ratio", counts.rejected_unknown_ratio}}}});
+               {"rejected_unknown_ratio", counts.rejected_unknown_ratio},
+               {"rejected_clearance", counts.rejected_clearance}}}});
     }
 
     void publishPlannerEvent(
@@ -1453,6 +1565,41 @@ private:
         }
         markActiveGoalUnsafe("STALL_OR_SLIP");
         abandonActiveGoal("STALL_OR_SLIP");
+    }
+
+    void triggerForwardEscape(const RobotPose& robot_pose) {
+        const auto escape_yaw = core_.findClearestEscapeDirection(
+            robot_pose.xy, kForwardEscapeDistanceM);
+        if (!escape_yaw) {
+            publishPlannerEvent(
+                "escape_fully_blocked",
+                {{"robot_xy", pointJson(robot_pose.xy)},
+                 {"streak", consecutive_immediate_reverse_streak_}});
+            consecutive_immediate_reverse_streak_ = 0;
+            consecutive_backtrace_stall_count_ = 0;
+            return;
+        }
+
+        const WorldPoint escape_xy =
+            projectPoint(robot_pose.xy, *escape_yaw, kForwardEscapeDistanceM);
+        publishPlannerEvent(
+            "forward_escape_started",
+            {{"robot_xy", pointJson(robot_pose.xy)},
+             {"escape_xy", pointJson(escape_xy)},
+             {"streak", consecutive_immediate_reverse_streak_}});
+        consecutive_immediate_reverse_streak_ = 0;
+
+        FrontierCandidate escape_cand;
+        escape_cand.goal_xy = escape_xy;
+        escape_cand.goal_yaw = *escape_yaw;
+        escape_cand.reachable = true;
+
+        RouteWaypoint wp;
+        wp.xy = escape_xy;
+        wp.yaw = *escape_yaw;
+        wp.final = true;
+
+        startRoute(robot_pose.xy, escape_cand, {wp});
     }
 
     void markActiveGoalUnsafe(const std::string& reason) {
@@ -1597,16 +1744,22 @@ private:
     double backtrace_segment_start_time_sec_ = 0.0;
     std::string backtrace_reason_;
     int consecutive_reverse_blocked_ = 0;
+    int consecutive_immediate_reverse_streak_ = 0;
+    int consecutive_backtrace_stall_count_ = 0;
     BackUpGoalHandle::SharedPtr backup_goal_handle_;
 
     bool nav2_validation_enabled_ = true;
     bool nav2_validation_blacklist_enabled_ = true;
     double nav2_validation_timeout_sec_ = 2.0;
     std::string nav2_compute_path_action_;
+    int nav2_validation_rejected_retry_max_ = 10;
+    double nav2_validation_rejected_retry_delay_sec_ = 3.0;
     bool validation_active_ = false;
     int validation_generation_ = 0;
     std::size_t validation_segment_index_ = 0;
     double validation_segment_started_sec_ = 0.0;
+    int validation_rejection_count_ = 0;
+    rclcpp::TimerBase::SharedPtr validation_rejection_retry_timer_;
     std::optional<RobotPose> pending_robot_pose_;
     std::vector<FrontierCandidate> pending_candidates_;
     std::size_t pending_candidate_index_ = 0;

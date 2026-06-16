@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
+#include "yahboom_alc_bringup/math_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -69,9 +70,9 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.alignment_heading_threshold_rad = 0.35;
     config.alignment_max_grace_sec = 12.0;
     config.alignment_min_rotation_delta_rad = 0.05;
-    config.failed_goal_blacklist_radius_m = 0.45;
-    config.failed_goal_blacklist_sec = 60.0;
-    config.failed_goal_max_retries = 1;
+    config.failed_goal_blacklist_radius_m = 0.35;
+    config.failed_goal_blacklist_sec = 600.0;
+    config.failed_goal_max_retries = 2;
     config.enable_subgoals = true;
     config.max_subgoals = 3;
     config.subgoal_path_tolerance_m = 0.30;
@@ -264,7 +265,7 @@ TEST(ClusterFrontierExplorer, SweptFootprintRejectsPathThatClipsWall) {
 TEST(ClusterFrontierExplorer, FailedGoalBlacklistPreventsReselection) {
     auto grid = buildGrid(20, 10, 0.1);
     auto core = makeCore(grid);
-    core.goalAttemptsForTest().push_back({core.mapToWorld(8, 5), 1, 60.0});
+    core.goalAttemptsForTest().push_back({core.mapToWorld(8, 5), 2, 600.0});
 
     FrontierCounts counts5;
     const auto candidate = core.makeCandidate(
@@ -278,31 +279,37 @@ TEST(ClusterFrontierExplorer, ExpiredGoalAttemptPrunesFailureCount) {
     auto grid = buildGrid(20, 10, 0.1);
     auto core = makeCore(grid);
     const auto goal_xy = core.mapToWorld(8, 5);
-    core.goalAttemptsForTest().push_back({goal_xy, 3, 10.0});
+    core.goalAttemptsForTest().push_back({goal_xy, 3, 600.0});
 
-    core.pruneBlacklist(11.0);
+    core.pruneBlacklist(599.0);
+
+    ASSERT_EQ(core.goalAttempts().size(), 1u);
+    EXPECT_TRUE(core.isBlacklisted(goal_xy));
+
+    core.pruneBlacklist(601.0);
 
     EXPECT_TRUE(core.goalAttempts().empty());
     EXPECT_FALSE(core.isBlacklisted(goal_xy));
 }
 
-TEST(ClusterFrontierExplorer, NearbyFailedGoalsShareRetryCount) {
+TEST(ClusterFrontierExplorer, NearbyFailedGoalsShareRetryCountInStableZone) {
     auto grid = buildGrid(20, 10, 0.1);
     auto core = makeCore(grid);
-    auto config = core.config();
-    config.failed_goal_max_retries = 2;
-    core.setConfig(config);
 
     core.blacklistGoal(core.mapToWorld(8, 5), 0.0);
     ASSERT_EQ(core.goalAttempts().size(), 1u);
+    const auto original_center = core.goalAttempts()[0].xy;
     EXPECT_EQ(core.goalAttempts()[0].failures, 1);
     EXPECT_FALSE(core.isBlacklisted(core.mapToWorld(8, 5)));
 
-    core.blacklistGoal(core.mapToWorld(9, 5), 0.0);
+    core.blacklistGoal(core.mapToWorld(10, 5), 30.0);
 
     ASSERT_EQ(core.goalAttempts().size(), 1u);
+    EXPECT_EQ(core.goalAttempts()[0].xy, original_center);
     EXPECT_EQ(core.goalAttempts()[0].failures, 2);
-    EXPECT_TRUE(core.isBlacklisted(core.mapToWorld(8, 5)));
+    EXPECT_NEAR(core.goalAttempts()[0].expires_at_sec, 630.0, 1e-6);
+    EXPECT_TRUE(core.isBlacklisted(core.mapToWorld(11, 5)));
+    EXPECT_FALSE(core.isBlacklisted(core.mapToWorld(12, 5)));
 }
 
 TEST(ClusterFrontierExplorer, HeadingPenaltyPrefersForwardCandidate) {
@@ -341,15 +348,15 @@ TEST(ClusterFrontierExplorer, CandidateRejectionCountsIncludeFilters) {
     config.max_frontier_distance = 0.8;
     config.failed_goal_max_retries = 1;
     core.setConfig(config);
-    core.goalAttemptsForTest().push_back({core.mapToWorld(8, 2), 1, 60.0});
+    core.goalAttemptsForTest().push_back({core.mapToWorld(8, 2), 2, 600.0});
 
     const Cell start{10, 10};
     const auto robot_xy = core.mapToWorld(start.first, start.second);
     FrontierCounts counts;
     const std::vector<bool> blocked(grid.data.size(), false);
 
-    EXPECT_FALSE(
-        core.makeCandidate({{8, 2}}, start, robot_xy, blocked, 30, 20, counts));
+    EXPECT_FALSE(core.makeCandidate({{11, 2}}, start, robot_xy, blocked, 30, 20,
+                                    counts));
     EXPECT_FALSE(core.makeCandidate({{11, 10}}, start, robot_xy, blocked, 30,
                                     20, counts));
     EXPECT_FALSE(core.makeCandidate({{25, 10}}, start, robot_xy, blocked, 30,
@@ -627,6 +634,60 @@ TEST(ClusterFrontierExplorer, StrictSuccessResetsRelaxation) {
     const auto strict = core.findCandidates(robot_xy, 100.0, 0.0);
     EXPECT_FALSE(strict.relaxed);
     EXPECT_FALSE(strict.candidates.empty());
+}
+
+TEST(ClusterFrontierExplorer, ClearestEscapeDirectionAvoidsBlockedForwardRay) {
+    auto grid = buildGrid(31, 31, 0.1F, 100);
+    setCell(grid, 15, 15, 0);
+    for (int y = 16; y < 31; ++y) {
+        setCell(grid, 15, y, 0);
+    }
+    auto core = makeCore(grid);
+
+    const auto yaw =
+        core.findClearestEscapeDirection(core.mapToWorld(15, 15), 1.0, 8);
+
+    ASSERT_TRUE(yaw);
+    EXPECT_NEAR(requireValue(yaw), kPi / 2.0, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer,
+     ClearestEscapeDirectionReturnsNulloptWhenBlocked) {
+    auto grid = buildGrid(11, 11, 0.1F, 100);
+    setCell(grid, 5, 5, 0);
+    auto core = makeCore(grid);
+
+    const auto yaw =
+        core.findClearestEscapeDirection(core.mapToWorld(5, 5), 0.5, 8);
+
+    EXPECT_FALSE(yaw);
+}
+
+TEST(ClusterFrontierExplorer, ClearestEscapeDirectionPrefersFreeOverUnknown) {
+    auto grid = buildGrid(21, 21, 0.1F, -1);
+    setCell(grid, 10, 10, 0);
+    for (int x = 0; x < 10; ++x) {
+        setCell(grid, x, 10, 0);
+    }
+    auto core = makeCore(grid);
+
+    const auto yaw =
+        core.findClearestEscapeDirection(core.mapToWorld(10, 10), 0.8, 4);
+
+    ASSERT_TRUE(yaw);
+    EXPECT_NEAR(requireValue(yaw), kPi, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer,
+     ClearestEscapeDirectionUsesDeterministicTieBreak) {
+    auto grid = buildGrid(31, 31, 0.1);
+    auto core = makeCore(grid);
+
+    const auto yaw =
+        core.findClearestEscapeDirection(core.mapToWorld(15, 15), 0.8, 8);
+
+    ASSERT_TRUE(yaw);
+    EXPECT_NEAR(requireValue(yaw), 0.0, 1e-6);
 }
 
 TEST(ClusterFrontierExplorer, HeadingErrorWrapsAcrossPi) {

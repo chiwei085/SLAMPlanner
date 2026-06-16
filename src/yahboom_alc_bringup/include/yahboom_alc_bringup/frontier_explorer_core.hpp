@@ -33,6 +33,7 @@ struct FrontierConfig
     double unknown_overlap_max_ratio = 0.35;
     double unknown_overlap_weight = 4.0;
     double wall_clearance_m = 0.22;
+    double min_wall_clearance_m = 0.0;
     double corner_penalty_weight = 1.0;
     double corridor_progress_weight = 0.4;
     double heading_penalty_weight = 0.0;
@@ -45,8 +46,8 @@ struct FrontierConfig
     double alignment_heading_threshold_rad = 0.35;
     double alignment_max_grace_sec = 12.0;
     double alignment_min_rotation_delta_rad = 0.05;
-    double failed_goal_blacklist_radius_m = 0.45;
-    double failed_goal_blacklist_sec = 60.0;
+    double failed_goal_blacklist_radius_m = 0.35;
+    double failed_goal_blacklist_sec = 600.0;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
     double no_frontier_relax_sec = 0.0;
@@ -57,7 +58,7 @@ struct FrontierConfig
     int min_clearance_cells = 2;
     int path_clearance_cells = 2;
     int near_goal_retry_limit = 0;
-    int failed_goal_max_retries = 1;
+    int failed_goal_max_retries = 2;
     int max_subgoals = 3;
     int relaxed_min_frontier_size = 8;
     int alignment_spin_max_attempts = 1;
@@ -82,6 +83,7 @@ struct FrontierCounts
     int rejected_footprint = 0;
     int rejected_swept = 0;
     int rejected_unknown_ratio = 0;
+    int rejected_clearance = 0;
 };
 
 struct FootprintCheck
@@ -200,6 +202,9 @@ public:
 
     FootprintCheck footprintCheckAtWorld(double wx, double wy, double yaw);
     std::optional<double> sweptPathUnknownRatio(const std::vector<Cell>& path);
+    std::optional<double> findClearestEscapeDirection(const WorldPoint& pos,
+                                                      double max_dist_m,
+                                                      int num_angles = 8) const;
     ObstacleNeighborhood analyzeObstacleNeighborhood(const Cell& cell,
                                                      int width,
                                                      int height) const;

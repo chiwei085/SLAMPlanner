@@ -114,7 +114,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
         "robot_frame": "base_footprint",
         "global_frame": "map",
         "planner_event_topic": "/planner/events",
-        "nav2_success_xy_tolerance_m": 0.40,
+        "nav2_success_xy_tolerance_m": 0.55,
     }
     return [
         Node(
@@ -146,6 +146,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "unknown_overlap_max_ratio": 0.70,
                     "unknown_overlap_weight": 4.0,
                     "wall_clearance_m": 0.28,
+                    "min_wall_clearance_m": 0.0,
                     "corner_penalty_weight": 1.0,
                     "corridor_progress_weight": 0.4,
                     "heading_penalty_weight": 1.2,
@@ -166,8 +167,8 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "no_frontier_relax_sec": 30.0,
                     "relaxed_min_frontier_size": 8,
                     "relaxed_max_frontier_distance": 5.0,
-                    "failed_goal_blacklist_radius_m": 0.45,
-                    "failed_goal_blacklist_sec": 60.0,
+                    "failed_goal_blacklist_radius_m": 0.35,
+                    "failed_goal_blacklist_sec": 600.0,
                     "failed_goal_max_retries": 2,
                     "enable_subgoals": True,
                     "max_subgoals": 3,
@@ -461,7 +462,7 @@ def generate_launch_description():
                 "reverse_check_distance_m": 0.12,
                 "reverse_safety_margin_m": 0.0,
                 "reverse_allowed_cost_max": 98,
-                "reverse_unknown_is_blocked": True,
+                "reverse_unknown_is_blocked": False,
                 **ROBOT_FOOTPRINT_PARAMS,
             }
         ],
@@ -519,7 +520,7 @@ def generate_launch_description():
                             "reverse_allowed_cost_max": 98,
                             "reverse_check_distance_m": 0.12,
                             "reverse_safety_margin_m": 0.0,
-                            "reverse_unknown_is_blocked": True,
+                            "reverse_unknown_is_blocked": False,
                             "min_turning_radius_m": 0.50,
                             "max_curvature": 2.0,
                         },

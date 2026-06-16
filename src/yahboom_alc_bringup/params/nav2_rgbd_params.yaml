@@ -230,7 +230,7 @@ planner_server:
       analytic_expansion_max_cost: 200.0
       analytic_expansion_max_cost_override: false
       minimum_turning_radius: 0.50
-      reverse_penalty: 1.8
+      reverse_penalty: 5.0
       change_penalty: 0.0
       non_straight_penalty: 1.2
       cost_penalty: 2.0
@@ -299,7 +299,7 @@ collision_monitor:
     polygons: ["StopPolygon"]
     StopPolygon:
       type: "polygon"
-      points: "[[0.24, 0.14], [0.24, -0.14], [-0.12, -0.14], [-0.12, 0.14]]"
+      points: [0.24, 0.14, 0.24, -0.14, -0.12, -0.14, -0.12, 0.14]
       action_type: "stop"
       min_points: 4
       visualize: false
