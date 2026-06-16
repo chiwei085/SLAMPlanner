@@ -4,19 +4,15 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nlohmann/json.hpp>
 
-#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 
+#include "yahboom_alc_bringup/math_util.hpp"
+
 namespace yahboom_alc_bringup
 {
-
-inline double rounded(double value, int precision = 3) {
-    const double scale = std::pow(10.0, precision);
-    return std::round(value * scale) / scale;
-}
 
 struct MapCellCounts
 {

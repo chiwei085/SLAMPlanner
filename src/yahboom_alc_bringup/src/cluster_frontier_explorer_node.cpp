@@ -490,8 +490,8 @@ private:
             validation_final_candidate_ = candidate;
             validation_route_ = buildRoute(candidate, pending_candidates_);
             if (!nav2_validation_enabled_) {
-                startRoute(pending_robot_pose_->xy, *validation_final_candidate_,
-                           validation_route_);
+                startRoute(pending_robot_pose_->xy,
+                           *validation_final_candidate_, validation_route_);
                 return;
             }
             validation_active_ = true;

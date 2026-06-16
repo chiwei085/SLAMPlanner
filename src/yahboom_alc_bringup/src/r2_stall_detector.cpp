@@ -15,8 +15,8 @@
 #include <optional>
 #include <utility>
 
+#include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
-#include "yahboom_alc_bringup/planner_runtime_logger.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -95,7 +95,8 @@ private:
             return std::nullopt;
         }
         const auto now = get_clock()->now();
-        if (isStale(*latest_cmd_time_, now) || isStale(*latest_odom_time_, now) ||
+        if (isStale(*latest_cmd_time_, now) ||
+            isStale(*latest_odom_time_, now) ||
             isStale(*latest_imu_time_, now)) {
             core_.reset();
             return std::nullopt;

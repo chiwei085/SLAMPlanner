@@ -15,7 +15,8 @@ std::optional<std::string> parseEventName(const std::string& payload) {
             return parsed[std::string("event")].get<std::string>();
         }
     }
-    catch (const nlohmann::json::parse_error&) {}
+    catch (const nlohmann::json::parse_error&) {
+    }
     return std::nullopt;
 }
 

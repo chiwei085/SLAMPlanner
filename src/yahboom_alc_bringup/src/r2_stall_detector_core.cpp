@@ -70,7 +70,8 @@ StallDetectorDecision StallDetectorCore::update(
     if (decision.slam_delta_m > config_.slam_delta_max_m ||
         decision.imu_motion_consistent) {
         decision.reason = decision.slam_delta_m > config_.slam_delta_max_m
-                              ? "slam_motion_observed" : "imu_motion_observed";
+                              ? "slam_motion_observed"
+                              : "imu_motion_observed";
         window_start_ = observation;
         return decision;
     }
