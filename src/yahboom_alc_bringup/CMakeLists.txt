@@ -21,6 +21,7 @@ find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -32,6 +33,7 @@ add_library(yahboom_alc_bringup_lib
   src/planner_event.cpp
   src/planner_runtime_logger.cpp
   src/r2_cmd_vel_bridge.cpp
+  src/r2_stall_detector_core.cpp
 )
 target_include_directories(yahboom_alc_bringup_lib
   PUBLIC
@@ -42,6 +44,7 @@ ament_target_dependencies(yahboom_alc_bringup_lib
   geometry_msgs
   nav_msgs
   rclcpp
+  sensor_msgs
   std_msgs
   tf2
   tf2_ros
@@ -126,6 +129,22 @@ ament_target_dependencies(yahboom_r2_cmd_vel_bridge
   tf2_ros
 )
 
+add_executable(r2_stall_detector
+  src/r2_stall_detector.cpp
+)
+target_link_libraries(r2_stall_detector
+  yahboom_alc_bringup_lib
+)
+ament_target_dependencies(r2_stall_detector
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  sensor_msgs
+  std_msgs
+  tf2
+  tf2_ros
+)
+
 install(
   TARGETS
     yahboom_alc_bringup_lib
@@ -134,6 +153,7 @@ install(
     r2_emergency_stop
     r2_safe_driver
     r2_safety_stop
+    r2_stall_detector
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -196,6 +216,19 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_planner_runtime_logger
     geometry_msgs
     nav_msgs
+  )
+
+  ament_add_gtest(test_r2_stall_detector
+    test/test_r2_stall_detector.cpp
+  )
+  target_link_libraries(test_r2_stall_detector
+    yahboom_alc_bringup_lib
+  )
+  ament_target_dependencies(test_r2_stall_detector
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    sensor_msgs
   )
 
 endif()

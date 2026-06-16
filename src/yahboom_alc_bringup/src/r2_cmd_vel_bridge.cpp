@@ -175,13 +175,11 @@ bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
     if (reverse_speed >= 0.0) {
         return true;
     }
-    const double check_distance =
-        std::max(config.reverse_check_distance_m,
-                 std::abs(reverse_speed) * config.assumed_command_period +
-                     config.reverse_safety_margin_m);
-    // Backing up keeps the yaw constant, so the area swept by the footprint
-    // is exactly the footprint rectangle with the rear extended by the
-    // check distance.
+    const double check_distance = std::max(
+        0.0, config.reverse_check_distance_m + config.reverse_safety_margin_m);
+    // Backing up keeps the yaw constant, so the checked swept volume is the
+    // footprint rectangle with the rear extended by a short fail-closed backup
+    // horizon.
     return footprintSafetyStatus(costmap, pose, rearExtension(check_distance),
                                  config) == FootprintSafetyStatus::kSafe;
 }
@@ -342,15 +340,15 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
         return output;
     }
     const double check_distance =
-        std::max(config_.reverse_check_distance_m,
-                 std::abs(target.linear.x) * config_.assumed_command_period +
-                     config_.reverse_safety_margin_m);
+        std::max(0.0, config_.reverse_check_distance_m +
+                          config_.reverse_safety_margin_m);
     const auto status = footprintSafetyStatus(
         *costmap, *pose, rearExtension(check_distance), config_);
     if (status != FootprintSafetyStatus::kSafe) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
-        publishPlannerEvent("reverse_blocked", safetyReason(status, "rear_blocked"));
+        publishPlannerEvent("reverse_blocked",
+                            safetyReason(status, "rear_blocked"));
         RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
             "reverse_blocked_unsafe_space: rear footprint is not fully free");

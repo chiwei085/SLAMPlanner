@@ -108,6 +108,8 @@ struct descriptor<yahboom_alc_bringup::BacktraceRecoveryConfig>
                   "backtrace_min_actual_displacement_m"),
             named(&BacktraceRecoveryConfig::cancel_timeout_sec,
                   "backtrace_cancel_timeout_sec"),
+            named(&BacktraceRecoveryConfig::backup_stall_check_sec,
+                  "backtrace_backup_stall_check_sec"),
             named(&BacktraceRecoveryConfig::backup_action,
                   "backtrace_backup_action"));
     }
@@ -433,7 +435,7 @@ private:
             publishCandidateEvent("goal_suppressed", *best);
             return;
         }
-        beginRouteSelection(robot_pose->xy, result.candidates);
+        beginRouteSelection(*robot_pose, result.candidates);
     }
 
     struct RouteWaypoint
@@ -459,9 +461,9 @@ private:
     }
 
     void beginRouteSelection(
-        const WorldPoint& robot_xy,
+        const RobotPose& robot_pose,
         const std::vector<FrontierCandidate>& sorted_candidates) {
-        pending_robot_xy_ = robot_xy;
+        pending_robot_pose_ = robot_pose;
         pending_candidates_ = sorted_candidates;
         pending_candidate_index_ = 0;
         validateNextCandidateRoute();
@@ -488,7 +490,7 @@ private:
             validation_final_candidate_ = candidate;
             validation_route_ = buildRoute(candidate, pending_candidates_);
             if (!nav2_validation_enabled_) {
-                startRoute(*pending_robot_xy_, *validation_final_candidate_,
+                startRoute(pending_robot_pose_->xy, *validation_final_candidate_,
                            validation_route_);
                 return;
             }
@@ -502,7 +504,7 @@ private:
                             {{"reason", "all_candidate_routes_failed"},
                              {"candidates_tried", pending_candidates_.size()}});
         pending_candidates_.clear();
-        pending_robot_xy_.reset();
+        pending_robot_pose_.reset();
     }
 
     geometry_msgs::msg::PoseStamped poseForPoint(const WorldPoint& xy,
@@ -518,7 +520,7 @@ private:
 
     void validateRouteSegment(const int generation) {
         if (!validation_active_ || generation != validation_generation_ ||
-            !pending_robot_xy_ || !validation_final_candidate_ ||
+            !pending_robot_pose_ || !validation_final_candidate_ ||
             validation_segment_index_ >= validation_route_.size()) {
             return;
         }
@@ -534,11 +536,11 @@ private:
         const auto& waypoint = validation_route_[validation_segment_index_];
         const WorldPoint start_xy =
             validation_segment_index_ == 0
-                ? *pending_robot_xy_
+                ? pending_robot_pose_->xy
                 : validation_route_[validation_segment_index_ - 1].xy;
         const double start_yaw =
             validation_segment_index_ == 0
-                ? validation_final_candidate_->goal_yaw
+                ? pending_robot_pose_->yaw
                 : validation_route_[validation_segment_index_ - 1].yaw;
 
         ComputePathToPose::Goal goal;
@@ -601,8 +603,8 @@ private:
         }
 
         validation_active_ = false;
-        if (pending_robot_xy_ && validation_final_candidate_) {
-            startRoute(*pending_robot_xy_, *validation_final_candidate_,
+        if (pending_robot_pose_ && validation_final_candidate_) {
+            startRoute(pending_robot_pose_->xy, *validation_final_candidate_,
                        validation_route_);
         }
     }
@@ -1082,6 +1084,29 @@ private:
             return;
         }
         if (backtrace_backup_active_) {
+            // Detect wheel-spin stall: if the robot hasn't moved
+            // min_actual_displacement_m within backup_stall_check_sec of
+            // starting the segment, cancel and fail fast rather than waiting
+            // the full backup_time_allowance_sec.
+            const double stall_check = backtrace_config_.backup_stall_check_sec;
+            if (stall_check > 0.0 &&
+                nowSec() - backtrace_segment_start_time_sec_ >= stall_check) {
+                const auto robot_pose = lookupRobotPose();
+                const auto& start_xy =
+                    backtrace_planner_.state().segment_start_xy;
+                if (robot_pose && start_xy &&
+                    withinDistanceTolerance(
+                        robot_pose->xy, *start_xy,
+                        backtrace_config_.min_actual_displacement_m)) {
+                    if (backup_goal_handle_) {
+                        backup_client_->async_cancel_goal(backup_goal_handle_);
+                        backup_goal_handle_.reset();
+                    }
+                    backtrace_backup_active_ = false;
+                    finishBacktraceRecovery(false, "backup_stalled");
+                    return;
+                }
+            }
             return;
         }
         if (backtrace_waiting_for_cancel_) {
@@ -1112,11 +1137,12 @@ private:
         }
 
         BackUp::Goal goal;
-        goal.target.x = *distance;
+        goal.target.x = -*distance;
         goal.speed = static_cast<float>(backtrace_config_.backup_speed_mps);
         goal.time_allowance = rclcpp::Duration::from_seconds(
             backtrace_config_.backup_time_allowance_sec);
         backtrace_backup_active_ = true;
+        backtrace_segment_start_time_sec_ = nowSec();
         publishPlannerEvent(
             "backtrace_recovery_segment",
             {{"segment", backtrace_planner_.state().segments_attempted},
@@ -1272,7 +1298,7 @@ private:
         ++validation_generation_;
         validation_segment_index_ = 0;
         validation_segment_started_sec_ = 0.0;
-        pending_robot_xy_.reset();
+        pending_robot_pose_.reset();
         pending_candidates_.clear();
         pending_candidate_index_ = 0;
         validation_final_candidate_.reset();
@@ -1372,6 +1398,7 @@ private:
 
     void onPlannerEvent(const std_msgs::msg::String& msg) {
         handleReverseBlockedEvent(msg.data);
+        handleStallOrSlipEvent(msg.data);
         switch (classifyPlannerEvent(msg.data)) {
             case CoordinationAction::kPause:
                 pauseForAlc();
@@ -1388,9 +1415,6 @@ private:
         if (!goal_active_ || backtrace_recovery_active_) {
             return;
         }
-        if (data.find("\"reverse_blocked\"") == std::string::npos) {
-            return;
-        }
         try {
             const auto payload = nlohmann::json::parse(data);
             if (!payload.contains("event") || !payload["event"].is_string() ||
@@ -1403,8 +1427,38 @@ private:
         }
         ++consecutive_reverse_blocked_;
         if (consecutive_reverse_blocked_ >= kReverseBlockedBacktraceThreshold) {
-            startBacktraceRecovery("reverse_blocked");
+            // Rear is confirmed blocked by costmap; backtrace uses /backup
+            // (backward motion) which the bridge will also block, so skip
+            // directly to goal abandonment rather than wasting time on a
+            // doomed backup sequence.
+            markActiveGoalUnsafe("REVERSE_UNSAFE");
+            abandonActiveGoal("REVERSE_UNSAFE");
         }
+    }
+
+    void handleStallOrSlipEvent(const std::string& data) {
+        if (!goal_active_) {
+            return;
+        }
+        try {
+            const auto payload = nlohmann::json::parse(data);
+            if (!payload.contains("event") || !payload["event"].is_string() ||
+                payload["event"].get<std::string>() != "stall_or_slip") {
+                return;
+            }
+        }
+        catch (const nlohmann::json::parse_error&) {
+            return;
+        }
+        markActiveGoalUnsafe("STALL_OR_SLIP");
+        abandonActiveGoal("STALL_OR_SLIP");
+    }
+
+    void markActiveGoalUnsafe(const std::string& reason) {
+        publishPlannerEvent("frontier_marked_unsafe",
+                            {{"reason", reason},
+                             {"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()}});
     }
 
     void publishFrontierMarkers(
@@ -1539,6 +1593,7 @@ private:
     bool backtrace_waiting_for_cancel_ = false;
     bool backtrace_backup_active_ = false;
     double backtrace_cancel_started_sec_ = 0.0;
+    double backtrace_segment_start_time_sec_ = 0.0;
     std::string backtrace_reason_;
     int consecutive_reverse_blocked_ = 0;
     BackUpGoalHandle::SharedPtr backup_goal_handle_;
@@ -1551,7 +1606,7 @@ private:
     int validation_generation_ = 0;
     std::size_t validation_segment_index_ = 0;
     double validation_segment_started_sec_ = 0.0;
-    std::optional<WorldPoint> pending_robot_xy_;
+    std::optional<RobotPose> pending_robot_pose_;
     std::vector<FrontierCandidate> pending_candidates_;
     std::size_t pending_candidate_index_ = 0;
     std::optional<FrontierCandidate> validation_final_candidate_;

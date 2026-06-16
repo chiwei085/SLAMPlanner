@@ -30,10 +30,10 @@ struct FrontierConfig
     bool allow_unreachable_goal = false;
     double goal_update_distance = 0.5;
     double goal_publish_period = 3.0;
-    double footprint_front_m = 0.16;
-    double footprint_rear_m = 0.15;
-    double footprint_half_width_m = 0.11;
-    double footprint_padding_m = 0.03;
+    double footprint_front_m = 0.19;
+    double footprint_rear_m = 0.19;
+    double footprint_half_width_m = 0.115;
+    double footprint_padding_m = 0.02;
     double swept_step_m = 0.05;
     double unknown_overlap_max_ratio = 0.35;
     double unknown_overlap_weight = 4.0;

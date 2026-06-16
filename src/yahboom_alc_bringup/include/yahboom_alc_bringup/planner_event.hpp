@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace yahboom_alc_bringup
@@ -11,6 +12,10 @@ enum class CoordinationAction
     kPause,
     kResume,
 };
+
+// Extracts the "event" field from a JSON planner event payload.
+// Returns nullopt for malformed JSON or payloads without an "event" field.
+std::optional<std::string> parseEventName(const std::string& payload);
 
 // Classifies a planner coordination event payload (JSON with an "event"
 // field). Malformed payloads and unrelated events map to kNone.

@@ -40,10 +40,10 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.allow_unreachable_goal = false;
     config.goal_update_distance = 0.5;
     config.goal_publish_period = 3.0;
-    config.footprint_front_m = 0.16;
-    config.footprint_rear_m = 0.15;
-    config.footprint_half_width_m = 0.11;
-    config.footprint_padding_m = 0.03;
+    config.footprint_front_m = 0.19;
+    config.footprint_rear_m = 0.19;
+    config.footprint_half_width_m = 0.115;
+    config.footprint_padding_m = 0.02;
     config.swept_step_m = 0.05;
     config.unknown_overlap_max_ratio = 0.35;
     config.unknown_overlap_weight = 4.0;

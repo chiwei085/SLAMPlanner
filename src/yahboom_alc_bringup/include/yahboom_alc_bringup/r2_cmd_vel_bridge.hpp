@@ -41,14 +41,14 @@ struct R2CmdVelBridgeConfig
     std::string reverse_costmap_topic = "/local_costmap/costmap";
     std::string reverse_robot_frame = "base_footprint";
     double reverse_costmap_max_age_sec = 1.0;
-    double reverse_check_distance_m = 0.18;
-    double reverse_safety_margin_m = 0.08;
+    double reverse_check_distance_m = 0.12;
+    double reverse_safety_margin_m = 0.0;
     int reverse_allowed_cost_max = 98;
     bool reverse_unknown_is_blocked = true;
-    double footprint_front_m = 0.16;
-    double footprint_rear_m = 0.15;
-    double footprint_half_width_m = 0.11;
-    double footprint_padding_m = 0.05;
+    double footprint_front_m = 0.19;
+    double footprint_rear_m = 0.19;
+    double footprint_half_width_m = 0.115;
+    double footprint_padding_m = 0.02;
 };
 
 struct ReverseSafetyPose

@@ -20,6 +20,7 @@ struct BacktraceRecoveryConfig
     int max_segments = 4;
     double min_actual_displacement_m = 0.03;
     double cancel_timeout_sec = 1.0;
+    double backup_stall_check_sec = 1.5;
     std::string backup_action = "/backup";
 };
 
