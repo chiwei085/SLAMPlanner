@@ -131,10 +131,10 @@ TEST(ClusterFrontierExplorer, LargeCorridorFrontierBeatsSmallCorner) {
     FrontierCounts counts1;
     const auto small = core.makeCandidate(
         small_corner, start, robot_xy,
-        std::vector<bool>(grid.data.size(), false), 30, 12, counts1);
+        std::vector<std::uint8_t>(grid.data.size(), false), 30, 12, counts1);
     const auto large = core.makeCandidate(
         large_corridor, start, robot_xy,
-        std::vector<bool>(grid.data.size(), false), 30, 12, counts1);
+        std::vector<std::uint8_t>(grid.data.size(), false), 30, 12, counts1);
 
     ASSERT_TRUE(small);
     ASSERT_TRUE(large);
@@ -165,10 +165,12 @@ TEST(ClusterFrontierExplorer, LimitedUnknownOverlapPenalizesScore) {
     FrontierCounts counts2;
     const auto free_candidate = free_core.makeCandidate(
         cluster, start, free_core.mapToWorld(start.first, start.second),
-        std::vector<bool>(free_grid.data.size(), false), 16, 10, counts2);
+        std::vector<std::uint8_t>(free_grid.data.size(), false), 16, 10,
+        counts2);
     const auto unknown_candidate = unknown_core.makeCandidate(
         cluster, start, unknown_core.mapToWorld(start.first, start.second),
-        std::vector<bool>(unknown_grid.data.size(), false), 16, 10, counts2);
+        std::vector<std::uint8_t>(unknown_grid.data.size(), false), 16, 10,
+        counts2);
 
     ASSERT_TRUE(free_candidate);
     ASSERT_TRUE(unknown_candidate);
@@ -201,14 +203,17 @@ TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapRejectsCandidate) {
     FrontierCounts counts3;
     const auto candidate = core.makeCandidate(
         {{5, 12}}, {2, 12}, core.mapToWorld(2, 12),
-        std::vector<bool>(grid.data.size(), false), 30, 30, counts3);
+        std::vector<std::uint8_t>(grid.data.size(), false), 30, 30, counts3);
     EXPECT_FALSE(candidate);
 }
 
 TEST(ClusterFrontierExplorer, UnreachableGoalRejectsCandidate) {
     auto grid = buildGrid(12, 12, 0.1);
+    for (int y = 0; y < 12; ++y) {
+        setCell(grid, 5, y, 100);
+    }
     auto core = makeCore(grid);
-    auto blocked = std::vector<bool>(grid.data.size(), false);
+    auto blocked = std::vector<std::uint8_t>(grid.data.size(), false);
     for (int y = 0; y < 12; ++y) {
         blocked[core.index(5, y, 12)] = true;
     }
@@ -217,6 +222,67 @@ TEST(ClusterFrontierExplorer, UnreachableGoalRejectsCandidate) {
     const auto candidate = core.makeCandidate(
         {{8, 5}}, {2, 5}, core.mapToWorld(2, 5), blocked, 12, 12, counts4);
     EXPECT_FALSE(candidate);
+}
+
+TEST(ClusterFrontierExplorer, SoftReachableCandidateSurvivesStrictClearance) {
+    auto grid = buildGrid(12, 11, 0.2);
+    for (int x = 0; x < 12; ++x) {
+        setCell(grid, x, 4, 100);
+        setCell(grid, x, 6, 100);
+    }
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.path_clearance_cells = 1;
+    config.exploratory_path_clearance_cells = 0;
+    config.min_clearance_cells = 0;
+    config.unknown_overlap_max_ratio = 1.0;
+    config.soft_unreachable_penalty = 1.5;
+    core.setConfig(config);
+
+    FrontierCounts counts;
+    const auto candidate = core.makeCandidate(
+        {{8, 5}}, {2, 5}, core.mapToWorld(2, 5),
+        std::vector<std::uint8_t>(grid.data.size(), false), 12, 11, counts);
+
+    ASSERT_TRUE(candidate);
+    const auto& soft_candidate = requireValue(candidate);
+    EXPECT_FALSE(soft_candidate.reachable);
+    EXPECT_TRUE(soft_candidate.soft_reachable);
+    EXPECT_GT(soft_candidate.score, soft_candidate.path_length);
+}
+
+TEST(ClusterFrontierExplorer, ApproachPoseStaysBeforeFrontierGoal) {
+    auto grid = buildGrid(20, 10, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.approach_offset_m = 0.4;
+    core.setConfig(config);
+    const std::vector<Cell> path{{2, 5}, {10, 5}};
+    const auto goal_xy = core.mapToWorld(10, 5);
+
+    const auto approach = core.approachPointForPath(path, goal_xy);
+
+    EXPECT_LT(approach.first, goal_xy.first);
+    EXPECT_NEAR(goal_xy.first - approach.first, 0.4, 1e-6);
+    EXPECT_NEAR(approach.second, goal_xy.second, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, FailureWeightAcceleratesBlacklist) {
+    auto grid = buildGrid(20, 10, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.failed_goal_max_retries = 3;
+    core.setConfig(config);
+    const auto goal = core.mapToWorld(8, 5);
+
+    core.recordGoalFailure(goal, 0.0, 2);
+
+    ASSERT_EQ(core.goalAttempts().size(), 1u);
+    EXPECT_EQ(core.goalAttempts().front().failures, 2);
+    EXPECT_FALSE(core.isBlacklisted(goal));
+
+    core.recordGoalFailure(goal, 1.0, 1);
+    EXPECT_TRUE(core.isBlacklisted(goal));
 }
 
 TEST(ClusterFrontierExplorer, GoalOptionsExcludeUnknownCells) {
@@ -270,7 +336,7 @@ TEST(ClusterFrontierExplorer, FailedGoalBlacklistPreventsReselection) {
     FrontierCounts counts5;
     const auto candidate = core.makeCandidate(
         {{8, 5}, {9, 5}, {10, 5}}, {2, 5}, core.mapToWorld(2, 5),
-        std::vector<bool>(grid.data.size(), false), 20, 10, counts5);
+        std::vector<std::uint8_t>(grid.data.size(), false), 20, 10, counts5);
 
     EXPECT_FALSE(candidate);
 }
@@ -325,12 +391,14 @@ TEST(ClusterFrontierExplorer, HeadingPenaltyPrefersForwardCandidate) {
     const Cell start{10, 10};
     const auto robot_xy = core.mapToWorld(start.first, start.second);
     FrontierCounts counts;
-    const auto forward = core.makeCandidate(
-        {{15, 10}}, start, robot_xy, std::vector<bool>(grid.data.size(), false),
-        30, 20, counts, 0.0);
-    const auto behind = core.makeCandidate(
-        {{5, 10}}, start, robot_xy, std::vector<bool>(grid.data.size(), false),
-        30, 20, counts, 0.0);
+    const auto forward =
+        core.makeCandidate({{15, 10}}, start, robot_xy,
+                           std::vector<std::uint8_t>(grid.data.size(), false),
+                           30, 20, counts, 0.0);
+    const auto behind =
+        core.makeCandidate({{5, 10}}, start, robot_xy,
+                           std::vector<std::uint8_t>(grid.data.size(), false),
+                           30, 20, counts, 0.0);
 
     ASSERT_TRUE(forward);
     ASSERT_TRUE(behind);
@@ -353,7 +421,7 @@ TEST(ClusterFrontierExplorer, CandidateRejectionCountsIncludeFilters) {
     const Cell start{10, 10};
     const auto robot_xy = core.mapToWorld(start.first, start.second);
     FrontierCounts counts;
-    const std::vector<bool> blocked(grid.data.size(), false);
+    const std::vector<std::uint8_t> blocked(grid.data.size(), false);
 
     EXPECT_FALSE(core.makeCandidate({{11, 2}}, start, robot_xy, blocked, 30, 20,
                                     counts));
@@ -691,11 +759,8 @@ TEST(ClusterFrontierExplorer,
 }
 
 TEST(ClusterFrontierExplorer, HeadingErrorWrapsAcrossPi) {
-    auto grid = buildGrid(10, 10, 0.1);
-    auto core = makeCore(grid);
-
-    EXPECT_NEAR(core.headingError(3.10, -3.10), 0.083185307, 1e-6);
-    EXPECT_NEAR(core.headingError(-3.10, 3.10), 0.083185307, 1e-6);
+    EXPECT_NEAR(headingDelta(3.10, -3.10), 0.083185307, 1e-6);
+    EXPECT_NEAR(headingDelta(-3.10, 3.10), 0.083185307, 1e-6);
 }
 
 TEST(ClusterFrontierExplorer, PathTargetYawUsesNearestPathSegment) {

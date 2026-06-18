@@ -153,6 +153,8 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::min_clearance_cells, "min_clearance_cells"),
             named(&FrontierConfig::path_clearance_cells,
                   "path_clearance_cells"),
+            named(&FrontierConfig::exploratory_path_clearance_cells,
+                  "exploratory_path_clearance_cells"),
             named(&FrontierConfig::min_frontier_distance,
                   "min_frontier_distance"),
             named(&FrontierConfig::max_frontier_distance,
@@ -168,8 +170,13 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "frontier_size_weight"),
             named(&FrontierConfig::unreachable_goal_penalty,
                   "unreachable_goal_penalty"),
+            named(&FrontierConfig::soft_unreachable_penalty,
+                  "soft_unreachable_penalty"),
             named(&FrontierConfig::allow_unreachable_goal,
                   "allow_unreachable_goal"),
+            named(&FrontierConfig::nav2_validation_required_for_final_goal,
+                  "nav2_validation_required_for_final_goal"),
+            named(&FrontierConfig::approach_offset_m, "approach_offset_m"),
             named(&FrontierConfig::goal_update_distance,
                   "goal_update_distance"),
             named(&FrontierConfig::goal_publish_period, "goal_publish_period"),
@@ -481,8 +488,14 @@ private:
         for (const auto& subgoal : subgoals) {
             route.push_back({subgoal.goal_xy, subgoal.goal_yaw, false});
         }
-        route.push_back(
-            {final_candidate.goal_xy, final_candidate.goal_yaw, true});
+        if (final_candidate.soft_reachable) {
+            route.push_back({final_candidate.approach_xy,
+                             final_candidate.approach_yaw, true});
+        }
+        else {
+            route.push_back(
+                {final_candidate.goal_xy, final_candidate.goal_yaw, true});
+        }
         return route;
     }
 
@@ -509,7 +522,8 @@ private:
 
         while (pending_candidate_index_ < pending_candidates_.size()) {
             const auto& candidate =
-                pending_candidates_[pending_candidate_index_++];
+                pending_candidates_[pending_candidate_index_];
+            ++pending_candidate_index_;
             if (!core_.shouldPublishGoal(candidate.goal_xy, nowSec())) {
                 publishCandidateEvent("goal_suppressed", candidate);
                 continue;
@@ -531,7 +545,7 @@ private:
                 return;
             }
             validation_active_ = true;
-            validation_generation_++;
+            ++validation_generation_;
             validateRouteSegment(validation_generation_);
             return;
         }
@@ -645,11 +659,12 @@ private:
             result.result->path.poses.empty()) {
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "empty_or_failed_path"},
+                                 {"failure_class", "global_path_blocked"},
                                  {"status", static_cast<int>(result.code)},
                                  {"segment", validation_segment_index_},
                                  {"goal_xy", validationGoalJson()},
                                  {"waypoint_xy", validationWaypointJson()}});
-            recordValidationFailure();
+            recordValidationFailure("global_path_blocked");
             validateNextCandidateRoute();
             return;
         }
@@ -680,10 +695,11 @@ private:
         }
         publishPlannerEvent("nav2_validation_failed",
                             {{"reason", "timeout"},
+                             {"failure_class", "global_path_blocked"},
                              {"segment", validation_segment_index_},
                              {"goal_xy", validationGoalJson()},
                              {"waypoint_xy", validationWaypointJson()}});
-        recordValidationFailure();
+        recordValidationFailure("global_path_blocked");
         ++validation_generation_;
         validateNextCandidateRoute();
     }
@@ -797,7 +813,7 @@ private:
             RCLCPP_WARN(get_logger(), "Cluster frontier goal rejected");
             publishPlannerEvent("goal_rejected",
                                 {{"goal_xy", activeGoalJson()}});
-            abandonActiveGoal("goal_rejected");
+            abandonActiveGoal("goal_rejected", "global_path_blocked");
             return;
         }
         goal_handle_ = handle;
@@ -865,8 +881,9 @@ private:
             // selected every goal_publish_period seconds indefinitely.
             publishPlannerEvent("route_trivial_success",
                                 {{"goal_xy", activeFinalGoalJson()},
+                                 {"failure_class", "global_path_blocked"},
                                  {"duration_sec", rounded(route_duration)}});
-            blacklistActiveGoal();
+            blacklistActiveGoal("global_path_blocked");
             consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
             clearActiveGoal();
@@ -890,7 +907,7 @@ private:
         if (config.goal_timeout_sec > 0.0 &&
             now - active_goal_sent_time_sec_ >= config.goal_timeout_sec) {
             RCLCPP_WARN(get_logger(), "Abandoning frontier goal after timeout");
-            abandonActiveGoal("timeout");
+            abandonActiveGoal("timeout", "controller_no_progress");
             return;
         }
         const auto projection =
@@ -1142,12 +1159,12 @@ private:
                  {"reason", reason},
                  {"goal_xy", activeFinalGoalJson()}});
             consecutive_backtrace_stall_count_ = 0;
-            abandonActiveGoal(reason);
+            abandonActiveGoal(reason, "recovery_failed");
             return;
         }
         if (!backtrace_planner_.canStart(breadcrumb_trail_) ||
             !backup_client_->action_server_is_ready()) {
-            abandonActiveGoal(reason);
+            abandonActiveGoal(reason, "recovery_failed");
             return;
         }
 
@@ -1291,20 +1308,25 @@ private:
 
     void finishBacktraceRecovery(const bool success,
                                  const std::string& reason) {
+        const bool is_stall = (reason == "backup_stalled");
+        const std::string failure_class = success    ? "none"
+                                          : is_stall ? "local_hazard"
+                                                     : "recovery_failed";
         publishPlannerEvent(
             success ? "backtrace_recovery_finished"
                     : "backtrace_recovery_failed",
             {{"reason", reason},
+             {"failure_class", failure_class},
              {"trigger", backtrace_reason_},
              {"segments", backtrace_planner_.state().segments_attempted},
              {"goal_xy", activeFinalGoalJson()},
              {"active_waypoint_xy", activeGoalJson()}});
-        blacklistActiveGoal();
+        blacklistActiveGoal(success ? "controller_no_progress" : failure_class);
         if (success) {
             consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
         }
-        else if (reason == "backup_stalled") {
+        else if (is_stall) {
             ++consecutive_backtrace_stall_count_;
         }
         else {
@@ -1318,7 +1340,8 @@ private:
         clearActiveGoal();
     }
 
-    void abandonActiveGoal(const std::string& reason) {
+    void abandonActiveGoal(const std::string& reason,
+                           const std::string& failure_class = "") {
         if (reason == "REVERSE_UNSAFE") {
             if (nowSec() - active_waypoint_sent_time_sec_ <
                 kImmediateReverseBlockWindowSec) {
@@ -1328,11 +1351,15 @@ private:
         else {
             consecutive_immediate_reverse_streak_ = 0;
         }
-        publishPlannerEvent("route_abandoned",
-                            {{"reason", reason},
-                             {"goal_xy", activeFinalGoalJson()},
-                             {"active_waypoint_xy", activeGoalJson()}});
-        blacklistActiveGoal();
+        publishPlannerEvent(
+            "route_abandoned",
+            {{"reason", reason},
+             {"failure_class",
+              failure_class.empty() ? "recovery_failed" : failure_class},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()}});
+        blacklistActiveGoal(failure_class.empty() ? "recovery_failed"
+                                                  : failure_class);
         if (goal_handle_) {
             nav_client_->async_cancel_goal(goal_handle_);
         }
@@ -1415,23 +1442,28 @@ private:
         validation_route_.clear();
     }
 
-    void blacklistActiveGoal() {
+    void blacklistActiveGoal(const std::string& failure_class = "") {
         if (!active_final_goal_) {
             return;
         }
-        recordGoalFailure(*active_final_goal_);
+        recordGoalFailure(*active_final_goal_, failure_class);
     }
 
-    void recordValidationFailure() {
+    void recordValidationFailure(const std::string& failure_class) {
         if (!nav2_validation_blacklist_enabled_ ||
             !validation_final_candidate_) {
             return;
         }
-        recordGoalFailure(validation_final_candidate_->goal_xy);
+        recordGoalFailure(validation_final_candidate_->goal_xy, failure_class);
     }
 
-    void recordGoalFailure(const WorldPoint& goal_xy) {
-        core_.blacklistGoal(goal_xy, nowSec());
+    void recordGoalFailure(const WorldPoint& goal_xy,
+                           const std::string& failure_class = "") {
+        const int failure_weight = failure_class == "local_hazard" ||
+                                           failure_class == "recovery_failed"
+                                       ? 2
+                                       : 1;
+        core_.recordGoalFailure(goal_xy, nowSec(), failure_weight);
         const auto record_index = core_.findGoalAttemptIndex(goal_xy);
         if (!record_index) {
             return;
@@ -1441,8 +1473,12 @@ private:
             "goal_attempt_updated",
             {{"goal_xy", pointJson(record.xy)},
              {"failures", record.failures},
+             {"failure_class",
+              failure_class.empty() ? "unknown" : failure_class},
              {"blacklisted",
               record.failures >= core_.config().failed_goal_max_retries},
+             {"blacklist_reason",
+              failure_class.empty() ? "unknown" : failure_class},
              {"blacklist_radius_m",
               rounded(core_.config().failed_goal_blacklist_radius_m)},
              {"expires_at_sec", rounded(record.expires_at_sec)}});
@@ -1473,7 +1509,9 @@ private:
              {"unknown_overlap", rounded(candidate.unknown_overlap_ratio)},
              {"wall_clearance", rounded(candidate.wall_clearance)},
              {"heading_delta", rounded(candidate.heading_delta)},
-             {"reachable", candidate.reachable}});
+             {"reachable", candidate.reachable},
+             {"soft_reachable", candidate.soft_reachable},
+             {"approach_goal_xy", pointJson(candidate.approach_xy)}});
     }
 
     void publishNoCandidateEvent(const FrontierCounts& counts,
@@ -1503,8 +1541,8 @@ private:
         const nlohmann::json& fields = nlohmann::json::object()) {
         std_msgs::msg::String msg;
         nlohmann::json payload = fields;
-        payload[std::string("event")] = event;
-        payload[std::string("time_sec")] = rounded(nowSec());
+        payload["event"] = event;
+        payload["time_sec"] = rounded(nowSec());
         msg.data = payload.dump();
         event_pub_->publish(msg);
     }
@@ -1528,14 +1566,8 @@ private:
         if (!goal_active_ || backtrace_recovery_active_) {
             return;
         }
-        try {
-            const auto payload = nlohmann::json::parse(data);
-            if (!payload.contains("event") || !payload["event"].is_string() ||
-                payload["event"].get<std::string>() != "reverse_blocked") {
-                return;
-            }
-        }
-        catch (const nlohmann::json::parse_error&) {
+        const auto event = parseEventName(data);
+        if (!event || *event != "reverse_blocked") {
             return;
         }
         ++consecutive_reverse_blocked_;
@@ -1545,7 +1577,7 @@ private:
             // directly to goal abandonment rather than wasting time on a
             // doomed backup sequence.
             markActiveGoalUnsafe("REVERSE_UNSAFE");
-            abandonActiveGoal("REVERSE_UNSAFE");
+            abandonActiveGoal("REVERSE_UNSAFE", "reverse_unsafe");
         }
     }
 
@@ -1553,18 +1585,12 @@ private:
         if (!goal_active_) {
             return;
         }
-        try {
-            const auto payload = nlohmann::json::parse(data);
-            if (!payload.contains("event") || !payload["event"].is_string() ||
-                payload["event"].get<std::string>() != "stall_or_slip") {
-                return;
-            }
-        }
-        catch (const nlohmann::json::parse_error&) {
+        const auto event = parseEventName(data);
+        if (!event || *event != "stall_or_slip") {
             return;
         }
         markActiveGoalUnsafe("STALL_OR_SLIP");
-        abandonActiveGoal("STALL_OR_SLIP");
+        abandonActiveGoal("STALL_OR_SLIP", "stall_or_slip");
     }
 
     void triggerForwardEscape(const RobotPose& robot_pose) {
@@ -1603,8 +1629,11 @@ private:
     }
 
     void markActiveGoalUnsafe(const std::string& reason) {
+        const std::string failure_class =
+            reason == "REVERSE_UNSAFE" ? "reverse_unsafe" : "stall_or_slip";
         publishPlannerEvent("frontier_marked_unsafe",
                             {{"reason", reason},
+                             {"failure_class", failure_class},
                              {"goal_xy", activeFinalGoalJson()},
                              {"active_waypoint_xy", activeGoalJson()}});
     }

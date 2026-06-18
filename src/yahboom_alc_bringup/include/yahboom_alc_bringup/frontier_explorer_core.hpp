@@ -2,6 +2,7 @@
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -23,6 +24,8 @@ struct FrontierConfig
     double information_weight = 0.02;
     double frontier_size_weight = 0.02;
     double unreachable_goal_penalty = 3.0;
+    double soft_unreachable_penalty = 1.5;
+    double approach_offset_m = 0.4;
     double goal_update_distance = 0.5;
     double goal_publish_period = 3.0;
     double footprint_front_m = 0.19;
@@ -57,12 +60,14 @@ struct FrontierConfig
     int occupied_threshold = 50;
     int min_clearance_cells = 2;
     int path_clearance_cells = 2;
+    int exploratory_path_clearance_cells = 1;
     int near_goal_retry_limit = 0;
     int failed_goal_max_retries = 2;
     int max_subgoals = 3;
     int relaxed_min_frontier_size = 8;
     int alignment_spin_max_attempts = 1;
     bool allow_unreachable_goal = false;
+    bool nav2_validation_required_for_final_goal = true;
     bool alignment_grace_enabled = true;
     bool enable_subgoals = true;
     bool alignment_spin_enabled = false;
@@ -127,6 +132,9 @@ struct FrontierCandidate
     double path_length = 0.0;
     int information = 0;
     bool reachable = false;
+    bool soft_reachable = false;
+    WorldPoint approach_xy;
+    double approach_yaw = 0.0;
     double unknown_overlap_ratio = 0.0;
     double wall_clearance = 0.0;
     double heading_delta = 0.0;
@@ -173,26 +181,24 @@ public:
         std::optional<double> robot_yaw = std::nullopt);
     std::optional<FrontierCandidate> makeCandidate(
         const std::vector<Cell>& cluster, const Cell& start_cell,
-        const WorldPoint& robot_xy, const std::vector<bool>& blocked, int width,
-        int height, FrontierCounts& counts,
+        const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
+        int width, int height, FrontierCounts& counts,
         std::optional<double> robot_yaw = std::nullopt);
 
     std::vector<Cell> findFrontierCells(int width, int height) const;
     std::vector<std::vector<Cell>> clusterFrontiers(
         const std::vector<Cell>& frontier_cells, int width) const;
-    std::vector<Cell> goalOptionsForCluster(const std::vector<Cell>& cluster,
-                                            const std::vector<bool>& blocked,
-                                            int width, int height) const;
-    std::vector<bool> makeBlockedGrid(int width, int height,
-                                      int clearance) const;
-    std::optional<Cell> nearestFreeCell(const Cell& origin,
-                                        const std::vector<bool>& blocked,
-                                        int width, int height,
-                                        double radius_m) const;
-    std::optional<std::vector<Cell>> gridPath(const Cell& start,
-                                              const Cell& goal,
-                                              const std::vector<bool>& blocked,
-                                              int width, int height) const;
+    std::vector<Cell> goalOptionsForCluster(
+        const std::vector<Cell>& cluster,
+        const std::vector<std::uint8_t>& blocked, int width, int height) const;
+    std::vector<std::uint8_t> makeBlockedGrid(int width, int height,
+                                              int clearance) const;
+    std::optional<Cell> nearestFreeCell(
+        const Cell& origin, const std::vector<std::uint8_t>& blocked, int width,
+        int height, double radius_m) const;
+    std::optional<std::vector<Cell>> gridPath(
+        const Cell& start, const Cell& goal,
+        const std::vector<std::uint8_t>& blocked, int width, int height) const;
 
     double pathLength(const std::vector<Cell>& path) const;
     int countUnknownNear(const Cell& cell) const;
@@ -220,6 +226,8 @@ public:
 
     bool isBlacklisted(const WorldPoint& goal_xy) const;
     void blacklistGoal(const WorldPoint& goal_xy, double now_sec);
+    void recordGoalFailure(const WorldPoint& goal_xy, double now_sec,
+                           int failure_weight = 1);
     void pruneBlacklist(double now_sec);
     std::optional<std::size_t> findGoalAttemptIndex(
         const WorldPoint& goal_xy) const;
@@ -235,7 +243,6 @@ public:
     bool hasUnknownNeighbor(int width, int index) const;
     bool hasOccupiedClearance(int x, int y, int width, int height,
                               int radius) const;
-    double headingError(double from_yaw, double to_yaw) const;
     std::optional<double> pathTargetYawNear(
         const WorldPoint& robot_xy, const std::vector<Cell>& path) const;
     AlignmentGraceStatus evaluateAlignmentGrace(
@@ -258,6 +265,8 @@ public:
     WorldPoint mapToWorldUnchecked(int mx, int my) const;
     std::optional<Cell> worldToMap(double wx, double wy) const;
     FootprintGeometry footprintGeometry();
+    WorldPoint approachPointForPath(const std::vector<Cell>& path,
+                                    const WorldPoint& goal_xy) const;
 
 private:
     std::vector<Cell> reconstructPath(const std::vector<int>& parent,

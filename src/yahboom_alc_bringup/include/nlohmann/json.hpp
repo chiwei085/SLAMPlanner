@@ -215,7 +215,9 @@ private:
             if (done()) {
                 throw parse_error("unexpected end of JSON");
             }
-            return text_[pos_++];
+            const char value = text_[pos_];
+            ++pos_;
+            return value;
         }
 
         bool match(const char* token) {

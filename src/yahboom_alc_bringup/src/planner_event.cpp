@@ -8,16 +8,28 @@
 namespace yahboom_alc_bringup
 {
 
-std::optional<std::string> parseEventName(const std::string& payload) {
+namespace
+{
+std::optional<std::string> parseJsonStringField(const std::string& payload,
+                                                const char* key) {
     try {
         const auto parsed = nlohmann::json::parse(payload);
-        if (parsed.contains("event") && parsed["event"].is_string()) {
-            return parsed[std::string("event")].get<std::string>();
+        if (parsed.contains(key) && parsed[key].is_string()) {
+            return parsed[key].get<std::string>();
         }
     }
     catch (const nlohmann::json::parse_error&) {
     }
     return std::nullopt;
+}
+}  // namespace
+
+std::optional<std::string> parseEventName(const std::string& payload) {
+    return parseJsonStringField(payload, "event");
+}
+
+std::optional<std::string> parseFailureClass(const std::string& payload) {
+    return parseJsonStringField(payload, "failure_class");
 }
 
 CoordinationAction classifyPlannerEvent(const std::string& payload) {
