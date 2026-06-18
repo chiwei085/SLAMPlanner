@@ -275,6 +275,11 @@ private:
     CandidateResult findCandidatesOnce(const WorldPoint& robot_xy,
                                        double now_sec,
                                        std::optional<double> robot_yaw);
+    std::optional<FrontierCandidate> makeCandidateImpl(
+        const std::vector<Cell>& cluster, const Cell& start_cell,
+        const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
+        const std::vector<std::uint8_t>& strict_blocked, int width, int height,
+        FrontierCounts& counts, std::optional<double> robot_yaw = std::nullopt);
     FrontierConfig relaxedConfig() const;
 
     FrontierConfig config_;

@@ -28,6 +28,7 @@
 #include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
+#include "yahboom_alc_bringup/recovery_state_machine.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
@@ -115,8 +116,35 @@ struct descriptor<yahboom_alc_bringup::BacktraceRecoveryConfig>
                   "backtrace_cancel_timeout_sec"),
             named(&BacktraceRecoveryConfig::backup_stall_check_sec,
                   "backtrace_backup_stall_check_sec"),
+            named(&BacktraceRecoveryConfig::reverse_motion_ratio_min,
+                  "backtrace_reverse_motion_ratio_min"),
             named(&BacktraceRecoveryConfig::backup_action,
                   "backtrace_backup_action"));
+    }
+};
+
+template <>
+struct descriptor<yahboom_alc_bringup::RecoveryStateMachineConfig>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::RecoveryStateMachineConfig;
+        return make_descriptor(
+            named(&RecoveryStateMachineConfig::recovery_reobserve_cycles,
+                  "recovery_reobserve_cycles"),
+            named(&RecoveryStateMachineConfig::recovery_small_spin_yaw_rad,
+                  "recovery_small_spin_yaw_rad"),
+            named(&RecoveryStateMachineConfig::recovery_small_spin_attempts,
+                  "recovery_small_spin_attempts"),
+            named(
+                &RecoveryStateMachineConfig::recovery_forward_escape_distance_m,
+                "recovery_forward_escape_distance_m"),
+            named(&RecoveryStateMachineConfig::rear_blocked_min_latch_sec,
+                  "rear_blocked_min_latch_sec"),
+            named(&RecoveryStateMachineConfig::
+                      rear_blocked_clear_forward_displacement_m,
+                  "rear_blocked_clear_forward_displacement_m"),
+            named(&RecoveryStateMachineConfig::recovery_clearance_backup_m,
+                  "recovery_clearance_backup_m"));
     }
 };
 
@@ -255,16 +283,57 @@ namespace yahboom_alc_bringup
 namespace
 {
 
+enum class FailureClass : std::uint8_t
+{
+    kNone,
+    kGlobalPathBlocked,
+    kControllerNoProgress,
+    kReverseUnsafe,
+    kStallOrSlip,
+    kLocalHazard,     // weight 2: physical blockage confirmed by stall/slip
+    kRecoveryFailed,  // weight 2: all recovery strategies exhausted
+};
+
+constexpr int blacklistWeight(const FailureClass fc) noexcept {
+    return (fc == FailureClass::kLocalHazard ||
+            fc == FailureClass::kRecoveryFailed)
+               ? 2
+               : 1;
+}
+
+constexpr const char* failureClassName(const FailureClass fc) noexcept {
+    switch (fc) {
+        case FailureClass::kNone:
+            return "none";
+        case FailureClass::kGlobalPathBlocked:
+            return "global_path_blocked";
+        case FailureClass::kControllerNoProgress:
+            return "controller_no_progress";
+        case FailureClass::kReverseUnsafe:
+            return "reverse_unsafe";
+        case FailureClass::kStallOrSlip:
+            return "stall_or_slip";
+        case FailureClass::kLocalHazard:
+            return "local_hazard";
+        case FailureClass::kRecoveryFailed:
+            return "recovery_failed";
+    }
+    return "unknown";
+}
+
 // Margin granted on top of the behavior server's own spin time allowance
 // to cover action transport before declaring a spin lost.
 constexpr double kSpinTransportMarginSec = 5.0;
 constexpr int kReverseBlockedBacktraceThreshold = 3;
-constexpr int kForwardEscapeThreshold = 5;
-constexpr double kForwardEscapeDistanceM = 1.5;
 constexpr double kImmediateReverseBlockWindowSec = 3.0;
+constexpr double kRecentReverseBlockedWindowSec = 3.0;
 // After this many consecutive backup_stalled failures, the rear is blocked;
 // skip backtrace and directly abandon to avoid spinning wheels in place.
 constexpr int kBacktraceStallSkipThreshold = 3;
+// After this many consecutive immediate reverse-blocked abandons across
+// different frontiers, the robot's current pose is the trap — trigger a
+// forward escape instead of cycling through more doomed frontier candidates.
+constexpr int kConsecutiveReverseChurnEscapeThreshold = 2;
 // If nav2 declares SUCCEEDED in under this many seconds the robot was already
 // at the goal and didn't actually navigate anywhere.  Blacklist the goal to
 // break the "frontier never clears" cycling loop.
@@ -371,6 +440,10 @@ private:
         breadcrumb_trail_.setConfig(backtrace_config_);
         backtrace_planner_.setConfig(backtrace_config_);
         backtrace_backup_action_ = backtrace_config_.backup_action;
+
+        recovery_config_ =
+            loadDeclaredParameters<RecoveryStateMachineConfig>(*this);
+        recovery_.setConfig(recovery_config_);
     }
 
     void onMap(const nav_msgs::msg::OccupancyGrid& msg) {
@@ -390,8 +463,8 @@ private:
             logWaiting("Frontier exploration paused for ALC");
             return;
         }
-        if (backtrace_recovery_active_) {
-            checkBacktraceRecovery();
+        if (recoveryActive()) {
+            checkRecoveryStateMachine();
             return;
         }
         if (goal_active_) {
@@ -409,23 +482,17 @@ private:
             logWaiting("Waiting for /navigate_to_pose action server");
             return;
         }
-        if (consecutive_immediate_reverse_streak_ >= kForwardEscapeThreshold) {
-            const auto escape_pose = lookupRobotPose();
-            if (escape_pose) {
-                triggerForwardEscape(*escape_pose);
-            }
-            else {
-                consecutive_immediate_reverse_streak_ = 0;
-            }
-            return;
-        }
         const auto robot_pose = lookupRobotPose();
         if (!robot_pose) {
             return;
         }
+        findAndBeginCandidateRoute(*robot_pose, false);
+    }
 
+    bool findAndBeginCandidateRoute(const RobotPose& robot_pose,
+                                    const bool bypass_goal_suppression) {
         auto result =
-            core_.findCandidates(robot_pose->xy, nowSec(), robot_pose->yaw);
+            core_.findCandidates(robot_pose.xy, nowSec(), robot_pose.yaw);
         publishFrontierMarkers(result.candidates);
         if (result.candidates.empty()) {
             clearGoalMarker();
@@ -454,21 +521,24 @@ private:
                 std::to_string(result.counts.rejected_unknown_ratio) +
                 ", rej_clearance=" +
                 std::to_string(result.counts.rejected_clearance) + ")");
-            return;
+            return false;
         }
         if (result.relaxed) {
-            publishPlannerEvent("frontier_search_relaxed",
-                                {{"candidates", result.candidates.size()}});
+            publishPlannerEvent(
+                "frontier_search_relaxed",
+                nlohmann::json{{"candidates", result.candidates.size()}});
         }
         std::sort(
             result.candidates.begin(), result.candidates.end(),
             [](const auto& a, const auto& b) { return a.score < b.score; });
         const auto best = result.candidates.begin();
-        if (!core_.shouldPublishGoal(best->goal_xy, nowSec())) {
+        if (!bypass_goal_suppression &&
+            !core_.shouldPublishGoal(best->goal_xy, nowSec())) {
             publishCandidateEvent("goal_suppressed", *best);
-            return;
+            return false;
         }
-        beginRouteSelection(*robot_pose, result.candidates);
+        beginRouteSelection(robot_pose, result.candidates);
+        return true;
     }
 
     struct RouteWaypoint
@@ -664,7 +734,7 @@ private:
                                  {"segment", validation_segment_index_},
                                  {"goal_xy", validationGoalJson()},
                                  {"waypoint_xy", validationWaypointJson()}});
-            recordValidationFailure("global_path_blocked");
+            recordValidationFailure(FailureClass::kGlobalPathBlocked);
             validateNextCandidateRoute();
             return;
         }
@@ -699,7 +769,7 @@ private:
                              {"segment", validation_segment_index_},
                              {"goal_xy", validationGoalJson()},
                              {"waypoint_xy", validationWaypointJson()}});
-        recordValidationFailure("global_path_blocked");
+        recordValidationFailure(FailureClass::kGlobalPathBlocked);
         ++validation_generation_;
         validateNextCandidateRoute();
     }
@@ -717,6 +787,7 @@ private:
         const auto projection =
             core_.projectOntoPath(robot_xy, active_route_path_);
         last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
+        rear_latch_progress_arc_length_ = last_progress_arc_length_;
         last_progress_time_sec_ = nowSec();
         active_goal_sent_time_sec_ = nowSec();
         active_waypoint_sent_time_sec_ = nowSec();
@@ -727,6 +798,7 @@ private:
         breadcrumb_trail_.add({robot_xy, 0.0, nowSec()});
         backtrace_planner_.reset();
         consecutive_reverse_blocked_ = 0;
+        recovery_escape_active_ = false;
         core_.noteGoalPublished(final_candidate.goal_xy,
                                 final_candidate.goal_yaw, nowSec());
         publishPlannerEvent(
@@ -813,7 +885,8 @@ private:
             RCLCPP_WARN(get_logger(), "Cluster frontier goal rejected");
             publishPlannerEvent("goal_rejected",
                                 {{"goal_xy", activeGoalJson()}});
-            abandonActiveGoal("goal_rejected", "global_path_blocked");
+            abandonActiveGoal("goal_rejected",
+                              FailureClass::kGlobalPathBlocked);
             return;
         }
         goal_handle_ = handle;
@@ -831,13 +904,13 @@ private:
         publishPlannerEvent(
             "goal_result", {{"status", status}, {"goal_xy", activeGoalJson()}});
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-            startBacktraceRecovery("nav2_result_failed");
+            startRecoveryTree("nav2_result_failed");
             return;
         }
 
         const auto robot_pose = lookupRobotPose();
         if (!robot_pose) {
-            startBacktraceRecovery("missing_pose_after_success");
+            startRecoveryTree("missing_pose_after_success");
             return;
         }
         const double goal_distance =
@@ -850,7 +923,7 @@ private:
                 {{"goal_xy", activeGoalJson()},
                  {"distance_m", rounded(goal_distance)},
                  {"tolerance_m", rounded(nav2_success_xy_tolerance_m_)}});
-            startBacktraceRecovery("nav2_success_pose_mismatch");
+            startRecoveryTree("nav2_success_pose_mismatch");
             return;
         }
 
@@ -883,7 +956,7 @@ private:
                                 {{"goal_xy", activeFinalGoalJson()},
                                  {"failure_class", "global_path_blocked"},
                                  {"duration_sec", rounded(route_duration)}});
-            blacklistActiveGoal("global_path_blocked");
+            blacklistActiveGoal(FailureClass::kGlobalPathBlocked);
             consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
             clearActiveGoal();
@@ -907,11 +980,30 @@ private:
         if (config.goal_timeout_sec > 0.0 &&
             now - active_goal_sent_time_sec_ >= config.goal_timeout_sec) {
             RCLCPP_WARN(get_logger(), "Abandoning frontier goal after timeout");
-            abandonActiveGoal("timeout", "controller_no_progress");
+            abandonActiveGoal("timeout", FailureClass::kControllerNoProgress);
             return;
         }
         const auto projection =
             core_.projectOntoPath(robot_pose.xy, active_route_path_);
+        if (projection && recovery_.rearBlockedLatchActive()) {
+            const double latch_progress_delta =
+                projection->arc_length - rear_latch_progress_arc_length_;
+            if (latch_progress_delta > 0.0 &&
+                recovery_.noteForwardDisplacement(latch_progress_delta, now)) {
+                publishPlannerEvent(
+                    "rear_blocked_cleared",
+                    {{"stage", recoveryStageName(recovery_.stage())},
+                     {"reason", "forward_displacement"},
+                     {"failure_class", "none"},
+                     {"distance_m", rounded(latch_progress_delta)},
+                     {"goal_xy", activeFinalGoalJson()},
+                     {"active_waypoint_xy", activeGoalJson()},
+                     {"robot_xy", pointJson(robot_pose.xy)}});
+            }
+            if (latch_progress_delta > 0.0) {
+                rear_latch_progress_arc_length_ = projection->arc_length;
+            }
+        }
         if (projection && projection->arc_length - last_progress_arc_length_ >=
                               config.stuck_progress_radius_m) {
             last_progress_arc_length_ = projection->arc_length;
@@ -939,7 +1031,7 @@ private:
             }
             RCLCPP_WARN(get_logger(),
                         "Abandoning frontier goal after no progress");
-            startBacktraceRecovery("no_progress");
+            startRecoveryTree("no_progress");
             return;
         }
         last_alignment_robot_yaw_ = robot_pose.yaw;
@@ -1067,6 +1159,15 @@ private:
     }
 
     void onSpinResponse(const SpinGoalHandle::SharedPtr& handle) {
+        if (recovery_spin_active_) {
+            if (!handle) {
+                finishRecoverySpin("spin_rejected",
+                                   FailureClass::kRecoveryFailed);
+                return;
+            }
+            spin_goal_handle_ = handle;
+            return;
+        }
         if (!spin_recovery_active_) {
             if (handle) {
                 spin_client_->async_cancel_goal(handle);
@@ -1081,6 +1182,16 @@ private:
     }
 
     void onSpinResult(const SpinGoalHandle::WrappedResult& result) {
+        if (recovery_spin_active_) {
+            finishRecoverySpin(
+                result.code == rclcpp_action::ResultCode::SUCCEEDED
+                    ? "spin_completed"
+                    : "spin_failed",
+                result.code == rclcpp_action::ResultCode::SUCCEEDED
+                    ? FailureClass::kNone
+                    : FailureClass::kRecoveryFailed);
+            return;
+        }
         if (!spin_recovery_active_) {
             return;
         }
@@ -1145,6 +1256,321 @@ private:
         }
     }
 
+    bool recoveryActive() const {
+        return recovery_.stage() != RecoveryStage::kNone;
+    }
+
+    nlohmann::json recoveryEventFields(
+        const std::string& reason = "",
+        const FailureClass failure_class = FailureClass::kNone) {
+        nlohmann::json fields{
+            {"stage", recoveryStageName(recovery_.stage())},
+            {"reason", reason.empty() ? recovery_reason_ : reason},
+            {"failure_class", failureClassName(failure_class)},
+            {"goal_xy", activeFinalGoalJson()},
+            {"active_waypoint_xy", activeGoalJson()}};
+        if (const auto pose = lookupRobotPose()) {
+            fields["robot_xy"] = pointJson(pose->xy);
+        }
+        return fields;
+    }
+
+    void resetRecoveryStateOnly() {
+        recovery_.reset();
+        recovery_spin_active_ = false;
+        recovery_clearance_backup_active_ = false;
+        pending_recovery_spin_yaw_ = 0.0;
+        recovery_reason_.clear();
+        recovery_start_xy_.reset();
+    }
+
+    void startRecoveryTree(const std::string& reason) {
+        if (recoveryActive() || recovery_escape_active_) {
+            return;
+        }
+        recovery_reason_ = reason;
+        recovery_start_xy_.reset();
+        if (const auto pose = lookupRobotPose()) {
+            recovery_start_xy_ = pose->xy;
+        }
+        recovery_.start();
+        ++nav_goal_generation_;
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+            goal_handle_.reset();
+        }
+        goal_active_ = false;
+        publishPlannerEvent("recovery_tree_started",
+                            recoveryEventFields(reason));
+        publishPlannerEvent("recovery_stage_started",
+                            recoveryEventFields(reason));
+    }
+
+    void checkRecoveryStateMachine() {
+        switch (recovery_.stage()) {
+            case RecoveryStage::kNone:
+                return;
+            case RecoveryStage::kReobserve:
+                checkRecoveryReobserve();
+                return;
+            case RecoveryStage::kSmallRotation:
+                checkRecoverySmallRotation();
+                return;
+            case RecoveryStage::kForwardArc:
+                checkRecoveryForwardArc();
+                return;
+            case RecoveryStage::kReversePulse:
+                checkRecoveryReversePulse();
+                return;
+            case RecoveryStage::kHardFailed:
+                finishRecoveryHardFail("recovery_exhausted",
+                                       FailureClass::kRecoveryFailed);
+                return;
+        }
+    }
+
+    void checkRecoveryReobserve() {
+        if (!recovery_.tickReobserve()) {
+            return;
+        }
+        publishPlannerEvent("recovery_stage_finished",
+                            recoveryEventFields("reobserve_complete"));
+        const auto robot_pose = lookupRobotPose();
+        if (robot_pose && findAndBeginCandidateRoute(*robot_pose, true)) {
+            resetRecoveryStateOnly();
+            return;
+        }
+        checkRecoverySmallRotation();
+    }
+
+    void checkRecoverySmallRotation() {
+        if (recovery_spin_active_) {
+            checkRecoverySpinTimeout(nowSec());
+            return;
+        }
+        if (recovery_clearance_backup_active_) {
+            return;
+        }
+        const auto yaw = recovery_.nextSmallRotationYaw();
+        if (!yaw) {
+            publishPlannerEvent(
+                "recovery_stage_finished",
+                recoveryEventFields("small_rotation_exhausted"));
+            recovery_.advanceToForwardArc();
+            publishPlannerEvent("recovery_stage_started",
+                                recoveryEventFields("forward_arc"));
+            return;
+        }
+        pending_recovery_spin_yaw_ = *yaw;
+        sendRecoveryClearanceBackup(*yaw);
+    }
+
+    void sendRecoveryClearanceBackup(const double spin_yaw) {
+        const double distance = recovery_config_.recovery_clearance_backup_m;
+        if (distance <= 0.0 || !backup_client_->action_server_is_ready()) {
+            sendRecoverySpin(spin_yaw);
+            return;
+        }
+        recovery_clearance_backup_active_ = true;
+
+        BackUp::Goal goal;
+        goal.target.x = -distance;
+        goal.speed = static_cast<float>(backtrace_config_.backup_speed_mps);
+        goal.time_allowance = rclcpp::Duration::from_seconds(
+            backtrace_config_.backup_time_allowance_sec);
+
+        publishPlannerEvent(
+            "recovery_clearance_backup_started",
+            {{"stage", recoveryStageName(RecoveryStage::kSmallRotation)},
+             {"distance_m", rounded(distance)},
+             {"spin_yaw", rounded(spin_yaw)},
+             {"goal_xy", activeFinalGoalJson()}});
+
+        rclcpp_action::Client<BackUp>::SendGoalOptions options;
+        options.goal_response_callback =
+            [this](const BackUpGoalHandle::SharedPtr& handle) {
+                onClearanceBackupGoalResponse(handle);
+            };
+        options.result_callback =
+            [this](const BackUpGoalHandle::WrappedResult& result) {
+                onClearanceBackupResult(result);
+            };
+        clearance_backup_goal_handle_.reset();
+        backup_client_->async_send_goal(goal, options);
+    }
+
+    void onClearanceBackupGoalResponse(
+        const BackUpGoalHandle::SharedPtr& handle) {
+        if (!recovery_clearance_backup_active_) {
+            if (handle) {
+                backup_client_->async_cancel_goal(handle);
+            }
+            return;
+        }
+        if (!handle) {
+            recovery_clearance_backup_active_ = false;
+            sendRecoverySpin(pending_recovery_spin_yaw_);
+            return;
+        }
+        clearance_backup_goal_handle_ = handle;
+    }
+
+    void onClearanceBackupResult(
+        const BackUpGoalHandle::WrappedResult& result) {
+        if (!recovery_clearance_backup_active_) {
+            return;
+        }
+        clearance_backup_goal_handle_.reset();
+        recovery_clearance_backup_active_ = false;
+        const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED;
+        publishPlannerEvent(
+            "recovery_clearance_backup_finished",
+            {{"stage", recoveryStageName(RecoveryStage::kSmallRotation)},
+             {"success", ok},
+             {"goal_xy", activeFinalGoalJson()}});
+        sendRecoverySpin(pending_recovery_spin_yaw_);
+    }
+
+    void sendRecoverySpin(const double yaw) {
+        if (!spin_client_->action_server_is_ready()) {
+            publishPlannerEvent(
+                "recovery_stage_finished",
+                recoveryEventFields("spin_unavailable",
+                                    FailureClass::kRecoveryFailed));
+            recovery_.advanceToForwardArc();
+            publishPlannerEvent("recovery_stage_started",
+                                recoveryEventFields("forward_arc"));
+            return;
+        }
+        recovery_spin_active_ = true;
+        spin_started_sec_ = nowSec();
+        if (goal_handle_) {
+            nav_client_->async_cancel_goal(goal_handle_);
+            goal_handle_.reset();
+        }
+
+        Spin::Goal spin_goal;
+        spin_goal.target_yaw = static_cast<float>(yaw);
+        spin_goal.time_allowance = rclcpp::Duration::from_seconds(
+            core_.config().alignment_spin_time_allowance_sec);
+        publishPlannerEvent(
+            "recovery_stage_started",
+            {{"stage", recoveryStageName(RecoveryStage::kSmallRotation)},
+             {"reason", recovery_reason_},
+             {"failure_class", "none"},
+             {"commanded_yaw", rounded(yaw)},
+             {"attempt", recovery_.spinAttempts()},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()}});
+
+        rclcpp_action::Client<Spin>::SendGoalOptions options;
+        options.goal_response_callback =
+            [this](const SpinGoalHandle::SharedPtr& handle) {
+                onSpinResponse(handle);
+            };
+        options.result_callback =
+            [this](const SpinGoalHandle::WrappedResult& result) {
+                onSpinResult(result);
+            };
+        spin_client_->async_send_goal(spin_goal, options);
+    }
+
+    void checkRecoverySpinTimeout(const double now) {
+        if (now - spin_started_sec_ <
+            core_.config().alignment_spin_time_allowance_sec +
+                kSpinTransportMarginSec) {
+            return;
+        }
+        if (spin_goal_handle_) {
+            spin_client_->async_cancel_goal(spin_goal_handle_);
+        }
+        finishRecoverySpin("spin_timeout", FailureClass::kRecoveryFailed);
+    }
+
+    void finishRecoverySpin(const std::string& reason, const FailureClass fc) {
+        const double elapsed = std::max(0.0, nowSec() - spin_started_sec_);
+        recovery_spin_active_ = false;
+        spin_goal_handle_.reset();
+        spin_started_sec_ = 0.0;
+        publishPlannerEvent(
+            "recovery_stage_finished",
+            {{"stage", recoveryStageName(RecoveryStage::kSmallRotation)},
+             {"reason", reason},
+             {"failure_class", failureClassName(fc)},
+             {"elapsed", rounded(elapsed)},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()}});
+        recovery_.beginReobserve();
+        publishPlannerEvent("recovery_stage_started",
+                            recoveryEventFields("post_spin_reobserve"));
+    }
+
+    void checkRecoveryForwardArc() {
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
+            recovery_.advanceToReversePulse();
+            publishPlannerEvent("recovery_stage_started",
+                                recoveryEventFields("reverse_pulse"));
+            return;
+        }
+        if (triggerForwardEscape(*robot_pose)) {
+            resetRecoveryStateOnly();
+            return;
+        }
+        publishPlannerEvent("recovery_stage_finished",
+                            recoveryEventFields("forward_arc_blocked",
+                                                FailureClass::kRecoveryFailed));
+        recovery_.advanceToReversePulse();
+        publishPlannerEvent("recovery_stage_started",
+                            recoveryEventFields("reverse_pulse"));
+    }
+
+    void checkRecoveryReversePulse() {
+        if (backtrace_recovery_active_) {
+            checkBacktraceRecovery();
+            return;
+        }
+        const double now = nowSec();
+        const bool recent_reverse_blocked =
+            last_reverse_blocked_sec_ > 0.0 &&
+            now - last_reverse_blocked_sec_ <= kRecentReverseBlockedWindowSec;
+        if (recovery_.rearBlockedLatchActive() || recent_reverse_blocked) {
+            publishPlannerEvent(
+                "reverse_preflight_failed",
+                recoveryEventFields(recovery_.rearBlockedLatchActive()
+                                        ? "rear_blocked_latched"
+                                        : "recent_reverse_blocked",
+                                    FailureClass::kReverseUnsafe));
+            finishRecoveryHardFail("reverse_preflight_failed",
+                                   FailureClass::kReverseUnsafe);
+            return;
+        }
+        startBacktraceRecovery(recovery_reason_);
+    }
+
+    void finishRecoveryHardFail(const std::string& reason,
+                                const FailureClass fc) {
+        recovery_.hardFail();
+        publishPlannerEvent("recovery_hard_failed",
+                            recoveryEventFields(reason, fc));
+        markActiveGoalUnsafe(fc == FailureClass::kReverseUnsafe
+                                 ? "REVERSE_UNSAFE"
+                                 : "STALL_OR_SLIP",
+                             fc);
+        clearActiveGoal();
+    }
+
+    void latchRearBlocked(const std::string& reason) {
+        recovery_.latchRearBlocked(nowSec());
+        rear_latch_progress_arc_length_ = last_progress_arc_length_;
+        publishPlannerEvent("rear_blocked_latched",
+                            {{"stage", recoveryStageName(recovery_.stage())},
+                             {"reason", reason},
+                             {"failure_class", "reverse_unsafe"},
+                             {"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()}});
+    }
+
     void startBacktraceRecovery(const std::string& reason) {
         if (backtrace_recovery_active_) {
             return;
@@ -1159,12 +1585,12 @@ private:
                  {"reason", reason},
                  {"goal_xy", activeFinalGoalJson()}});
             consecutive_backtrace_stall_count_ = 0;
-            abandonActiveGoal(reason, "recovery_failed");
+            abandonActiveGoal(reason, FailureClass::kRecoveryFailed);
             return;
         }
         if (!backtrace_planner_.canStart(breadcrumb_trail_) ||
             !backup_client_->action_server_is_ready()) {
-            abandonActiveGoal(reason, "recovery_failed");
+            abandonActiveGoal(reason, FailureClass::kRecoveryFailed);
             return;
         }
 
@@ -1211,7 +1637,9 @@ private:
                         backup_goal_handle_.reset();
                     }
                     backtrace_backup_active_ = false;
-                    finishBacktraceRecovery(false, "backup_stalled");
+                    latchRearBlocked("backup_stalled");
+                    finishBacktraceRecovery(false, "backup_stalled",
+                                            FailureClass::kLocalHazard);
                     return;
                 }
             }
@@ -1230,17 +1658,18 @@ private:
     void sendNextBacktraceSegment() {
         const auto robot_pose = lookupRobotPose();
         if (!robot_pose) {
-            finishBacktraceRecovery(false, "missing_pose");
+            finishBacktraceRecovery(false, "missing_pose",
+                                    FailureClass::kRecoveryFailed);
             return;
         }
         const auto distance = backtrace_planner_.nextBackupDistance(
             breadcrumb_trail_, robot_pose->xy);
         if (!distance) {
-            finishBacktraceRecovery(true, "complete");
+            finishBacktraceRecovery(true, "complete", FailureClass::kNone);
             return;
         }
         if (!backtrace_planner_.noteSegmentStarted(robot_pose->xy, *distance)) {
-            finishBacktraceRecovery(true, "segment_limit");
+            finishBacktraceRecovery(true, "segment_limit", FailureClass::kNone);
             return;
         }
 
@@ -1278,7 +1707,8 @@ private:
         }
         if (!handle) {
             backtrace_backup_active_ = false;
-            finishBacktraceRecovery(false, "backup_rejected");
+            finishBacktraceRecovery(false, "backup_rejected",
+                                    FailureClass::kRecoveryFailed);
             return;
         }
         backup_goal_handle_ = handle;
@@ -1291,42 +1721,75 @@ private:
         backup_goal_handle_.reset();
         backtrace_backup_active_ = false;
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-            finishBacktraceRecovery(false, "backup_failed");
+            finishBacktraceRecovery(false, "backup_failed",
+                                    FailureClass::kRecoveryFailed);
             return;
         }
         const auto robot_pose = lookupRobotPose();
         if (!robot_pose) {
-            finishBacktraceRecovery(false, "missing_pose_after_backup");
+            finishBacktraceRecovery(false, "missing_pose_after_backup",
+                                    FailureClass::kRecoveryFailed);
             return;
         }
-        if (!backtrace_planner_.noteSegmentFinished(robot_pose->xy)) {
-            finishBacktraceRecovery(false, "insufficient_motion");
+        const auto segment_result =
+            backtrace_planner_.noteSegmentFinished(robot_pose->xy);
+        if (!segment_result.moved_enough) {
+            publishPlannerEvent(
+                "rear_slip_detected",
+                {{"stage", recoveryStageName(recovery_.stage())},
+                 {"reason", "insufficient_motion"},
+                 {"failure_class", "stall_or_slip"},
+                 {"actual_displacement_m",
+                  rounded(segment_result.actual_displacement_m)},
+                 {"commanded_m", rounded(segment_result.commanded_m)},
+                 {"ratio", rounded(segment_result.ratio)},
+                 {"goal_xy", activeFinalGoalJson()},
+                 {"active_waypoint_xy", activeGoalJson()}});
+            latchRearBlocked("insufficient_reverse_motion");
+            finishBacktraceRecovery(false, "backup_stalled",
+                                    FailureClass::kLocalHazard);
+            return;
+        }
+        if (segment_result.ratio < backtrace_config_.reverse_motion_ratio_min) {
+            publishPlannerEvent(
+                "rear_slip_detected",
+                {{"stage", recoveryStageName(recovery_.stage())},
+                 {"reason", "weak_reverse_motion"},
+                 {"failure_class", "stall_or_slip"},
+                 {"actual_displacement_m",
+                  rounded(segment_result.actual_displacement_m)},
+                 {"commanded_m", rounded(segment_result.commanded_m)},
+                 {"ratio", rounded(segment_result.ratio)},
+                 {"ratio_min",
+                  rounded(backtrace_config_.reverse_motion_ratio_min)},
+                 {"goal_xy", activeFinalGoalJson()},
+                 {"active_waypoint_xy", activeGoalJson()}});
+            latchRearBlocked("weak_reverse_motion");
+            finishBacktraceRecovery(false, "rear_slip_detected",
+                                    FailureClass::kStallOrSlip);
             return;
         }
         sendNextBacktraceSegment();
     }
 
-    void finishBacktraceRecovery(const bool success,
-                                 const std::string& reason) {
-        const bool is_stall = (reason == "backup_stalled");
-        const std::string failure_class = success    ? "none"
-                                          : is_stall ? "local_hazard"
-                                                     : "recovery_failed";
+    void finishBacktraceRecovery(const bool success, const std::string& reason,
+                                 const FailureClass fc) {
         publishPlannerEvent(
             success ? "backtrace_recovery_finished"
                     : "backtrace_recovery_failed",
             {{"reason", reason},
-             {"failure_class", failure_class},
+             {"failure_class", failureClassName(fc)},
              {"trigger", backtrace_reason_},
              {"segments", backtrace_planner_.state().segments_attempted},
              {"goal_xy", activeFinalGoalJson()},
              {"active_waypoint_xy", activeGoalJson()}});
-        blacklistActiveGoal(success ? "controller_no_progress" : failure_class);
+        blacklistActiveGoal(success ? FailureClass::kControllerNoProgress : fc);
         if (success) {
             consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
         }
-        else if (is_stall) {
+        else if (fc == FailureClass::kLocalHazard ||
+                 fc == FailureClass::kStallOrSlip) {
             ++consecutive_backtrace_stall_count_;
         }
         else {
@@ -1340,9 +1803,10 @@ private:
         clearActiveGoal();
     }
 
-    void abandonActiveGoal(const std::string& reason,
-                           const std::string& failure_class = "") {
-        if (reason == "REVERSE_UNSAFE") {
+    void abandonActiveGoal(
+        const std::string& reason,
+        const FailureClass failure_class = FailureClass::kRecoveryFailed) {
+        if (failure_class == FailureClass::kReverseUnsafe) {
             if (nowSec() - active_waypoint_sent_time_sec_ <
                 kImmediateReverseBlockWindowSec) {
                 ++consecutive_immediate_reverse_streak_;
@@ -1351,15 +1815,12 @@ private:
         else {
             consecutive_immediate_reverse_streak_ = 0;
         }
-        publishPlannerEvent(
-            "route_abandoned",
-            {{"reason", reason},
-             {"failure_class",
-              failure_class.empty() ? "recovery_failed" : failure_class},
-             {"goal_xy", activeFinalGoalJson()},
-             {"active_waypoint_xy", activeGoalJson()}});
-        blacklistActiveGoal(failure_class.empty() ? "recovery_failed"
-                                                  : failure_class);
+        publishPlannerEvent("route_abandoned",
+                            {{"reason", reason},
+                             {"failure_class", failureClassName(failure_class)},
+                             {"goal_xy", activeFinalGoalJson()},
+                             {"active_waypoint_xy", activeGoalJson()}});
+        blacklistActiveGoal(failure_class);
         if (goal_handle_) {
             nav_client_->async_cancel_goal(goal_handle_);
         }
@@ -1398,6 +1859,12 @@ private:
     }
 
     void clearActiveGoal() {
+        if (clearance_backup_goal_handle_) {
+            backup_client_->async_cancel_goal(clearance_backup_goal_handle_);
+        }
+        clearance_backup_goal_handle_.reset();
+        recovery_clearance_backup_active_ = false;
+        pending_recovery_spin_yaw_ = 0.0;
         if (backup_goal_handle_) {
             backup_client_->async_cancel_goal(backup_goal_handle_);
         }
@@ -1415,19 +1882,23 @@ private:
         }
         spin_goal_handle_.reset();
         spin_recovery_active_ = false;
+        recovery_spin_active_ = false;
         spin_started_sec_ = 0.0;
         alignment_spin_attempts_ = 0;
+        resetRecoveryStateOnly();
         active_goal_.reset();
         active_route_.clear();
         active_route_index_ = 0;
         active_final_goal_.reset();
         active_route_path_.clear();
         last_progress_arc_length_ = 0.0;
+        rear_latch_progress_arc_length_ = 0.0;
         active_goal_hysteresis_retries_ = 0;
         active_waypoint_sent_time_sec_ = 0.0;
         last_alignment_robot_yaw_.reset();
         breadcrumb_trail_.clear();
         consecutive_reverse_blocked_ = 0;
+        recovery_escape_active_ = false;
     }
 
     void clearPendingRouteSelection() {
@@ -1442,14 +1913,14 @@ private:
         validation_route_.clear();
     }
 
-    void blacklistActiveGoal(const std::string& failure_class = "") {
+    void blacklistActiveGoal(const FailureClass failure_class) {
         if (!active_final_goal_) {
             return;
         }
         recordGoalFailure(*active_final_goal_, failure_class);
     }
 
-    void recordValidationFailure(const std::string& failure_class) {
+    void recordValidationFailure(const FailureClass failure_class) {
         if (!nav2_validation_blacklist_enabled_ ||
             !validation_final_candidate_) {
             return;
@@ -1458,12 +1929,9 @@ private:
     }
 
     void recordGoalFailure(const WorldPoint& goal_xy,
-                           const std::string& failure_class = "") {
-        const int failure_weight = failure_class == "local_hazard" ||
-                                           failure_class == "recovery_failed"
-                                       ? 2
-                                       : 1;
-        core_.recordGoalFailure(goal_xy, nowSec(), failure_weight);
+                           const FailureClass failure_class) {
+        core_.recordGoalFailure(goal_xy, nowSec(),
+                                blacklistWeight(failure_class));
         const auto record_index = core_.findGoalAttemptIndex(goal_xy);
         if (!record_index) {
             return;
@@ -1473,12 +1941,9 @@ private:
             "goal_attempt_updated",
             {{"goal_xy", pointJson(record.xy)},
              {"failures", record.failures},
-             {"failure_class",
-              failure_class.empty() ? "unknown" : failure_class},
+             {"failure_class", failureClassName(failure_class)},
              {"blacklisted",
               record.failures >= core_.config().failed_goal_max_retries},
-             {"blacklist_reason",
-              failure_class.empty() ? "unknown" : failure_class},
              {"blacklist_radius_m",
               rounded(core_.config().failed_goal_blacklist_radius_m)},
              {"expires_at_sec", rounded(record.expires_at_sec)}});
@@ -1563,11 +2028,31 @@ private:
     }
 
     void handleReverseBlockedEvent(const std::string& data) {
-        if (!goal_active_ || backtrace_recovery_active_) {
-            return;
-        }
         const auto event = parseEventName(data);
         if (!event || *event != "reverse_blocked") {
+            return;
+        }
+        last_reverse_blocked_sec_ = nowSec();
+        if (recoveryActive()) {
+            latchRearBlocked("reverse_blocked");
+            if (backup_goal_handle_) {
+                backup_client_->async_cancel_goal(backup_goal_handle_);
+                backup_goal_handle_.reset();
+            }
+            backtrace_backup_active_ = false;
+            if (backtrace_recovery_active_) {
+                markActiveGoalUnsafe("REVERSE_UNSAFE",
+                                     FailureClass::kReverseUnsafe);
+                finishBacktraceRecovery(false, "REVERSE_UNSAFE",
+                                        FailureClass::kReverseUnsafe);
+            }
+            else {
+                finishRecoveryHardFail("REVERSE_UNSAFE",
+                                       FailureClass::kReverseUnsafe);
+            }
+            return;
+        }
+        if (!goal_active_) {
             return;
         }
         ++consecutive_reverse_blocked_;
@@ -1576,8 +2061,30 @@ private:
             // (backward motion) which the bridge will also block, so skip
             // directly to goal abandonment rather than wasting time on a
             // doomed backup sequence.
-            markActiveGoalUnsafe("REVERSE_UNSAFE");
-            abandonActiveGoal("REVERSE_UNSAFE", "reverse_unsafe");
+            latchRearBlocked("reverse_blocked");
+            markActiveGoalUnsafe("REVERSE_UNSAFE",
+                                 FailureClass::kReverseUnsafe);
+            abandonActiveGoal("REVERSE_UNSAFE", FailureClass::kReverseUnsafe);
+            // consecutive_immediate_reverse_streak_ was just incremented inside
+            // abandonActiveGoal.  When the count reaches the churn threshold it
+            // means every recently-chosen frontier triggered an immediate
+            // reverse block — the robot's current pose is the trap, not any
+            // individual frontier.  Skip picking yet another doomed candidate
+            // and instead drive the robot forward to break the deadlock.
+            if (consecutive_immediate_reverse_streak_ >=
+                kConsecutiveReverseChurnEscapeThreshold) {
+                const int streak = consecutive_immediate_reverse_streak_;
+                consecutive_immediate_reverse_streak_ = 0;
+                const auto robot_pose = lookupRobotPose();
+                publishPlannerEvent(
+                    "startup_reverse_churn_detected",
+                    {{"streak", streak},
+                     {"robot_xy", robot_pose ? pointJson(robot_pose->xy)
+                                             : nlohmann::json(nullptr)}});
+                if (!robot_pose || !triggerForwardEscape(*robot_pose)) {
+                    startRecoveryTree("startup_reverse_churn");
+                }
+            }
         }
     }
 
@@ -1589,13 +2096,15 @@ private:
         if (!event || *event != "stall_or_slip") {
             return;
         }
-        markActiveGoalUnsafe("STALL_OR_SLIP");
-        abandonActiveGoal("STALL_OR_SLIP", "stall_or_slip");
+        markActiveGoalUnsafe("STALL_OR_SLIP", FailureClass::kStallOrSlip);
+        startRecoveryTree("stall_or_slip");
     }
 
-    void triggerForwardEscape(const RobotPose& robot_pose) {
-        const auto escape_yaw = core_.findClearestEscapeDirection(
-            robot_pose.xy, kForwardEscapeDistanceM);
+    bool triggerForwardEscape(const RobotPose& robot_pose) {
+        const double distance =
+            recovery_config_.recovery_forward_escape_distance_m;
+        const auto escape_yaw =
+            core_.findClearestEscapeDirection(robot_pose.xy, distance);
         if (!escape_yaw) {
             publishPlannerEvent(
                 "escape_fully_blocked",
@@ -1603,11 +2112,11 @@ private:
                  {"streak", consecutive_immediate_reverse_streak_}});
             consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
-            return;
+            return false;
         }
 
         const WorldPoint escape_xy =
-            projectPoint(robot_pose.xy, *escape_yaw, kForwardEscapeDistanceM);
+            projectPoint(robot_pose.xy, *escape_yaw, distance);
         publishPlannerEvent(
             "forward_escape_started",
             {{"robot_xy", pointJson(robot_pose.xy)},
@@ -1626,14 +2135,15 @@ private:
         wp.final = true;
 
         startRoute(robot_pose.xy, escape_cand, {wp});
+        recovery_escape_active_ = true;
+        return true;
     }
 
-    void markActiveGoalUnsafe(const std::string& reason) {
-        const std::string failure_class =
-            reason == "REVERSE_UNSAFE" ? "reverse_unsafe" : "stall_or_slip";
+    void markActiveGoalUnsafe(const std::string& reason,
+                              const FailureClass failure_class) {
         publishPlannerEvent("frontier_marked_unsafe",
                             {{"reason", reason},
-                             {"failure_class", failure_class},
+                             {"failure_class", failureClassName(failure_class)},
                              {"goal_xy", activeFinalGoalJson()},
                              {"active_waypoint_xy", activeGoalJson()}});
     }
@@ -1754,6 +2264,7 @@ private:
     double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
     double last_progress_arc_length_ = 0.0;
+    double rear_latch_progress_arc_length_ = 0.0;
     int active_goal_hysteresis_retries_ = 0;
     std::optional<double> last_alignment_robot_yaw_;
     GoalHandle::SharedPtr goal_handle_;
@@ -1776,6 +2287,16 @@ private:
     int consecutive_immediate_reverse_streak_ = 0;
     int consecutive_backtrace_stall_count_ = 0;
     BackUpGoalHandle::SharedPtr backup_goal_handle_;
+    RecoveryStateMachineConfig recovery_config_;
+    RecoveryStateMachine recovery_;
+    bool recovery_spin_active_ = false;
+    bool recovery_clearance_backup_active_ = false;
+    double pending_recovery_spin_yaw_ = 0.0;
+    BackUpGoalHandle::SharedPtr clearance_backup_goal_handle_;
+    bool recovery_escape_active_ = false;
+    std::string recovery_reason_;
+    std::optional<WorldPoint> recovery_start_xy_;
+    double last_reverse_blocked_sec_ = -1.0;
 
     bool nav2_validation_enabled_ = true;
     bool nav2_validation_blacklist_enabled_ = true;

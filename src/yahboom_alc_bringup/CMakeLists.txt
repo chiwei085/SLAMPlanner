@@ -40,6 +40,7 @@ add_library(yahboom_alc_bringup_lib
   src/planner_runtime_logger.cpp
   src/r2_cmd_vel_bridge.cpp
   src/r2_stall_detector_core.cpp
+  src/recovery_state_machine.cpp
 )
 set_target_properties(yahboom_alc_bringup_lib PROPERTIES UNITY_BUILD ON)
 target_include_directories(yahboom_alc_bringup_lib
@@ -205,6 +206,13 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_backtrace_recovery
     nav_msgs
+  )
+
+  ament_add_gtest(test_recovery_state_machine
+    test/test_recovery_state_machine.cpp
+  )
+  target_link_libraries(test_recovery_state_machine
+    yahboom_alc_bringup_lib
   )
 
   ament_add_gtest(test_planner_event

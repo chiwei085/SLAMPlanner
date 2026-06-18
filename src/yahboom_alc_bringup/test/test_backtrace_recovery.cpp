@@ -18,6 +18,8 @@ BacktraceRecoveryConfig testConfig() {
     config.backup_speed_mps = 0.04;
     config.max_segments = 4;
     config.min_actual_displacement_m = 0.03;
+    config.backup_stall_check_sec = 1.0;
+    config.reverse_motion_ratio_min = 0.6;
     return config;
 }
 
@@ -71,15 +73,47 @@ TEST(BacktraceRecovery, LimitsSegmentsAndDetectsInsufficientMotion) {
     const auto distance = planner.nextBackupDistance(trail, {0.2, 0.0});
     ASSERT_TRUE(distance);
     EXPECT_TRUE(planner.noteSegmentStarted({0.2, 0.0}, requireValue(distance)));
-    EXPECT_FALSE(planner.noteSegmentFinished({0.18, 0.0}));
+    const auto stalled = planner.noteSegmentFinished({0.18, 0.0});
+    EXPECT_FALSE(stalled.moved_enough);
+    EXPECT_NEAR(stalled.actual_displacement_m, 0.02, 1e-9);
+    EXPECT_NEAR(stalled.commanded_m, requireValue(distance), 1e-9);
+    EXPECT_NEAR(stalled.ratio, 0.2, 1e-9);
 
     planner.reset();
     for (int i = 0; i < config.max_segments; ++i) {
         EXPECT_TRUE(
             planner.noteSegmentStarted({0.2, 0.0}, config.backup_step_m));
-        EXPECT_TRUE(planner.noteSegmentFinished({0.16, 0.0}));
+        const auto result = planner.noteSegmentFinished({0.10, 0.0});
+        EXPECT_TRUE(result.moved_enough);
+        EXPECT_NEAR(result.actual_displacement_m, 0.10, 1e-9);
+        EXPECT_NEAR(result.commanded_m, config.backup_step_m, 1e-9);
+        EXPECT_NEAR(result.ratio, 1.0, 1e-9);
     }
     EXPECT_FALSE(planner.nextBackupDistance(trail, {0.2, 0.0}));
+}
+
+TEST(BacktraceRecovery, ReportsSlipRatioForSuccessfulButWeakMotion) {
+    const auto config = testConfig();
+    BacktraceRecoveryPlanner planner(config);
+
+    ASSERT_TRUE(planner.noteSegmentStarted({0.0, 0.0}, config.backup_step_m));
+    const auto result = planner.noteSegmentFinished({0.05, 0.0});
+
+    EXPECT_TRUE(result.moved_enough);
+    EXPECT_NEAR(result.actual_displacement_m, 0.05, 1e-9);
+    EXPECT_NEAR(result.commanded_m, 0.10, 1e-9);
+    EXPECT_LT(result.ratio, config.reverse_motion_ratio_min);
+}
+
+TEST(BacktraceRecovery, DefaultsAllowFastStallCheckAfterMinimumMotionTime) {
+    BacktraceRecoveryConfig config;
+
+    ASSERT_GT(config.backup_speed_mps, 0.0);
+    EXPECT_GE(config.backup_stall_check_sec,
+              config.min_actual_displacement_m / config.backup_speed_mps);
+    EXPECT_LT(config.min_actual_displacement_m / config.backup_step_m,
+              config.reverse_motion_ratio_min);
+    EXPECT_GE(config.backup_step_m * config.max_segments, 0.40);
 }
 
 TEST(BacktraceRecovery, GoalToleranceBoundaryMatchesPlannerPolicy) {

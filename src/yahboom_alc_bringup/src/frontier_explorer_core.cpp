@@ -123,6 +123,8 @@ CandidateResult FrontierExplorerCore::findCandidatesOnce(
         std::min(config_.path_clearance_cells,
                  std::max(0, config_.exploratory_path_clearance_cells));
     const auto blocked = makeBlockedGrid(width, height, exploratory_clearance);
+    const auto strict_blocked =
+        makeBlockedGrid(width, height, config_.path_clearance_cells);
     const auto robot_cell = worldToMap(robot_xy.first, robot_xy.second);
     if (!robot_cell) {
         return result;
@@ -134,8 +136,9 @@ CandidateResult FrontierExplorerCore::findCandidatesOnce(
     }
 
     for (const auto& cluster : clusters) {
-        auto candidate = makeCandidate(cluster, *start_cell, robot_xy, blocked,
-                                       width, height, result.counts, robot_yaw);
+        auto candidate = makeCandidateImpl(cluster, *start_cell, robot_xy,
+                                           blocked, strict_blocked, width,
+                                           height, result.counts, robot_yaw);
         if (!candidate) {
             continue;
         }
@@ -149,6 +152,17 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
     const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
     const int width, const int height, FrontierCounts& counts,
     std::optional<double> robot_yaw) {
+    const auto strict_blocked =
+        makeBlockedGrid(width, height, config_.path_clearance_cells);
+    return makeCandidateImpl(cluster, start_cell, robot_xy, blocked,
+                             strict_blocked, width, height, counts, robot_yaw);
+}
+
+std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
+    const std::vector<Cell>& cluster, const Cell& start_cell,
+    const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
+    const std::vector<std::uint8_t>& strict_blocked, const int width,
+    const int height, FrontierCounts& counts, std::optional<double> robot_yaw) {
     const auto goal_options =
         goalOptionsForCluster(cluster, blocked, width, height);
     if (goal_options.empty()) {
@@ -160,8 +174,6 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
     const auto axis = clusterAxis(cluster);
     const auto start_xy =
         mapToWorldUnchecked(start_cell.first, start_cell.second);
-    const auto strict_blocked =
-        makeBlockedGrid(width, height, config_.path_clearance_cells);
     for (const auto& goal_cell : goal_options) {
         const auto goal_xy =
             mapToWorldUnchecked(goal_cell.first, goal_cell.second);
@@ -377,18 +389,16 @@ std::vector<Cell> FrontierExplorerCore::goalOptionsForCluster(
 
 std::vector<std::uint8_t> FrontierExplorerCore::makeBlockedGrid(
     const int width, const int height, const int clearance) const {
-    std::vector<std::uint8_t> occupied(map_.data.size(), false);
-    std::vector<std::uint8_t> inflated(map_.data.size(), false);
+    std::vector<std::uint8_t> inflated(map_.data.size());
     for (std::size_t i = 0; i < map_.data.size(); ++i) {
         inflated[i] = !isFreeValue(map_.data[i]);
-        occupied[i] = isOccupiedValue(map_.data[i]);
     }
     if (clearance <= 0) {
         return inflated;
     }
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            if (!occupied[index(x, y, width)]) {
+            if (!isOccupiedValue(map_.data[index(x, y, width)])) {
                 continue;
             }
             for (int dy = -clearance; dy <= clearance; ++dy) {

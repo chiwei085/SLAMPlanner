@@ -114,19 +114,29 @@ bool BacktraceRecoveryPlanner::noteSegmentStarted(
         return false;
     }
     state_.segment_start_xy = robot_xy;
+    state_.last_segment_commanded_m = actual_distance;
     ++state_.segments_attempted;
     state_.distance_commanded_m += actual_distance;
     return true;
 }
 
-bool BacktraceRecoveryPlanner::noteSegmentFinished(const WorldPoint& robot_xy) {
+BacktraceSegmentResult BacktraceRecoveryPlanner::noteSegmentFinished(
+    const WorldPoint& robot_xy) {
+    BacktraceSegmentResult result;
+    result.commanded_m = state_.last_segment_commanded_m;
     if (!state_.segment_start_xy) {
-        return false;
+        return result;
     }
-    const bool moved = distanceBetween(*state_.segment_start_xy, robot_xy) >=
-                       config_.min_actual_displacement_m;
+    result.actual_displacement_m =
+        distanceBetween(*state_.segment_start_xy, robot_xy);
+    result.moved_enough =
+        result.actual_displacement_m >= config_.min_actual_displacement_m;
+    if (result.commanded_m > 0.0) {
+        result.ratio = result.actual_displacement_m / result.commanded_m;
+    }
     state_.segment_start_xy.reset();
-    return moved;
+    state_.last_segment_commanded_m = 0.0;
+    return result;
 }
 
 }  // namespace yahboom_alc_bringup
