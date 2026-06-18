@@ -20,7 +20,8 @@ struct BacktraceRecoveryConfig
     int max_segments = 4;
     double min_actual_displacement_m = 0.03;
     double cancel_timeout_sec = 1.0;
-    double backup_stall_check_sec = 1.5;
+    double backup_stall_check_sec = 1.0;
+    double reverse_motion_ratio_min = 0.6;
     std::string backup_action = "/backup";
 };
 
@@ -52,7 +53,16 @@ struct BacktraceRecoveryState
 {
     int segments_attempted = 0;
     double distance_commanded_m = 0.0;
+    double last_segment_commanded_m = 0.0;
     std::optional<WorldPoint> segment_start_xy;
+};
+
+struct BacktraceSegmentResult
+{
+    bool moved_enough = false;
+    double actual_displacement_m = 0.0;
+    double commanded_m = 0.0;
+    double ratio = 0.0;
 };
 
 class BacktraceRecoveryPlanner
@@ -66,7 +76,7 @@ public:
     std::optional<double> nextBackupDistance(const BreadcrumbTrail& trail,
                                              const WorldPoint& robot_xy) const;
     bool noteSegmentStarted(const WorldPoint& robot_xy, double actual_distance);
-    bool noteSegmentFinished(const WorldPoint& robot_xy);
+    BacktraceSegmentResult noteSegmentFinished(const WorldPoint& robot_xy);
     const BacktraceRecoveryState& state() const { return state_; }
 
 private:

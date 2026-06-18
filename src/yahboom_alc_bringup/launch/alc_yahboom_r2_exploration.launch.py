@@ -41,7 +41,10 @@ NAV2_RUNTIME_METADATA = {
     "controller_allow_reversing": True,
     "controller_use_rotate_to_heading": False,
     "local_inflation_radius": 0.45,
-    "global_inflation_radius": 0.45,
+    "global_inflation_radius": 0.25,
+    "global_depth_voxel_layer": False,
+    "local_depth_min_obstacle_height": 0.01,
+    "local_depth_observation_persistence": 0.4,
     "local_footprint_padding": 0.02,
     "global_footprint_padding": 0.02,
     "bridge_reverse": {
@@ -129,6 +132,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "min_frontier_size": 14,
                     "min_clearance_cells": 2,
                     "path_clearance_cells": 2,
+                    "exploratory_path_clearance_cells": 1,
                     "min_frontier_distance": 0.45,
                     "max_frontier_distance": 3.5,
                     "frontier_goal_search_radius": 0.6,
@@ -138,7 +142,10 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "information_weight": 0.02,
                     "frontier_size_weight": 0.02,
                     "unreachable_goal_penalty": 3.0,
+                    "soft_unreachable_penalty": 1.5,
                     "allow_unreachable_goal": False,
+                    "nav2_validation_required_for_final_goal": True,
+                    "approach_offset_m": 0.4,
                     "goal_update_distance": 0.5,
                     "goal_publish_period": 3.0,
                     **ROBOT_FOOTPRINT_PARAMS,
@@ -182,13 +189,21 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "backtrace_breadcrumb_max_distance_m": 2.0,
                     "backtrace_breadcrumb_max_age_sec": 90.0,
                     "backtrace_backup_step_m": 0.10,
-                    "backtrace_backup_speed_mps": 0.04,
+                    "backtrace_backup_speed_mps": 0.08,
                     "backtrace_backup_time_allowance_sec": 5.0,
                     "backtrace_max_segments": 4,
                     "backtrace_min_actual_displacement_m": 0.03,
                     "backtrace_cancel_timeout_sec": 1.0,
-                    "backtrace_backup_stall_check_sec": 1.5,
+                    "backtrace_backup_stall_check_sec": 1.0,
+                    "backtrace_reverse_motion_ratio_min": 0.6,
                     "backtrace_backup_action": "/backup",
+                    "recovery_reobserve_cycles": 1,
+                    "recovery_small_spin_yaw_rad": 0.349066,
+                    "recovery_small_spin_attempts": 2,
+                    "recovery_forward_escape_distance_m": 1.5,
+                    "rear_blocked_min_latch_sec": 15.0,
+                    "rear_blocked_clear_forward_displacement_m": 0.25,
+                    "recovery_clearance_backup_m": 0.30,
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }
@@ -284,14 +299,15 @@ def generate_launch_description():
         parameters=[imu_filter_config],
     )
 
-    ekf_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("robot_localization"),
-                "launch",
-                "ekf_x1_x3_launch.py",
-            )
-        )
+    ekf_node = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ekf_filter_node",
+        output="screen",
+        parameters=[
+            os.path.join(yahboom_alc_share, "params", "ekf_r2.yaml")
+        ],
+        remappings=[("/odometry/filtered", "/odom")],
     )
 
     rviz_node = Node(
@@ -359,7 +375,8 @@ def generate_launch_description():
         "Grid/RangeMax": "3.0",
         "Grid/MaxGroundHeight": "0.08",
         "Grid/MaxObstacleHeight": "1.2",
-        "Optimizer/GravitySigma": "0",
+        "subscribe_imu": True,
+        "Optimizer/GravitySigma": "0.3",
     }
 
     rtabmap_remappings = [
@@ -367,6 +384,7 @@ def generate_launch_description():
         ("rgb/camera_info", "/camera/color/camera_info"),
         ("depth/image", "/camera/depth/image_raw"),
         ("odom", "/odom"),
+        ("imu", "/imu/data"),
     ]
 
     rtabmap_mapping = Node(
@@ -423,6 +441,9 @@ def generate_launch_description():
                 "plc_min_revisit": 0.02,
                 "map_dist_min_revisit": 0.75,
                 "navigation_timeout_sec": 120.0,
+                "degraded_exploration_alc_bonus": 0.35,
+                "degraded_exploration_window_sec": 60.0,
+                "degraded_exploration_min_events": 3,
                 "use_approach_heading": True,
                 "planner_event_topic": "/planner/events",
             }
@@ -439,7 +460,7 @@ def generate_launch_description():
                 "input_topic": nav_cmd_vel_topic,
                 "output_topic": driver_cmd_vel_topic,
                 "planner_event_topic": "/planner/events",
-                "min_linear_speed": 0.05,
+                "min_linear_speed": 0.08,
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
@@ -479,19 +500,29 @@ def generate_launch_description():
                 "driver_cmd_topic": driver_cmd_vel_topic,
                 "wheel_odom_topic": "/odom",
                 "imu_topic": "/imu/data",
+                "depth_image_topic": "/camera/depth/image_raw",
                 "planner_event_topic": "/planner/events",
                 "slam_global_frame": "map",
                 "robot_frame": "base_footprint",
                 "forward_command_min_duration_sec": 0.5,
+                "forward_no_motion_check_sec": 0.8,
                 "command_vx_threshold_mps": 0.08,
                 "wheel_odom_delta_threshold_m": 0.05,
                 "slam_delta_max_m": 0.02,
-                "imu_linear_accel_threshold_mps2": 0.25,
                 "imu_yaw_rate_threshold_radps": 0.08,
+                "depth_obstacle_enabled": True,
+                "depth_roi_center_width_ratio": 0.20,
+                "depth_roi_center_height_ratio": 0.50,
+                "depth_min_valid_m": 0.20,
+                "depth_forward_obstacle_range_m": 0.60,
+                "depth_min_obstacle_pixels": 5,
+                "depth_stale_timeout_sec": 0.5,
                 "stale_observation_timeout_sec": 0.5,
                 "zero_burst_duration_sec": 0.5,
                 "zero_burst_rate_hz": 30.0,
                 "retrigger_cooldown_sec": 3.0,
+                "depth_blind_slam_override_m": 0.010,
+                "camera_front_offset_m": 0.10,
             }
         ],
     )
@@ -530,6 +561,15 @@ def generate_launch_description():
                             "command_vx_threshold_mps": 0.08,
                             "wheel_odom_delta_threshold_m": 0.05,
                             "slam_delta_max_m": 0.02,
+                            "depth_blind_slam_override_m": 0.010,
+                            "camera_front_offset_m": 0.10,
+                        },
+                        "recovery": {
+                            "clearance_backup_m": 0.30,
+                        },
+                        "slam": {
+                            "subscribe_imu": True,
+                            "optimizer_gravity_sigma": 0.3,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }

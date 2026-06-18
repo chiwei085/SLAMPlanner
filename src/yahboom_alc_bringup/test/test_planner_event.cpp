@@ -31,6 +31,19 @@ TEST(PlannerEvent, MissingEventFieldIsIgnored) {
               CoordinationAction::kNone);
 }
 
+TEST(PlannerEvent, ParsesFailureClassWhenPresent) {
+    const auto failure = parseFailureClass(
+        R"({"event":"route_abandoned","failure_class":"local_hazard"})");
+
+    ASSERT_TRUE(failure);
+    EXPECT_EQ(failure.value_or(""), "local_hazard");
+}
+
+TEST(PlannerEvent, MalformedFailureClassPayloadIsIgnored) {
+    EXPECT_FALSE(parseFailureClass(R"({"event":"route_abandoned","bad":-})"));
+    EXPECT_FALSE(parseFailureClass(R"({"event":"route_abandoned"})"));
+}
+
 TEST(PlannerEvent, MalformedPayloadIsIgnored) {
     EXPECT_EQ(classifyPlannerEvent("not json"), CoordinationAction::kNone);
     EXPECT_EQ(classifyPlannerEvent(""), CoordinationAction::kNone);
