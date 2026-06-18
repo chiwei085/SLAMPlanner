@@ -40,6 +40,8 @@ struct R2StallDetectorConfig
     double zero_burst_duration_sec = 0.5;
     double zero_burst_rate_hz = 30.0;
     double retrigger_cooldown_sec = 3.0;
+    double depth_blind_slam_override_m = 0.0;
+    double camera_front_offset_m = 0.0;
 };
 
 struct StallDetectorObservation
@@ -152,7 +154,11 @@ struct descriptor<yahboom_alc_bringup::R2StallDetectorConfig>
             named(&R2StallDetectorConfig::zero_burst_rate_hz,
                   "zero_burst_rate_hz"),
             named(&R2StallDetectorConfig::retrigger_cooldown_sec,
-                  "retrigger_cooldown_sec"));
+                  "retrigger_cooldown_sec"),
+            named(&R2StallDetectorConfig::depth_blind_slam_override_m,
+                  "depth_blind_slam_override_m"),
+            named(&R2StallDetectorConfig::camera_front_offset_m,
+                  "camera_front_offset_m"));
     }
 };
 

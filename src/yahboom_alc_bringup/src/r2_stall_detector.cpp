@@ -196,8 +196,12 @@ private:
         }
         const auto depth = estimateForwardDepthRoi(*latest_depth_, config_);
         observation.depth_observation_valid = depth.valid;
-        observation.forward_min_depth_m = depth.min_depth_m;
         observation.forward_obstacle_detected = depth.obstacle_detected;
+        if (depth.valid && std::isfinite(depth.min_depth_m) &&
+            depth.min_depth_m > 0.0) {
+            observation.forward_min_depth_m =
+                depth.min_depth_m - config_.camera_front_offset_m;
+        }
     }
 
     void publishStopBurst() {

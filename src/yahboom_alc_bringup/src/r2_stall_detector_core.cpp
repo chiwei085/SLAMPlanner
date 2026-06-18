@@ -180,6 +180,14 @@ StallDetectorDecision StallDetectorCore::update(
         window_start_ = observation;
         return decision;
     }
+    if (observation.depth_observation_valid &&
+        observation.forward_min_depth_m <= 0.0 &&
+        config_.depth_blind_slam_override_m > 0.0 &&
+        decision.wheel_delta_m >= config_.depth_blind_slam_override_m) {
+        decision.reason = "depth_blind_wheel_progress";
+        window_start_ = observation;
+        return decision;
+    }
     if (decision.imu_motion_consistent) {
         decision.reason = "imu_yaw_motion_observed";
         return decision;

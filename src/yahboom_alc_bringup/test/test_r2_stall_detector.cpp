@@ -347,5 +347,59 @@ TEST(R2StallDetectorDepthRoi, RequiresMultipleObstaclePixels) {
     EXPECT_TRUE(obstacle.obstacle_detected);
 }
 
+TEST(R2StallDetector, DepthBlindWheelProgressResetsWindowWithoutStall) {
+    auto config = testConfig();
+    config.depth_blind_slam_override_m = 0.010;
+    StallDetectorCore detector(config);
+
+    EXPECT_FALSE(detector.update(observation(0.0)).stall_or_slip);
+    auto second = observation(0.9);
+    second.wheel_odom_x =
+        0.015;  // 15mm: > override threshold, < slip threshold
+    second.driver_cmd_vx = 0.10;
+    second.driver_command_valid = true;
+    second.depth_observation_valid = true;
+    second.forward_min_depth_m = 0.0;  // blind zone: all depth pixels zero
+
+    const auto decision = detector.update(second);
+    EXPECT_FALSE(decision.stall_or_slip);
+    EXPECT_EQ(decision.reason, "depth_blind_wheel_progress");
+}
+
+TEST(R2StallDetector, DepthBlindInsufficientWheelProgressStillFires) {
+    auto config = testConfig();
+    config.depth_blind_slam_override_m = 0.010;
+    StallDetectorCore detector(config);
+
+    EXPECT_FALSE(detector.update(observation(0.0)).stall_or_slip);
+    auto second = observation(0.9);
+    second.wheel_odom_x = 0.005;  // 5mm: below override threshold
+    second.driver_cmd_vx = 0.10;
+    second.driver_command_valid = true;
+    second.depth_observation_valid = true;
+    second.forward_min_depth_m = 0.0;
+
+    const auto decision = detector.update(second);
+    EXPECT_TRUE(decision.stall_or_slip);
+    EXPECT_EQ(decision.reason, "forward_command_without_slam_motion");
+}
+
+TEST(R2StallDetector, DepthBlindOverrideDisabledByDefault) {
+    StallDetectorCore detector(
+        testConfig());  // depth_blind_slam_override_m = 0.0
+
+    EXPECT_FALSE(detector.update(observation(0.0)).stall_or_slip);
+    auto second = observation(0.9);
+    second.wheel_odom_x = 0.015;
+    second.driver_cmd_vx = 0.10;
+    second.driver_command_valid = true;
+    second.depth_observation_valid = true;
+    second.forward_min_depth_m = 0.0;
+
+    const auto decision = detector.update(second);
+    EXPECT_TRUE(decision.stall_or_slip);
+    EXPECT_EQ(decision.reason, "forward_command_without_slam_motion");
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

@@ -203,7 +203,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "recovery_forward_escape_distance_m": 1.5,
                     "rear_blocked_min_latch_sec": 15.0,
                     "rear_blocked_clear_forward_displacement_m": 0.25,
-                    "recovery_clearance_backup_m": 0.05,
+                    "recovery_clearance_backup_m": 0.30,
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }
@@ -299,14 +299,15 @@ def generate_launch_description():
         parameters=[imu_filter_config],
     )
 
-    ekf_node = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("robot_localization"),
-                "launch",
-                "ekf_x1_x3_launch.py",
-            )
-        )
+    ekf_node = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ekf_filter_node",
+        output="screen",
+        parameters=[
+            os.path.join(yahboom_alc_share, "params", "ekf_r2.yaml")
+        ],
+        remappings=[("/odometry/filtered", "/odom")],
     )
 
     rviz_node = Node(
@@ -374,7 +375,8 @@ def generate_launch_description():
         "Grid/RangeMax": "3.0",
         "Grid/MaxGroundHeight": "0.08",
         "Grid/MaxObstacleHeight": "1.2",
-        "Optimizer/GravitySigma": "0",
+        "subscribe_imu": True,
+        "Optimizer/GravitySigma": "0.3",
     }
 
     rtabmap_remappings = [
@@ -382,6 +384,7 @@ def generate_launch_description():
         ("rgb/camera_info", "/camera/color/camera_info"),
         ("depth/image", "/camera/depth/image_raw"),
         ("odom", "/odom"),
+        ("imu", "/imu/data"),
     ]
 
     rtabmap_mapping = Node(
@@ -518,6 +521,8 @@ def generate_launch_description():
                 "zero_burst_duration_sec": 0.5,
                 "zero_burst_rate_hz": 30.0,
                 "retrigger_cooldown_sec": 3.0,
+                "depth_blind_slam_override_m": 0.010,
+                "camera_front_offset_m": 0.10,
             }
         ],
     )
@@ -556,6 +561,15 @@ def generate_launch_description():
                             "command_vx_threshold_mps": 0.08,
                             "wheel_odom_delta_threshold_m": 0.05,
                             "slam_delta_max_m": 0.02,
+                            "depth_blind_slam_override_m": 0.010,
+                            "camera_front_offset_m": 0.10,
+                        },
+                        "recovery": {
+                            "clearance_backup_m": 0.30,
+                        },
+                        "slam": {
+                            "subscribe_imu": True,
+                            "optimizer_gravity_sigma": 0.3,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }
