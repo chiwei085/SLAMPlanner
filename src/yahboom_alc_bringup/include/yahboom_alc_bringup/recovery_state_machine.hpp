@@ -38,6 +38,7 @@ public:
 
     void reset();
     void start();
+    void startAtSmallRotation();
     void beginReobserve();
 
     RecoveryStage stage() const { return stage_; }

@@ -26,6 +26,12 @@ void RecoveryStateMachine::start() {
     beginReobserve();
 }
 
+void RecoveryStateMachine::startAtSmallRotation() {
+    spin_attempts_ = 0;
+    reobserve_cycles_remaining_ = 0;
+    stage_ = RecoveryStage::kSmallRotation;
+}
+
 void RecoveryStateMachine::beginReobserve() {
     stage_ = RecoveryStage::kReobserve;
     reobserve_cycles_remaining_ =

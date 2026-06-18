@@ -1293,7 +1293,12 @@ private:
         if (const auto pose = lookupRobotPose()) {
             recovery_start_xy_ = pose->xy;
         }
-        recovery_.start();
+        if (recovery_reobserve_used_) {
+            recovery_.startAtSmallRotation();
+        }
+        else {
+            recovery_.start();
+        }
         ++nav_goal_generation_;
         if (goal_handle_) {
             nav_client_->async_cancel_goal(goal_handle_);
@@ -1337,6 +1342,7 @@ private:
                             recoveryEventFields("reobserve_complete"));
         const auto robot_pose = lookupRobotPose();
         if (robot_pose && findAndBeginCandidateRoute(*robot_pose, true)) {
+            recovery_reobserve_used_ = true;
             resetRecoveryStateOnly();
             return;
         }
@@ -1886,6 +1892,7 @@ private:
         spin_started_sec_ = 0.0;
         alignment_spin_attempts_ = 0;
         resetRecoveryStateOnly();
+        recovery_reobserve_used_ = false;
         active_goal_.reset();
         active_route_.clear();
         active_route_index_ = 0;
@@ -2293,6 +2300,7 @@ private:
     bool recovery_clearance_backup_active_ = false;
     double pending_recovery_spin_yaw_ = 0.0;
     BackUpGoalHandle::SharedPtr clearance_backup_goal_handle_;
+    bool recovery_reobserve_used_ = false;
     bool recovery_escape_active_ = false;
     std::string recovery_reason_;
     std::optional<WorldPoint> recovery_start_xy_;
