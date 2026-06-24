@@ -53,8 +53,9 @@ std::optional<double> RecoveryStateMachine::nextSmallRotationYaw() {
     if (spin_attempts_ >= config_.recovery_small_spin_attempts) {
         return std::nullopt;
     }
-    const double sign = spin_attempts_ % 2 == 0 ? 1.0 : -1.0;
+    const double sign = lifetime_spin_count_ % 2 == 0 ? 1.0 : -1.0;
     ++spin_attempts_;
+    ++lifetime_spin_count_;
     return sign * config_.recovery_small_spin_yaw_rad;
 }
 

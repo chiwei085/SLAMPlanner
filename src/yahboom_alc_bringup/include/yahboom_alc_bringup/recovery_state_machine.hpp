@@ -63,6 +63,9 @@ private:
     RecoveryStage stage_ = RecoveryStage::kNone;
     int reobserve_cycles_remaining_ = 0;
     int spin_attempts_ = 0;
+    // Counts every spin ever executed; never reset so direction alternates
+    // across recovery cycles even when spin_attempts_ is zeroed mid-sequence.
+    int lifetime_spin_count_ = 0;
     bool rear_blocked_latch_active_ = false;
     double rear_blocked_latch_started_sec_ = 0.0;
     double forward_displacement_since_latch_m_ = 0.0;
