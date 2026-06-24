@@ -38,6 +38,7 @@ add_library(yahboom_alc_bringup_lib
   src/frontier_explorer_core.cpp
   src/planner_event.cpp
   src/planner_runtime_logger.cpp
+  src/r2_collision_safety_core.cpp
   src/r2_cmd_vel_bridge.cpp
   src/r2_stall_detector_core.cpp
   src/recovery_state_machine.cpp
@@ -140,6 +141,21 @@ ament_target_dependencies(yahboom_r2_cmd_vel_bridge
 add_executable(r2_stall_detector
   src/r2_stall_detector.cpp
 )
+
+add_executable(r2_collision_safety_gate
+  src/r2_collision_safety.cpp
+)
+target_link_libraries(r2_collision_safety_gate
+  yahboom_alc_bringup_lib
+)
+ament_target_dependencies(r2_collision_safety_gate
+  geometry_msgs
+  rclcpp
+  sensor_msgs
+  std_msgs
+  tf2
+  tf2_ros
+)
 target_link_libraries(r2_stall_detector
   yahboom_alc_bringup_lib
 )
@@ -162,6 +178,7 @@ install(
     r2_safe_driver
     r2_safety_stop
     r2_stall_detector
+    r2_collision_safety_gate
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -235,6 +252,16 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_r2_stall_detector
     test/test_r2_stall_detector.cpp
+  )
+
+  ament_add_gtest(test_r2_collision_safety
+    test/test_r2_collision_safety.cpp
+  )
+  target_link_libraries(test_r2_collision_safety
+    yahboom_alc_bringup_lib
+  )
+  ament_target_dependencies(test_r2_collision_safety
+    geometry_msgs
   )
   target_link_libraries(test_r2_stall_detector
     yahboom_alc_bringup_lib

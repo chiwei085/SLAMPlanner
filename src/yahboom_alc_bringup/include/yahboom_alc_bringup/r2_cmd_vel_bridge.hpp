@@ -4,6 +4,7 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rik_sd/struct_descriptor.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -22,6 +23,7 @@ struct R2CmdVelBridgeConfig
     std::string output_topic = "/cmd_vel";
     std::string planner_event_topic = "/planner/events";
     double min_linear_speed = 0.05;
+    bool enforce_min_linear_speed = true;
     double max_linear_speed = 0.26;
     double steering_gain = 1.25;
     double max_steering = 1.25;
@@ -35,6 +37,7 @@ struct R2CmdVelBridgeConfig
     double max_steering_rate = 0.80;
     double assumed_command_period = 0.10;
     bool arc_turn_when_stationary = true;
+    std::string safety_stop_topic = "/collision_safety_stop_active";
     bool stationary_arc_requires_forward_clearance = true;
     double stationary_arc_check_distance_m = 0.12;
     bool reverse_safety_enabled = true;
@@ -68,7 +71,19 @@ bool isStationaryArcForwardSafeInCostmap(
     const double forward_speed, const R2CmdVelBridgeConfig& config);
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
-    const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config);
+    const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config,
+    bool allow_stationary_arc = true);
+
+// Reconciles a rate-limited drive command with the motor's static-friction
+// floor. The wheels cannot turn below min_linear_speed, so any rate-limited
+// value inside that band moves the steering servo while the robot stays still.
+// When motion is intended (|target| past the deadband) the command snaps up to
+// the stall-clearing floor as a gentle breakaway; otherwise sub-stall ramp
+// residue snaps to a clean stop. Returns the rate-limited value unchanged when
+// the floor is disabled.
+double applyDriveStallFloor(double rate_limited_linear_x,
+                            double target_linear_x,
+                            const R2CmdVelBridgeConfig& config);
 
 class R2CmdVelBridgeNode : public rclcpp::Node
 {
@@ -95,6 +110,7 @@ private:
     R2CmdVelBridgeConfig config_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_stop_sub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -104,6 +120,7 @@ private:
     rclcpp::Time last_output_time_;
     std::atomic<bool> stopping_{false};
     bool has_last_output_ = false;
+    bool safety_stop_active_ = false;
 };
 
 }  // namespace yahboom_alc_bringup
@@ -122,6 +139,8 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
             named(&R2CmdVelBridgeConfig::planner_event_topic,
                   "planner_event_topic"),
             named(&R2CmdVelBridgeConfig::min_linear_speed, "min_linear_speed"),
+            named(&R2CmdVelBridgeConfig::enforce_min_linear_speed,
+                  "enforce_min_linear_speed"),
             named(&R2CmdVelBridgeConfig::max_linear_speed, "max_linear_speed"),
             named(&R2CmdVelBridgeConfig::steering_gain, "steering_gain"),
             named(&R2CmdVelBridgeConfig::max_steering, "max_steering"),
@@ -140,6 +159,8 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "assumed_command_period"),
             named(&R2CmdVelBridgeConfig::arc_turn_when_stationary,
                   "arc_turn_when_stationary"),
+            named(&R2CmdVelBridgeConfig::safety_stop_topic,
+                  "safety_stop_topic"),
             named(&R2CmdVelBridgeConfig::
                       stationary_arc_requires_forward_clearance,
                   "stationary_arc_requires_forward_clearance"),

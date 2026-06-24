@@ -197,8 +197,8 @@ bool isStationaryArcForwardSafeInCostmap(
 }
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
-    const geometry_msgs::msg::Twist& input,
-    const R2CmdVelBridgeConfig& config) {
+    const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config,
+    const bool allow_stationary_arc) {
     geometry_msgs::msg::Twist output;
 
     const double requested_linear =
@@ -211,11 +211,13 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
         const double max_linear_speed = std::abs(config.max_linear_speed);
         linear_x =
             std::clamp(requested_linear, -max_linear_speed, max_linear_speed);
-        if (std::abs(linear_x) < std::abs(config.min_linear_speed)) {
+        if (config.enforce_min_linear_speed &&
+            std::abs(linear_x) < std::abs(config.min_linear_speed)) {
             linear_x = signOf(linear_x) * std::abs(config.min_linear_speed);
         }
     }
-    else if (requested_angular != 0.0 && config.arc_turn_when_stationary) {
+    else if (requested_angular != 0.0 && config.arc_turn_when_stationary &&
+             allow_stationary_arc) {
         linear_x = std::abs(config.min_linear_speed);
     }
 
@@ -244,6 +246,21 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
     return output;
 }
 
+double applyDriveStallFloor(const double rate_limited_linear_x,
+                            const double target_linear_x,
+                            const R2CmdVelBridgeConfig& config) {
+    if (!config.enforce_min_linear_speed) {
+        return rate_limited_linear_x;
+    }
+    const double min_speed = std::abs(config.min_linear_speed);
+    if (std::abs(rate_limited_linear_x) >= min_speed) {
+        return rate_limited_linear_x;
+    }
+    const bool drive_intended =
+        std::abs(target_linear_x) >= std::abs(config.linear_deadband);
+    return drive_intended ? signOf(target_linear_x) * min_speed : 0.0;
+}
+
 R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
     : rclcpp::Node("yahboom_r2_cmd_vel_bridge", options),
       config_(loadConfig()) {
@@ -258,6 +275,11 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         config_.input_topic, input_qos,
         [this](const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
             onCmdVel(msg);
+        });
+    safety_stop_sub_ = create_subscription<std_msgs::msg::Bool>(
+        config_.safety_stop_topic, rclcpp::QoS{rclcpp::KeepLast(1)},
+        [this](const std_msgs::msg::Bool::ConstSharedPtr& message) {
+            safety_stop_active_ = message->data;
         });
     const bool costmap_safety_enabled =
         config_.reverse_safety_enabled ||
@@ -301,16 +323,25 @@ void R2CmdVelBridgeNode::onCmdVel(
         return;
     }
 
+    // safety_stop_active_ is the IMU-impact reflex from the collision safety
+    // node: halt forward motion immediately (the impact already happened) but
+    // keep reverse available so recovery can back away from whatever was hit.
+    geometry_msgs::msg::Twist command = *msg;
+    if (safety_stop_active_ && command.linear.x > 0.0) {
+        command.linear.x = 0.0;
+    }
+
     const double requested_linear =
-        applyDeadband(msg->linear.x, config_.linear_deadband);
+        applyDeadband(command.linear.x, config_.linear_deadband);
     const double requested_angular =
-        applyDeadband(msg->angular.z, config_.angular_deadband);
-    const bool stationary_arc_command = requested_linear == 0.0 &&
-                                        requested_angular != 0.0 &&
-                                        config_.arc_turn_when_stationary;
+        applyDeadband(command.angular.z, config_.angular_deadband);
+    const bool stationary_arc_command =
+        requested_linear == 0.0 && requested_angular != 0.0 &&
+        config_.arc_turn_when_stationary && !safety_stop_active_;
 
     publisher_->publish(
-        limitRate(convertNavTwistToR2(*msg, config_), stationary_arc_command));
+        limitRate(convertNavTwistToR2(command, config_, !safety_stop_active_),
+                  stationary_arc_command));
 }
 
 geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
@@ -473,6 +504,12 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
     output.linear.y =
         std::clamp(target.linear.y, last_output_.linear.y - max_steering_delta,
                    last_output_.linear.y + max_steering_delta);
+
+    // Keep the drive command out of the sub-stall dead band so a commanded
+    // motion never decays into "steering moves, wheels don't". Steering
+    // (linear.y) is still rate-limited normally above.
+    output.linear.x =
+        applyDriveStallFloor(output.linear.x, target.linear.x, config_);
 
     output = applyReverseSafety(output);
     if (apply_stationary_arc_safety) {

@@ -8,6 +8,7 @@ namespace
 {
 
 using geometry_msgs::msg::Twist;
+using yahboom_alc_bringup::applyDriveStallFloor;
 using yahboom_alc_bringup::convertNavTwistToR2;
 using yahboom_alc_bringup::isReverseSafeInCostmap;
 using yahboom_alc_bringup::isStationaryArcForwardSafeInCostmap;
@@ -122,6 +123,51 @@ TEST(R2CmdVelBridge, TinyNonzeroForwardCommandIsLiftedToMinimumSpeed) {
     input.linear.x = -0.01;
     output = convertNavTwistToR2(input, defaultConfig());
     EXPECT_NEAR(output.linear.x, -0.05, kTolerance);
+}
+
+TEST(R2CmdVelBridge, CanPreserveLowSpeedWhenSafetyGateDisablesMinimum) {
+    R2CmdVelBridgeConfig config = defaultConfig();
+    config.enforce_min_linear_speed = false;
+    Twist input;
+    input.linear.x = 0.01;
+
+    const Twist output = convertNavTwistToR2(input, config);
+    EXPECT_NEAR(output.linear.x, 0.01, kTolerance);
+}
+
+TEST(R2CmdVelBridge, SafetyStopSuppressesStationaryArcForwardMotion) {
+    Twist input;
+    input.angular.z = 0.4;
+
+    const Twist output = convertNavTwistToR2(input, defaultConfig(), false);
+    EXPECT_DOUBLE_EQ(output.linear.x, 0.0);
+}
+
+TEST(R2CmdVelBridge, StallFloorLiftsSubStallRampToBreakawayWhenMoving) {
+    const R2CmdVelBridgeConfig config = defaultConfig();
+    // Rate limiter has only ramped to 0.02 but a 0.1 forward motion is wanted:
+    // the wheels would not turn, so snap up to the stall-clearing floor.
+    EXPECT_NEAR(applyDriveStallFloor(0.02, 0.1, config),
+                config.min_linear_speed, kTolerance);
+    EXPECT_NEAR(applyDriveStallFloor(-0.02, -0.1, config),
+                -config.min_linear_speed, kTolerance);
+}
+
+TEST(R2CmdVelBridge, StallFloorSnapsSubStallResidueToStopWhenIdle) {
+    const R2CmdVelBridgeConfig config = defaultConfig();
+    // Decelerating toward a stop (target 0) must not be lifted back up.
+    EXPECT_DOUBLE_EQ(applyDriveStallFloor(0.02, 0.0, config), 0.0);
+}
+
+TEST(R2CmdVelBridge, StallFloorLeavesDrivableSpeedsUntouched) {
+    const R2CmdVelBridgeConfig config = defaultConfig();
+    EXPECT_NEAR(applyDriveStallFloor(0.1, 0.1, config), 0.1, kTolerance);
+}
+
+TEST(R2CmdVelBridge, StallFloorIsBypassedWhenDisabled) {
+    R2CmdVelBridgeConfig config = defaultConfig();
+    config.enforce_min_linear_speed = false;
+    EXPECT_NEAR(applyDriveStallFloor(0.02, 0.1, config), 0.02, kTolerance);
 }
 
 TEST(R2CmdVelBridge, StationarySpinBecomesLowSpeedArcWhenEnabled) {
