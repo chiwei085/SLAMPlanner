@@ -275,14 +275,44 @@ collision_monitor:
     cmd_vel_in_topic: "cmd_vel_smoothed_raw"
     cmd_vel_out_topic: "/alc/nav_cmd_vel"
     state_topic: "collision_monitor_state"
-    polygons: ["StopPolygon"]
+    # Three-stage depth braking (replaces the old custom r2_collision_safety_gate
+    # velocity governor). The monitor evaluates every polygon each cycle and
+    # applies the most restrictive result, all from the same persistent depth
+    # cloud, so braking is smooth instead of an on/off stop:
+    #   ApproachZone - time-to-collision scaling: cap speed so the robot can
+    #                  always halt time_before_collision seconds before contact.
+    #   SlowdownZone - fixed ratio cut once an obstacle enters the mid band.
+    #   StopPolygon  - hard stop at the inner band. Its front edge (~0.25 m)
+    #                  is matched to the camera's RangeMin so the robot is
+    #                  already stopped by the time the obstacle enters the
+    #                  near blind zone (sub-0.25 m / pure-rotation gaps are
+    #                  covered by IMU impact recovery, not this monitor).
+    polygons: ["StopPolygon", "SlowdownZone", "ApproachZone"]
     StopPolygon:
       type: "polygon"
-      points: [0.24, 0.14, 0.24, -0.14, -0.12, -0.14, -0.12, 0.14]
+      points: [0.25, 0.14, 0.25, -0.14, -0.12, -0.14, -0.12, 0.14]
       action_type: "stop"
       min_points: 4
-      visualize: false
+      visualize: true
       polygon_pub_topic: "collision_monitor/stop_polygon"
+    SlowdownZone:
+      type: "polygon"
+      points: [0.45, 0.16, 0.45, -0.16, -0.12, -0.16, -0.12, 0.16]
+      action_type: "slowdown"
+      min_points: 4
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: "collision_monitor/slowdown_polygon"
+    ApproachZone:
+      type: "polygon"
+      # Robot footprint, projected forward along the commanded velocity.
+      points: [0.19, 0.115, 0.19, -0.115, -0.19, -0.115, -0.19, 0.115]
+      action_type: "approach"
+      min_points: 6
+      time_before_collision: 2.0
+      simulation_time_step: 0.1
+      visualize: true
+      polygon_pub_topic: "collision_monitor/approach_polygon"
     observation_sources: ["depth_cloud"]
     depth_cloud:
       type: "pointcloud"

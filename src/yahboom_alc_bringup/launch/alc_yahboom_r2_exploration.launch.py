@@ -9,6 +9,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
@@ -134,12 +135,12 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "path_clearance_cells": 2,
                     "exploratory_path_clearance_cells": 1,
                     "min_frontier_distance": 0.45,
-                    "max_frontier_distance": 3.5,
+                    "max_frontier_distance": 5.5,
                     "frontier_goal_search_radius": 0.6,
                     "robot_start_search_radius": 2.0,
                     "information_radius": 1.5,
-                    "path_weight": 1.0,
-                    "information_weight": 0.02,
+                    "path_weight": 0.65,
+                    "information_weight": 0.15,
                     "frontier_size_weight": 0.02,
                     "unreachable_goal_penalty": 3.0,
                     "soft_unreachable_penalty": 1.5,
@@ -151,7 +152,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     **ROBOT_FOOTPRINT_PARAMS,
                     "swept_step_m": 0.05,
                     "unknown_overlap_max_ratio": 0.70,
-                    "unknown_overlap_weight": 4.0,
+                    "unknown_overlap_weight": 1.5,
                     "wall_clearance_m": 0.28,
                     "min_wall_clearance_m": 0.0,
                     "corner_penalty_weight": 1.0,
@@ -216,7 +217,6 @@ def generate_launch_description():
     yahboom_alc_share = get_package_share_directory("yahboom_alc_bringup")
     yahboom_bringup_share = get_package_share_directory("yahboomcar_bringup")
     yahboom_description_share = get_package_share_directory("yahboomcar_description")
-    yahboom_nav_share = get_package_share_directory("yahboomcar_nav")
     astra_camera_share = get_package_share_directory("astra_camera")
 
     default_nav2_params = os.path.join(
@@ -230,7 +230,9 @@ def generate_launch_description():
     default_model_path = os.path.join(
         yahboom_description_share, "urdf", "yahboomcar_R2.urdf.xacro"
     )
-    default_rviz_config = os.path.join(yahboom_nav_share, "rviz", "rtabmap_nav.rviz")
+    default_rviz_config = os.path.join(
+        yahboom_alc_share, "rviz", "alc_r2_exploration.rviz"
+    )
     imu_filter_config = os.path.join(
         yahboom_bringup_share, "param", "imu_filter_param.yaml"
     )
@@ -328,11 +330,68 @@ def generate_launch_description():
             "camera_name": "camera",
             "enable_color": "true",
             "enable_depth": "true",
+            # These extrinsics are fixed. Publishing them on /tf from the
+            # camera's streaming thread lets a USB scheduling stall make the
+            # transform expire at an RGB-D timestamp. They are published
+            # below on /tf_static instead.
+            "publish_tf": "false",
             "enable_ir": "false",
             "enable_point_cloud": "true",
             "enable_colored_point_cloud": "false",
         }.items(),
     )
+
+    # Astra Pro Plus factory extrinsics observed from the camera driver. Keep
+    # this immutable chain on /tf_static: camera_link is attached to the R2
+    # URDF, while these links describe fixed depth/color sensor geometry.
+    camera_static_transforms = [
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_link_to_depth_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "0", "--qy", "0", "--qz", "0", "--qw", "1",
+                "--frame-id", "camera_link",
+                "--child-frame-id", "camera_depth_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_depth_to_color_frame",
+            arguments=[
+                "--x", "-0.002165860891342163", "--y", "0.025120487213134767",
+                "--z", "0.00009495562314987182",
+                "--qx", "-0.0008345809765160083", "--qy", "-0.00009292588947573677",
+                "--qz", "-0.0009316844516433775", "--qw", "0.9999992251396179",
+                "--frame-id", "camera_depth_frame",
+                "--child-frame-id", "camera_color_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_depth_to_optical_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
+                "--frame-id", "camera_depth_frame",
+                "--child-frame-id", "camera_depth_optical_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_color_to_optical_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
+                "--frame-id", "camera_color_frame",
+                "--child-frame-id", "camera_color_optical_frame",
+            ],
+        ),
+    ]
 
     rgbd_sync = Node(
         package="rtabmap_sync",
@@ -341,7 +400,14 @@ def generate_launch_description():
         parameters=[
             {
                 "approx_sync": True,
-                "approx_sync_max_interval": 0.01,
+                # Astra color/depth frames can arrive more than 10 ms apart on
+                # Jetson. A 10 ms cap drops otherwise valid RGB-D pairs and
+                # causes RTAB-Map conversion failures. Match RTAB-Map's
+                # unbounded approximate-sync default and retain a larger
+                # backlog for short camera scheduling stalls.
+                "approx_sync_max_interval": 0.0,
+                "topic_queue_size": 30,
+                "sync_queue_size": 30,
                 "use_sim_time": use_sim_time,
                 "qos": qos,
             }
@@ -372,7 +438,7 @@ def generate_launch_description():
         "Grid/NormalsSegmentation": "false",
         "Grid/RayTracing": "true",
         "Grid/RangeMin": "0.25",
-        "Grid/RangeMax": "3.0",
+        "Grid/RangeMax": "5.0",
         "Grid/MaxGroundHeight": "0.08",
         "Grid/MaxObstacleHeight": "1.2",
         "subscribe_imu": True,
@@ -433,7 +499,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "cE": 8.0,
+                "cE": 4.0,
                 "tau_min_revisit": 4,
                 "theta_max": 0.25,
                 "lambda_decay": 0.03,
@@ -461,6 +527,8 @@ def generate_launch_description():
                 "output_topic": driver_cmd_vel_topic,
                 "planner_event_topic": "/planner/events",
                 "min_linear_speed": 0.08,
+                "enforce_min_linear_speed": True,
+                "safety_stop_topic": "/collision_safety_stop_active",
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
@@ -485,6 +553,32 @@ def generate_launch_description():
                 "reverse_allowed_cost_max": 98,
                 "reverse_unknown_is_blocked": False,
                 **ROBOT_FOOTPRINT_PARAMS,
+            }
+        ],
+    )
+
+    # IMU-impact reflex only. Smooth depth braking is now handled by the Nav2
+    # collision monitor (slowdown + approach polygons in nav2_rgbd_params.yaml);
+    # this node watches the IMU and raises /collision_safety_stop_active + a
+    # stall_or_slip event when it detects a forward impact. It is no longer in
+    # the cmd_vel path, so the bridge reads /alc/nav_cmd_vel directly.
+    r2_collision_safety_gate = Node(
+        package="yahboom_alc_bringup",
+        executable="r2_collision_safety_gate",
+        name="r2_collision_safety_gate",
+        output="screen",
+        parameters=[
+            {
+                "input_topic": nav_cmd_vel_topic,
+                "imu_topic": "/imu/data",
+                "planner_event_topic": "/planner/events",
+                "safety_stop_topic": "/collision_safety_stop_active",
+                "command_vx_threshold_mps": 0.01,
+                "imu_stale_timeout_sec": 0.5,
+                "imu_baseline_samples": 20,
+                "imu_impact_decel_threshold_mps2": 1.5,
+                "impact_stop_hold_sec": 0.5,
+                "impact_cooldown_sec": 3.0,
             }
         ],
     )
@@ -614,6 +708,12 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            # Fast DDS shared-memory transport is vulnerable to stale
+            # /dev/shm fastrtps_port locks after an interrupted launch. A
+            # failed SHM port can make local graph discovery intermittent,
+            # leaving RTAB-Map alive but unsubscribed from rgbd_sync. Use the
+            # loopback UDP transport for this all-local robot graph instead.
+            SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
             DeclareLaunchArgument(
                 "use_sim_time",
                 default_value="false",
@@ -726,6 +826,7 @@ def generate_launch_description():
             rviz_node,
             OpaqueFunction(function=launch_lidar),
             astra_camera,
+            *camera_static_transforms,
             TimerAction(
                 period=tf_warmup_delay_sec,
                 actions=[
@@ -735,6 +836,7 @@ def generate_launch_description():
                 ],
             ),
             TimerAction(period=nav2_start_delay_sec, actions=[nav2]),
+            r2_collision_safety_gate,
             r2_bridge,
             r2_stall_detector,
             r2_safety_stop,
