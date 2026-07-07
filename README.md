@@ -38,6 +38,25 @@ registration, and Nav2 goal checking is relaxed so the R2 only needs to satisfy
 the revisit position closely rather than a precise final heading.
 
 Nav2 velocity commands are remapped to `/alc/nav_cmd_vel`; only the bridge
-publishes to the driver's `/cmd_vel`. Source `software/library_ws` before
+publishes to the driver's `/cmd_vel`. Depth-based obstacle braking is owned by
+Nav2: the local costmap voxel layer and the Nav2 collision monitor both consume
+`/camera/depth/points`. The collision monitor runs a three-stage reflex on that
+cloud — a time-to-collision `approach` zone for smooth proportional slowdown, a
+`slowdown` zone, and an inner `stop` polygon whose front edge is matched to the
+camera's RangeMin so the robot halts just before an obstacle enters the near
+blind zone (see `params/nav2_rgbd_params.yaml`).
+
+`r2_collision_safety_gate` is **not** in the cmd_vel path. It only watches the
+IMU for a forward-deceleration impact — the one hazard the depth/costmap layers
+cannot see (sub-RangeMin near field, pure rotation) — and on impact it raises
+`/collision_safety_stop_active` (the bridge halts forward motion while keeping
+reverse for recovery) and emits a `stall_or_slip` event for the recovery state
+machine. The stall detector remains the wheel/SLAM motion-fault fallback.
+
+Before enabling higher speeds, measure the camera's useful return band at
+0.30 m, 0.45 m, and 0.55 m with targets at several heights. Use those results
+to tune the collision monitor's polygon distances, height band, and the gate's
+IMU impact threshold. Test any 5–10 degree camera tilt change separately;
+this repository does not alter the physical mount. Source `software/library_ws` before
 `yahboomcar_ws`; Astra camera, optional LiDAR drivers, and the R2 bringup's
 `robot_localization` EKF are installed there.

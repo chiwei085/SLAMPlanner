@@ -1,5 +1,6 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -91,6 +92,14 @@ public:
             return 1;
         }
         if (child_pid_ == 0) {
+            // The hardware driver must never outlive this supervisor. In
+            // particular, ros2 launch can terminate the parent without
+            // delivering a catchable signal while tearing down a process
+            // tree. Without a parent-death signal, detached driver instances
+            // keep publishing /vel_raw and corrupt the odometry integration.
+            if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() == 1) {
+                _exit(127);
+            }
             setsid();  // detach from terminal so Ctrl+C SIGINT doesn't reach
                        // child
             execlp("ros2", "ros2", "run", driver_package_.c_str(),

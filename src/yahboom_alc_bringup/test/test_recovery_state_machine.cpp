@@ -79,5 +79,63 @@ TEST(RecoveryStateMachine, ResetClearsRearBlockedLatch) {
     EXPECT_NEAR(recovery.forwardDisplacementSinceLatch(), 0.0, 1e-9);
 }
 
+TEST(RecoveryStateMachine, StagnationEscalatesAfterConsecutiveTreesInPlace) {
+    auto config = testConfig();
+    config.recovery_stagnation_escalation_trees = 3;
+    config.recovery_stagnation_radius_m = 0.25;
+    RecoveryStateMachine recovery(config);
+
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.05, -0.02));
+    EXPECT_TRUE(recovery.noteTreeStartedAndCheckEscalation(0.10, 0.03));
+}
+
+TEST(RecoveryStateMachine, StagnationCounterRearmsAfterEscalation) {
+    auto config = testConfig();
+    config.recovery_stagnation_escalation_trees = 2;
+    RecoveryStateMachine recovery(config);
+
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    EXPECT_TRUE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    EXPECT_TRUE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+}
+
+TEST(RecoveryStateMachine, StagnationResetsWhenRobotMovesPastRadius) {
+    auto config = testConfig();
+    config.recovery_stagnation_escalation_trees = 3;
+    config.recovery_stagnation_radius_m = 0.25;
+    RecoveryStateMachine recovery(config);
+
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.1, 0.0));
+    // Robot escaped beyond the radius: anchor moves, count restarts.
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(1.0, 0.0));
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(1.05, 0.0));
+    EXPECT_TRUE(recovery.noteTreeStartedAndCheckEscalation(1.10, 0.0));
+}
+
+TEST(RecoveryStateMachine, StagnationSurvivesPerTreeReset) {
+    auto config = testConfig();
+    config.recovery_stagnation_escalation_trees = 3;
+    RecoveryStateMachine recovery(config);
+
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    recovery.reset();
+    EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    recovery.reset();
+    EXPECT_TRUE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+}
+
+TEST(RecoveryStateMachine, StagnationDisabledWithZeroThreshold) {
+    auto config = testConfig();
+    config.recovery_stagnation_escalation_trees = 0;
+    RecoveryStateMachine recovery(config);
+
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_FALSE(recovery.noteTreeStartedAndCheckEscalation(0.0, 0.0));
+    }
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

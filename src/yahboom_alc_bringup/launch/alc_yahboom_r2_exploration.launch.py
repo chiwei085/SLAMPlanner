@@ -9,6 +9,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
@@ -42,11 +43,15 @@ NAV2_RUNTIME_METADATA = {
     "controller_use_rotate_to_heading": False,
     "local_inflation_radius": 0.45,
     "global_inflation_radius": 0.25,
-    "global_depth_voxel_layer": False,
+    "global_depth_voxel_layer": True,
     "local_depth_min_obstacle_height": 0.01,
     "local_depth_observation_persistence": 0.4,
     "local_footprint_padding": 0.02,
     "global_footprint_padding": 0.02,
+    "costmap_transform_tolerance": 1.0,
+    "controller_transform_tolerance": 1.0,
+    "bt_navigator_transform_tolerance": 1.0,
+    "recovery_stagnation_escalation_trees": 3,
     "bridge_reverse": {
         "enabled": True,
         "allowed_cost_max": 98,
@@ -134,12 +139,12 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "path_clearance_cells": 2,
                     "exploratory_path_clearance_cells": 1,
                     "min_frontier_distance": 0.45,
-                    "max_frontier_distance": 3.5,
+                    "max_frontier_distance": 5.5,
                     "frontier_goal_search_radius": 0.6,
                     "robot_start_search_radius": 2.0,
                     "information_radius": 1.5,
-                    "path_weight": 1.0,
-                    "information_weight": 0.02,
+                    "path_weight": 0.65,
+                    "information_weight": 0.15,
                     "frontier_size_weight": 0.02,
                     "unreachable_goal_penalty": 3.0,
                     "soft_unreachable_penalty": 1.5,
@@ -151,9 +156,60 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     **ROBOT_FOOTPRINT_PARAMS,
                     "swept_step_m": 0.05,
                     "unknown_overlap_max_ratio": 0.70,
-                    "unknown_overlap_weight": 4.0,
+                    "unknown_overlap_weight": 1.5,
                     "wall_clearance_m": 0.28,
                     "min_wall_clearance_m": 0.0,
+                    # Hard goal-clearance floor tracking the Nav2 global costmap
+                    # inflation_radius (0.25). Goals closer than this to an
+                    # obstacle sit in Nav2's inflated band and get aborted with
+                    # global_path_blocked; filtering them here stops the explorer
+                    # from recommending unplannable near-wall goals and
+                    # poisoning the blacklist. Kept in force under relaxed search.
+                    "nav2_goal_clearance_m": 0.22,
+                    # Stage 2 viewpoint / next-best-view scoring. Enabled at 0.1
+                    # after run_20260624_210848 validation: that run logged 10
+                    # best_candidates with visible_unknown=0 despite information
+                    # >200 (goals the camera physically cannot see past walls),
+                    # and weight ~0.05 already flips the worst blind cases, so 0.1
+                    # demotes them with margin while leaving information a say.
+                    # Revert by setting back to 0.0. range/fov match the Astra
+                    # depth camera (HFOV ~58 deg -> half ~0.5 rad).
+                    "viewpoint_information_weight": 0.1,
+                    "viewpoint_range_m": 3.0,
+                    "viewpoint_half_fov_rad": 0.5,
+                    # Stage 3 coverage revisit. With RangeMax 5.0 the map is
+                    # painted from far away, so distant rooms become known before
+                    # the robot drives near them and exploration stops caring.
+                    # This sends the robot to the nearest reachable known-free
+                    # region it has never approached within coverage_proximity_m,
+                    # but ONLY when frontier search (incl. relaxed) finds nothing
+                    # - a pure fallback that cannot affect active exploration, so
+                    # enabling it is regression-safe. Disable by setting
+                    # coverage_revisit_enabled False.
+                    "coverage_revisit_enabled": True,
+                    "coverage_proximity_m": 1.2,
+                    "coverage_sample_spacing_m": 0.4,
+                    "coverage_max_targets": 12,
+                    # Coverage blend (F1/F3). When > 0, unvisited known-free
+                    # regions compete directly with frontier candidates instead
+                    # of being a pure fallback. A value around 1.0-2.0 offsets
+                    # the typical information_weight * unknown_count advantage
+                    # that frontier candidates have. 0 = fallback-only (safe
+                    # default, identical to previous behaviour).
+                    "coverage_blend_weight": 1.5,
+                    # Intention commitment (F9). When
+                    # intention_distance_threshold_m > 0, selecting a goal
+                    # farther than this distance locks in a strategic intention.
+                    # Candidates within intention_clear_radius_m * 2 of that
+                    # goal receive an intention_continuation_bonus score
+                    # reduction in subsequent cycles, preventing nearby
+                    # opportunities from perpetually outbidding the committed
+                    # long-range target. intention_timeout_sec clears stale
+                    # intentions (0 = never expire). All disabled by default.
+                    "intention_distance_threshold_m": 3.0,
+                    "intention_continuation_bonus": 2.0,
+                    "intention_clear_radius_m": 1.5,
+                    "intention_timeout_sec": 35.0,
                     "corner_penalty_weight": 1.0,
                     "corridor_progress_weight": 0.4,
                     "heading_penalty_weight": 1.2,
@@ -199,11 +255,24 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "backtrace_backup_action": "/backup",
                     "recovery_reobserve_cycles": 1,
                     "recovery_small_spin_yaw_rad": 0.349066,
-                    "recovery_small_spin_attempts": 2,
+                    # Reduced from 2 → 1: each stationary spin generates fake
+                    # occupied cells via yaw odometry error + depth misalignment.
+                    # One attempt preserves basic reobservation; the backtrace
+                    # recovery (沿軌跡撤退) is the preferred escape mechanism.
+                    "recovery_small_spin_attempts": 1,
                     "recovery_forward_escape_distance_m": 1.5,
                     "rear_blocked_min_latch_sec": 15.0,
                     "rear_blocked_clear_forward_displacement_m": 0.25,
                     "recovery_clearance_backup_m": 0.30,
+                    # Cross-tree stagnation escalation: the explorer re-sends a
+                    # goal after every reobserve, which resets the recovery
+                    # tree (and its spin counter), so the backtrace stage was
+                    # unreachable — 4 runs on 2026-07-07 show backtrace=0
+                    # despite 18-47 recovery trees each.  When 3 consecutive
+                    # trees start with the robot inside a 0.25 m circle, jump
+                    # straight to the reverse-pulse/backtrace stage.
+                    "recovery_stagnation_escalation_trees": 3,
+                    "recovery_stagnation_radius_m": 0.25,
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }
@@ -216,7 +285,6 @@ def generate_launch_description():
     yahboom_alc_share = get_package_share_directory("yahboom_alc_bringup")
     yahboom_bringup_share = get_package_share_directory("yahboomcar_bringup")
     yahboom_description_share = get_package_share_directory("yahboomcar_description")
-    yahboom_nav_share = get_package_share_directory("yahboomcar_nav")
     astra_camera_share = get_package_share_directory("astra_camera")
 
     default_nav2_params = os.path.join(
@@ -230,7 +298,9 @@ def generate_launch_description():
     default_model_path = os.path.join(
         yahboom_description_share, "urdf", "yahboomcar_R2.urdf.xacro"
     )
-    default_rviz_config = os.path.join(yahboom_nav_share, "rviz", "rtabmap_nav.rviz")
+    default_rviz_config = os.path.join(
+        yahboom_alc_share, "rviz", "alc_r2_exploration.rviz"
+    )
     imu_filter_config = os.path.join(
         yahboom_bringup_share, "param", "imu_filter_param.yaml"
     )
@@ -328,11 +398,68 @@ def generate_launch_description():
             "camera_name": "camera",
             "enable_color": "true",
             "enable_depth": "true",
+            # These extrinsics are fixed. Publishing them on /tf from the
+            # camera's streaming thread lets a USB scheduling stall make the
+            # transform expire at an RGB-D timestamp. They are published
+            # below on /tf_static instead.
+            "publish_tf": "false",
             "enable_ir": "false",
             "enable_point_cloud": "true",
             "enable_colored_point_cloud": "false",
         }.items(),
     )
+
+    # Astra Pro Plus factory extrinsics observed from the camera driver. Keep
+    # this immutable chain on /tf_static: camera_link is attached to the R2
+    # URDF, while these links describe fixed depth/color sensor geometry.
+    camera_static_transforms = [
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_link_to_depth_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "0", "--qy", "0", "--qz", "0", "--qw", "1",
+                "--frame-id", "camera_link",
+                "--child-frame-id", "camera_depth_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_depth_to_color_frame",
+            arguments=[
+                "--x", "-0.002165860891342163", "--y", "0.025120487213134767",
+                "--z", "0.00009495562314987182",
+                "--qx", "-0.0008345809765160083", "--qy", "-0.00009292588947573677",
+                "--qz", "-0.0009316844516433775", "--qw", "0.9999992251396179",
+                "--frame-id", "camera_depth_frame",
+                "--child-frame-id", "camera_color_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_depth_to_optical_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
+                "--frame-id", "camera_depth_frame",
+                "--child-frame-id", "camera_depth_optical_frame",
+            ],
+        ),
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="camera_color_to_optical_frame",
+            arguments=[
+                "--x", "0", "--y", "0", "--z", "0",
+                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
+                "--frame-id", "camera_color_frame",
+                "--child-frame-id", "camera_color_optical_frame",
+            ],
+        ),
+    ]
 
     rgbd_sync = Node(
         package="rtabmap_sync",
@@ -341,7 +468,19 @@ def generate_launch_description():
         parameters=[
             {
                 "approx_sync": True,
-                "approx_sync_max_interval": 0.01,
+                # Astra color/depth frames can arrive more than 10 ms apart on
+                # Jetson, so a 10 ms cap dropped valid RGB-D pairs and caused
+                # RTAB-Map conversion failures. But a fully unbounded interval
+                # (0.0) lets the approximate-time policy pair frames that are
+                # far apart, which trips RTAB-Map's "time difference between rgb
+                # and depth frames is high" warning and feeds it badly registered
+                # pairs. 50 ms (~1.5 frame periods at 30 fps) is generous enough
+                # to keep genuine pairs while rejecting those spurious far
+                # associations; the queue of 30 still supplies a better-aligned
+                # pair when one is dropped.
+                "approx_sync_max_interval": 0.05,
+                "topic_queue_size": 30,
+                "sync_queue_size": 30,
                 "use_sim_time": use_sim_time,
                 "qos": qos,
             }
@@ -364,6 +503,14 @@ def generate_launch_description():
         "qos_image": qos,
         "qos_imu": qos,
         "wait_for_transform": 1.0,
+        # map->odom is republished by a 20 Hz loop (tf_delay 0.05) that shares
+        # a mutex with rtabmap's graph update, which can hold it 1-2 s on the
+        # Jetson. Future-dating each stamp by 0.5 s keeps the transform valid
+        # for consumers through most of a stall (run_20260707_135239 saw
+        # 1.2-2.2 s gaps abort FollowPath and trip the goal-check tf_help
+        # errors even at costmap tolerance 1.0). map->odom drifts slowly, so
+        # asserting it half a second ahead is safe.
+        "tf_tolerance": 0.5,
         "Reg/Strategy": "0",
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",
@@ -372,9 +519,15 @@ def generate_launch_description():
         "Grid/NormalsSegmentation": "false",
         "Grid/RayTracing": "true",
         "Grid/RangeMin": "0.25",
-        "Grid/RangeMax": "3.0",
+        "Grid/RangeMax": "5.0",
         "Grid/MaxGroundHeight": "0.08",
         "Grid/MaxObstacleHeight": "1.2",
+        # Robot footprint radius used to force-clear cells the robot physically
+        # occupies. Any pose-graph node whose footprint overlaps a cell marks it
+        # as free unconditionally — the strongest possible clearing evidence since
+        # it requires no sensor. Diagonal half-size of R2 body (0.19 front +
+        # 0.115 half-width ≈ 0.22 m diagonal) plus a small margin.
+        "Grid/FootprintRadius": "0.25",
         "subscribe_imu": True,
         "Optimizer/GravitySigma": "0.3",
     }
@@ -433,7 +586,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "cE": 8.0,
+                "cE": 4.0,
                 "tau_min_revisit": 4,
                 "theta_max": 0.25,
                 "lambda_decay": 0.03,
@@ -461,6 +614,8 @@ def generate_launch_description():
                 "output_topic": driver_cmd_vel_topic,
                 "planner_event_topic": "/planner/events",
                 "min_linear_speed": 0.08,
+                "enforce_min_linear_speed": True,
+                "safety_stop_topic": "/collision_safety_stop_active",
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
@@ -485,6 +640,32 @@ def generate_launch_description():
                 "reverse_allowed_cost_max": 98,
                 "reverse_unknown_is_blocked": False,
                 **ROBOT_FOOTPRINT_PARAMS,
+            }
+        ],
+    )
+
+    # IMU-impact reflex only. Smooth depth braking is now handled by the Nav2
+    # collision monitor (slowdown + approach polygons in nav2_rgbd_params.yaml);
+    # this node watches the IMU and raises /collision_safety_stop_active + a
+    # stall_or_slip event when it detects a forward impact. It is no longer in
+    # the cmd_vel path, so the bridge reads /alc/nav_cmd_vel directly.
+    r2_collision_safety_gate = Node(
+        package="yahboom_alc_bringup",
+        executable="r2_collision_safety_gate",
+        name="r2_collision_safety_gate",
+        output="screen",
+        parameters=[
+            {
+                "input_topic": nav_cmd_vel_topic,
+                "imu_topic": "/imu/data",
+                "planner_event_topic": "/planner/events",
+                "safety_stop_topic": "/collision_safety_stop_active",
+                "command_vx_threshold_mps": 0.01,
+                "imu_stale_timeout_sec": 0.5,
+                "imu_baseline_samples": 20,
+                "imu_impact_decel_threshold_mps2": 1.5,
+                "impact_stop_hold_sec": 0.5,
+                "impact_cooldown_sec": 3.0,
             }
         ],
     )
@@ -570,6 +751,7 @@ def generate_launch_description():
                         "slam": {
                             "subscribe_imu": True,
                             "optimizer_gravity_sigma": 0.3,
+                            "tf_tolerance": 0.5,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }
@@ -614,6 +796,12 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            # Fast DDS shared-memory transport is vulnerable to stale
+            # /dev/shm fastrtps_port locks after an interrupted launch. A
+            # failed SHM port can make local graph discovery intermittent,
+            # leaving RTAB-Map alive but unsubscribed from rgbd_sync. Use the
+            # loopback UDP transport for this all-local robot graph instead.
+            SetEnvironmentVariable("FASTDDS_BUILTIN_TRANSPORTS", "UDPv4"),
             DeclareLaunchArgument(
                 "use_sim_time",
                 default_value="false",
@@ -726,6 +914,7 @@ def generate_launch_description():
             rviz_node,
             OpaqueFunction(function=launch_lidar),
             astra_camera,
+            *camera_static_transforms,
             TimerAction(
                 period=tf_warmup_delay_sec,
                 actions=[
@@ -735,6 +924,7 @@ def generate_launch_description():
                 ],
             ),
             TimerAction(period=nav2_start_delay_sec, actions=[nav2]),
+            r2_collision_safety_gate,
             r2_bridge,
             r2_stall_detector,
             r2_safety_stop,

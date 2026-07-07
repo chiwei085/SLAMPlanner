@@ -4,6 +4,9 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: odom
+    # Robot pose feedback is looked up in the map frame; the default 0.1 s
+    # cannot ride out RTAB-Map map->odom stalls (see FollowPath below).
+    transform_tolerance: 1.0
     default_bt_xml_filename: "navigate_to_pose_w_replanning_and_recovery.xml"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
@@ -103,7 +106,12 @@ controller_server:
       rotate_to_heading_min_angle: 0.785
       rotate_to_heading_angular_vel: 0.3
       max_angular_accel: 0.5
-      transform_tolerance: 0.2
+      # RTAB-Map's map->odom publish loop shares a mutex with graph updates
+      # and stalls 1-2 s under Jetson load. run_20260707_135239 logged 35
+      # "Exception in transformPose ... extrapolation into the future" errors
+      # at 0.2, each aborting FollowPath mid-drive. Match the costmap
+      # tolerance so the controller waits out the stall instead of aborting.
+      transform_tolerance: 1.0
       max_robot_pose_search_dist: 2.0
       use_interpolation: true
 
@@ -119,6 +127,12 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_footprint
       use_sim_time: False
+      # Controller server uses this costmap's tolerance when transforming the
+      # path end pose (map frame) into odom for the goal check.  RTAB-Map's
+      # map->odom can stall >0.2 s under load on the Jetson; with the default
+      # 0.3 s the (unchecked) transform fails and nav2 humble compares the
+      # robot against an identity pose — phantom SUCCEEDED near the origin.
+      transform_tolerance: 1.0
       rolling_window: true
       width: 3
       height: 3
@@ -169,13 +183,45 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: False
+      # Tolerate RTAB-Map map->odom publication stalls (see local_costmap).
+      transform_tolerance: 1.0
       footprint: "[[0.19, 0.115], [0.19, -0.115], [-0.19, -0.115], [-0.19, 0.115]]"
       footprint_padding: 0.02
       resolution: 0.05
-      plugins: ["static_layer", "inflation_layer"]
+      # depth_voxel_layer runs after static_layer so its raytrace clearing
+      # overrides static obstacles that the robot observes as free space.
+      # This breaks the one-way ratchet: SLAM grid cells marked occupied by
+      # a past node can be cleared when the robot drives past and the depth
+      # cloud ray hits the same cell.  observation_persistence: 0.0 means
+      # each update starts from a clean slate (no carry-over marking), which
+      # gives clearing rays the maximum opportunity to remove stale obstacles.
+      plugins: ["static_layer", "depth_voxel_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      depth_voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: False
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 0.8
+        mark_threshold: 0
+        observation_sources: depth_cloud
+        depth_cloud:
+          topic: /camera/depth/points
+          obstacle_min_range: 0.2
+          obstacle_max_range: 4.0
+          raytrace_min_range: 0.2
+          raytrace_max_range: 5.0
+          min_obstacle_height: 0.05
+          max_obstacle_height: 0.8
+          observation_persistence: 0.0
+          clearing: True
+          marking: True
+          data_type: "PointCloud2"
+          inf_is_valid: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -275,14 +321,44 @@ collision_monitor:
     cmd_vel_in_topic: "cmd_vel_smoothed_raw"
     cmd_vel_out_topic: "/alc/nav_cmd_vel"
     state_topic: "collision_monitor_state"
-    polygons: ["StopPolygon"]
+    # Three-stage depth braking (replaces the old custom r2_collision_safety_gate
+    # velocity governor). The monitor evaluates every polygon each cycle and
+    # applies the most restrictive result, all from the same persistent depth
+    # cloud, so braking is smooth instead of an on/off stop:
+    #   ApproachZone - time-to-collision scaling: cap speed so the robot can
+    #                  always halt time_before_collision seconds before contact.
+    #   SlowdownZone - fixed ratio cut once an obstacle enters the mid band.
+    #   StopPolygon  - hard stop at the inner band. Its front edge (~0.25 m)
+    #                  is matched to the camera's RangeMin so the robot is
+    #                  already stopped by the time the obstacle enters the
+    #                  near blind zone (sub-0.25 m / pure-rotation gaps are
+    #                  covered by IMU impact recovery, not this monitor).
+    polygons: ["StopPolygon", "SlowdownZone", "ApproachZone"]
     StopPolygon:
       type: "polygon"
-      points: [0.24, 0.14, 0.24, -0.14, -0.12, -0.14, -0.12, 0.14]
+      points: [0.25, 0.14, 0.25, -0.14, -0.12, -0.14, -0.12, 0.14]
       action_type: "stop"
       min_points: 4
-      visualize: false
+      visualize: true
       polygon_pub_topic: "collision_monitor/stop_polygon"
+    SlowdownZone:
+      type: "polygon"
+      points: [0.45, 0.16, 0.45, -0.16, -0.12, -0.16, -0.12, 0.16]
+      action_type: "slowdown"
+      min_points: 4
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: "collision_monitor/slowdown_polygon"
+    ApproachZone:
+      type: "polygon"
+      # Robot footprint, projected forward along the commanded velocity.
+      points: [0.19, 0.115, 0.19, -0.115, -0.19, -0.115, -0.19, 0.115]
+      action_type: "approach"
+      min_points: 6
+      time_before_collision: 2.0
+      simulation_time_step: 0.1
+      visualize: true
+      polygon_pub_topic: "collision_monitor/approach_polygon"
     observation_sources: ["depth_cloud"]
     depth_cloud:
       type: "pointcloud"

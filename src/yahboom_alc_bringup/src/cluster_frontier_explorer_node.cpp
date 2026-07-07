@@ -144,7 +144,12 @@ struct descriptor<yahboom_alc_bringup::RecoveryStateMachineConfig>
                       rear_blocked_clear_forward_displacement_m,
                   "rear_blocked_clear_forward_displacement_m"),
             named(&RecoveryStateMachineConfig::recovery_clearance_backup_m,
-                  "recovery_clearance_backup_m"));
+                  "recovery_clearance_backup_m"),
+            named(&RecoveryStateMachineConfig::
+                      recovery_stagnation_escalation_trees,
+                  "recovery_stagnation_escalation_trees"),
+            named(&RecoveryStateMachineConfig::recovery_stagnation_radius_m,
+                  "recovery_stagnation_radius_m"));
     }
 };
 
@@ -221,6 +226,21 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::wall_clearance_m, "wall_clearance_m"),
             named(&FrontierConfig::min_wall_clearance_m,
                   "min_wall_clearance_m"),
+            named(&FrontierConfig::nav2_goal_clearance_m,
+                  "nav2_goal_clearance_m"),
+            named(&FrontierConfig::viewpoint_information_weight,
+                  "viewpoint_information_weight"),
+            named(&FrontierConfig::viewpoint_range_m, "viewpoint_range_m"),
+            named(&FrontierConfig::viewpoint_half_fov_rad,
+                  "viewpoint_half_fov_rad"),
+            named(&FrontierConfig::coverage_revisit_enabled,
+                  "coverage_revisit_enabled"),
+            named(&FrontierConfig::coverage_proximity_m,
+                  "coverage_proximity_m"),
+            named(&FrontierConfig::coverage_sample_spacing_m,
+                  "coverage_sample_spacing_m"),
+            named(&FrontierConfig::coverage_max_targets,
+                  "coverage_max_targets"),
             named(&FrontierConfig::corner_penalty_weight,
                   "corner_penalty_weight"),
             named(&FrontierConfig::corridor_progress_weight,
@@ -271,7 +291,17 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
             named(&FrontierConfig::alignment_spin_max_attempts,
                   "alignment_spin_max_attempts"),
             named(&FrontierConfig::alignment_spin_time_allowance_sec,
-                  "alignment_spin_time_allowance_sec"));
+                  "alignment_spin_time_allowance_sec"),
+            named(&FrontierConfig::coverage_blend_weight,
+                  "coverage_blend_weight"),
+            named(&FrontierConfig::intention_distance_threshold_m,
+                  "intention_distance_threshold_m"),
+            named(&FrontierConfig::intention_continuation_bonus,
+                  "intention_continuation_bonus"),
+            named(&FrontierConfig::intention_clear_radius_m,
+                  "intention_clear_radius_m"),
+            named(&FrontierConfig::intention_timeout_sec,
+                  "intention_timeout_sec"));
     }
 };
 
@@ -338,6 +368,13 @@ constexpr int kConsecutiveReverseChurnEscapeThreshold = 2;
 // at the goal and didn't actually navigate anywhere.  Blacklist the goal to
 // break the "frontier never clears" cycling loop.
 constexpr double kTrivialSuccessThresholdSec = 2.0;
+// Nav2 humble's ControllerServer::isGoalReached() ignores the return value of
+// the end-pose transform: when the map->odom lookup fails the goal checker
+// compares the robot against a default-constructed (identity) pose.  A robot
+// near the odom origin then gets phantom SUCCEEDED results far from the goal.
+// Resend the same waypoint up to this many times before treating the phantom
+// success as a real failure and entering the recovery tree.
+constexpr int kSpuriousSuccessResendMax = 2;
 
 geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     geometry_msgs::msg::Quaternion q;
@@ -520,7 +557,11 @@ private:
                 ", rej_unknown=" +
                 std::to_string(result.counts.rejected_unknown_ratio) +
                 ", rej_clearance=" +
-                std::to_string(result.counts.rejected_clearance) + ")");
+                std::to_string(result.counts.rejected_clearance) +
+                ", rej_nav2_clear=" +
+                std::to_string(result.counts.rejected_nav2_clearance) +
+                ", coverage=" +
+                std::to_string(result.counts.coverage_candidates) + ")");
             return false;
         }
         if (result.relaxed) {
@@ -798,9 +839,11 @@ private:
         breadcrumb_trail_.add({robot_xy, 0.0, nowSec()});
         backtrace_planner_.reset();
         consecutive_reverse_blocked_ = 0;
+        spurious_success_resend_streak_ = 0;
         recovery_escape_active_ = false;
         core_.noteGoalPublished(final_candidate.goal_xy,
-                                final_candidate.goal_yaw, nowSec());
+                                final_candidate.goal_yaw, nowSec(),
+                                final_candidate.path_length);
         publishPlannerEvent(
             "subgoal_route_selected",
             {{"final_goal_xy", pointJson(final_candidate.goal_xy)},
@@ -918,14 +961,32 @@ private:
         if (active_goal_ &&
             !withinDistanceTolerance(robot_pose->xy, *active_goal_,
                                      nav2_success_xy_tolerance_m_)) {
+            const double elapsed = nowSec() - active_waypoint_sent_time_sec_;
             publishPlannerEvent(
                 "nav2_success_pose_mismatch",
                 {{"goal_xy", activeGoalJson()},
                  {"distance_m", rounded(goal_distance)},
-                 {"tolerance_m", rounded(nav2_success_xy_tolerance_m_)}});
+                 {"tolerance_m", rounded(nav2_success_xy_tolerance_m_)},
+                 {"elapsed_sec", rounded(elapsed)},
+                 {"resend_streak", spurious_success_resend_streak_}});
+            if (spurious_success_resend_streak_ < kSpuriousSuccessResendMax) {
+                ++spurious_success_resend_streak_;
+                publishPlannerEvent(
+                    "nav2_spurious_success_resend",
+                    {{"goal_xy", activeGoalJson()},
+                     {"resend_streak", spurious_success_resend_streak_},
+                     {"elapsed_sec", rounded(elapsed)}});
+                goal_handle_.reset();
+                goal_active_ = false;
+                last_progress_time_sec_ = nowSec();
+                sendActiveWaypoint();
+                return;
+            }
+            spurious_success_resend_streak_ = 0;
             startRecoveryTree("nav2_success_pose_mismatch");
             return;
         }
+        spurious_success_resend_streak_ = 0;
 
         if (active_route_index_ + 1 < active_route_.size()) {
             publishPlannerEvent("subgoal_reached",
@@ -1289,11 +1350,32 @@ private:
             return;
         }
         recovery_reason_ = reason;
+        spurious_success_resend_streak_ = 0;
         recovery_start_xy_.reset();
         if (const auto pose = lookupRobotPose()) {
             recovery_start_xy_ = pose->xy;
         }
-        if (recovery_reobserve_used_) {
+        // Reobserve finding a candidate resets the whole tree, so the spin
+        // counter never accumulates and the reverse-pulse/backtrace stage is
+        // unreachable through normal stage progression.  Escalate directly
+        // when consecutive trees keep starting from the same spot.
+        bool escalate_to_backtrace = false;
+        if (recovery_start_xy_) {
+            escalate_to_backtrace = recovery_.noteTreeStartedAndCheckEscalation(
+                recovery_start_xy_->first, recovery_start_xy_->second);
+        }
+        if (escalate_to_backtrace && backtrace_config_.enabled) {
+            recovery_.advanceToReversePulse();
+            publishPlannerEvent(
+                "recovery_stagnation_escalation",
+                {{"reason", reason},
+                 {"trees",
+                  recovery_config_.recovery_stagnation_escalation_trees},
+                 {"radius_m",
+                  rounded(recovery_config_.recovery_stagnation_radius_m)},
+                 {"goal_xy", activeFinalGoalJson()}});
+        }
+        else if (recovery_reobserve_used_) {
             recovery_.startAtSmallRotation();
         }
         else {
@@ -1977,6 +2059,8 @@ private:
              {"score", rounded(candidate.score)},
              {"path_length", rounded(candidate.path_length)},
              {"information", candidate.information},
+             {"visible_unknown", candidate.visible_unknown},
+             {"is_coverage", candidate.is_coverage},
              {"cluster_size", candidate.cells.size()},
              {"unknown_overlap", rounded(candidate.unknown_overlap_ratio)},
              {"wall_clearance", rounded(candidate.wall_clearance)},
@@ -2005,7 +2089,9 @@ private:
                {"rejected_footprint", counts.rejected_footprint},
                {"rejected_swept", counts.rejected_swept},
                {"rejected_unknown_ratio", counts.rejected_unknown_ratio},
-               {"rejected_clearance", counts.rejected_clearance}}}});
+               {"rejected_clearance", counts.rejected_clearance},
+               {"rejected_nav2_clearance", counts.rejected_nav2_clearance},
+               {"coverage_candidates", counts.coverage_candidates}}}});
     }
 
     void publishPlannerEvent(
@@ -2293,6 +2379,7 @@ private:
     int consecutive_reverse_blocked_ = 0;
     int consecutive_immediate_reverse_streak_ = 0;
     int consecutive_backtrace_stall_count_ = 0;
+    int spurious_success_resend_streak_ = 0;
     BackUpGoalHandle::SharedPtr backup_goal_handle_;
     RecoveryStateMachineConfig recovery_config_;
     RecoveryStateMachine recovery_;

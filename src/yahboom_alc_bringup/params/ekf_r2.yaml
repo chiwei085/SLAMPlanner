@@ -4,6 +4,10 @@ ekf_filter_node:
         sensor_timeout: 0.1
         two_d_mode: true
         publish_tf: true
+        # RGB-D frames can be timestamped a few tens of milliseconds ahead of
+        # the latest wheel-odom update. Future-date the EKF TF slightly so
+        # RTAB-Map can resolve odom -> base_footprint at the RGB-D stamp.
+        transform_time_offset: 0.1
         publish_acceleration: false
         reset_on_time_jump: true
 

@@ -6,6 +6,7 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "yahboom_alc_bringup/math_util.hpp"
 
@@ -35,13 +36,41 @@ void FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
 CandidateResult FrontierExplorerCore::findCandidates(
     const WorldPoint& robot_xy, const double now_sec,
     std::optional<double> robot_yaw) {
+    if (config_.coverage_revisit_enabled) {
+        noteRobotVisited(robot_xy);
+    }
+    // Prune a committed intention when the robot has arrived nearby, when it
+    // has timed out, or when the goal has since been blacklisted.
+    if (intention_) {
+        const double dist =
+            std::hypot(robot_xy.first - intention_->goal_xy.first,
+                       robot_xy.second - intention_->goal_xy.second);
+        const bool arrived = dist <= config_.intention_clear_radius_m;
+        const bool timed_out = config_.intention_timeout_sec > 0.0 &&
+                               now_sec - intention_->committed_at_sec >=
+                                   config_.intention_timeout_sec;
+        const bool blacklisted = isBlacklisted(intention_->goal_xy);
+        if (arrived || timed_out || blacklisted) {
+            intention_.reset();
+        }
+    }
     auto result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
     if (!result.candidates.empty()) {
         last_strict_candidate_sec_ = now_sec;
         relaxation_active_ = false;
+        // In blend mode, always merge coverage candidates into the main pool
+        // even when frontier candidates exist (coverage_blend_weight > 0).
+        // In fallback-only mode the guard inside appendCoverageCandidates keeps
+        // this a no-op when candidates are present.
+        if (config_.coverage_blend_weight != 0.0) {
+            appendCoverageCandidates(result, robot_xy, robot_yaw);
+        }
         return result;
     }
     if (config_.no_frontier_relax_sec <= 0.0) {
+        // Frontier search is exhausted with relaxation disabled: fall back to
+        // revisiting known-but-unapproached space rather than idling.
+        appendCoverageCandidates(result, robot_xy, robot_yaw);
         return result;
     }
     if (!last_strict_candidate_sec_) {
@@ -67,6 +96,9 @@ CandidateResult FrontierExplorerCore::findCandidates(
     footprint_geometry_.reset();
     auto relaxed_result = findCandidatesOnce(robot_xy, now_sec, robot_yaw);
     relaxed_result.relaxed = true;
+    // Relaxed frontier search also came up empty: revisit
+    // known-but-unapproached space instead of giving up.
+    appendCoverageCandidates(relaxed_result, robot_xy, robot_yaw);
     return relaxed_result;
 }
 
@@ -145,6 +177,57 @@ CandidateResult FrontierExplorerCore::findCandidatesOnce(
         result.candidates.push_back(std::move(*candidate));
     }
     return result;
+}
+
+void FrontierExplorerCore::appendCoverageCandidates(
+    CandidateResult& result, const WorldPoint& robot_xy,
+    std::optional<double> robot_yaw) {
+    if (!config_.coverage_revisit_enabled) {
+        return;
+    }
+    // In pure-fallback mode (blend disabled) only run when no frontier
+    // candidates exist; in blend mode always include coverage candidates so
+    // unvisited known-free regions compete directly with live frontiers.
+    if (config_.coverage_blend_weight == 0.0 && !result.candidates.empty()) {
+        return;
+    }
+    const int width = static_cast<int>(map_.info.width);
+    const int height = static_cast<int>(map_.info.height);
+    if (!has_map_ || width == 0 || height == 0) {
+        return;
+    }
+    const int exploratory_clearance =
+        std::min(config_.path_clearance_cells,
+                 std::max(0, config_.exploratory_path_clearance_cells));
+    const auto blocked = makeBlockedGrid(width, height, exploratory_clearance);
+    const auto strict_blocked =
+        makeBlockedGrid(width, height, config_.path_clearance_cells);
+    const auto robot_cell = worldToMap(robot_xy.first, robot_xy.second);
+    if (!robot_cell) {
+        return;
+    }
+    const auto start_cell = nearestFreeCell(*robot_cell, blocked, width, height,
+                                            config_.robot_start_search_radius);
+    if (!start_cell) {
+        return;
+    }
+    const auto seeds = findCoverageSeeds(robot_xy, width, height);
+    FrontierCounts coverage_counts;
+    for (const auto& seed : seeds) {
+        auto candidate = makeCandidateImpl({seed}, *start_cell, robot_xy,
+                                           blocked, strict_blocked, width,
+                                           height, coverage_counts, robot_yaw);
+        if (!candidate) {
+            continue;
+        }
+        candidate->is_coverage = true;
+        // Subtract blend weight from score (positive weight = better score =
+        // more competitive against frontier candidates).
+        candidate->score -= config_.coverage_blend_weight;
+        result.candidates.push_back(std::move(*candidate));
+    }
+    result.counts.coverage_candidates =
+        static_cast<int>(result.candidates.size());
 }
 
 std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidate(
@@ -237,12 +320,41 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
             ++counts.rejected_clearance;
             continue;
         }
+        // Mirror Nav2's goal feasibility: a pose inside the global inflation
+        // band is unplannable, so drop it here instead of letting Nav2 abort
+        // and blacklist it. This floor stays in force under relaxed search.
+        if (config_.nav2_goal_clearance_m > 0.0 &&
+            obstacle.wall_clearance < config_.nav2_goal_clearance_m) {
+            ++counts.rejected_nav2_clearance;
+            continue;
+        }
+        // Stage 2 viewpoint term is additive and only computed when enabled, so
+        // with weight 0 the score (and thus selection) is unchanged.
+        int visible_unknown = 0;
+        double viewpoint_bonus = 0.0;
+        if (config_.viewpoint_information_weight > 0.0) {
+            visible_unknown = countVisibleUnknown(goal_cell, goal_yaw);
+            viewpoint_bonus =
+                config_.viewpoint_information_weight * visible_unknown;
+        }
         double score = config_.path_weight * path_length -
                        config_.information_weight * information -
                        config_.frontier_size_weight * cluster.size() -
                        config_.corridor_progress_weight * progress +
                        config_.unknown_overlap_weight * unknown_ratio +
-                       config_.corner_penalty_weight * obstacle.corner_penalty;
+                       config_.corner_penalty_weight * obstacle.corner_penalty -
+                       viewpoint_bonus;
+        // Intention continuation bonus: reduce score (make more attractive) for
+        // candidates near the committed intention goal so the planner sustains
+        // progress toward a chosen distant region across replanning cycles.
+        if (intention_ && config_.intention_continuation_bonus > 0.0) {
+            const double dist_to_intention =
+                std::hypot(goal_xy.first - intention_->goal_xy.first,
+                           goal_xy.second - intention_->goal_xy.second);
+            if (dist_to_intention <= config_.intention_clear_radius_m * 2.0) {
+                score -= config_.intention_continuation_bonus;
+            }
+        }
         if (obstacle.wall_clearance < config_.wall_clearance_m) {
             score += config_.corner_penalty_weight *
                      (config_.wall_clearance_m - obstacle.wall_clearance);
@@ -273,6 +385,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
         candidate.path = *path;
         candidate.path_length = path_length;
         candidate.information = information;
+        candidate.visible_unknown = visible_unknown;
         candidate.reachable = reachable;
         candidate.soft_reachable = soft_reachable;
         candidate.approach_xy = approachPointForPath(*path, goal_xy);
@@ -284,6 +397,14 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
         if (!best || candidate.score < best->score) {
             best = std::move(candidate);
         }
+    }
+    // When viewpoint scoring is disabled it is not computed in the loop; fill
+    // it in for the single chosen candidate so the metric is still logged (and
+    // can be validated) without paying the per-option raycast cost or changing
+    // selection.
+    if (best && config_.viewpoint_information_weight <= 0.0) {
+        best->visible_unknown =
+            countVisibleUnknown(best->goal_cell, best->goal_yaw);
     }
     return best;
 }
@@ -530,6 +651,138 @@ int FrontierExplorerCore::countUnknownNear(const Cell& cell) const {
     return count;
 }
 
+namespace
+{
+long long visitKey(const long qx, const long qy) {
+    // qx/qy are world metres / kVisitQuantM, bounded to a small map, so this
+    // linear combine is collision-free for the relevant coordinate range.
+    return qx * 1000000LL + qy;
+}
+}  // namespace
+
+void FrontierExplorerCore::noteRobotVisited(const WorldPoint& robot_xy) {
+    const long qx = std::lround(robot_xy.first / kVisitQuantM);
+    const long qy = std::lround(robot_xy.second / kVisitQuantM);
+    visited_keys_.insert(visitKey(qx, qy));
+}
+
+bool FrontierExplorerCore::isUnderObserved(const WorldPoint& xy) const {
+    if (visited_keys_.empty()) {
+        return true;
+    }
+    const long qx = std::lround(xy.first / kVisitQuantM);
+    const long qy = std::lround(xy.second / kVisitQuantM);
+    const int radius =
+        std::max(1, static_cast<int>(std::ceil(config_.coverage_proximity_m /
+                                               kVisitQuantM)));
+    const double proximity_sq =
+        config_.coverage_proximity_m * config_.coverage_proximity_m;
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            if (visited_keys_.count(visitKey(qx + dx, qy + dy)) == 0) {
+                continue;
+            }
+            const double wx = static_cast<double>(qx + dx) * kVisitQuantM;
+            const double wy = static_cast<double>(qy + dy) * kVisitQuantM;
+            const double dist_sq = (wx - xy.first) * (wx - xy.first) +
+                                   (wy - xy.second) * (wy - xy.second);
+            if (dist_sq <= proximity_sq) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::vector<Cell> FrontierExplorerCore::findCoverageSeeds(
+    const WorldPoint& robot_xy, const int width, const int height) const {
+    const double resolution = mapResolution();
+    if (resolution <= 0.0) {
+        return {};
+    }
+    const int step = std::max(
+        1, static_cast<int>(config_.coverage_sample_spacing_m / resolution));
+    std::vector<std::pair<double, Cell>> ranked;
+    for (int y = 0; y < height; y += step) {
+        for (int x = 0; x < width; x += step) {
+            if (!isFreeValue(map_.data[index(x, y, width)])) {
+                continue;
+            }
+            if (!hasOccupiedClearance(x, y, width, height,
+                                      config_.min_clearance_cells)) {
+                continue;
+            }
+            const auto xy = mapToWorldUnchecked(x, y);
+            const double distance = std::hypot(xy.first - robot_xy.first,
+                                               xy.second - robot_xy.second);
+            if (distance < config_.min_frontier_distance) {
+                continue;
+            }
+            if (config_.max_frontier_distance > 0.0 &&
+                distance > config_.max_frontier_distance) {
+                continue;
+            }
+            if (!isUnderObserved(xy)) {
+                continue;
+            }
+            ranked.emplace_back(distance, Cell{x, y});
+        }
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<Cell> seeds;
+    const int limit = std::max(0, config_.coverage_max_targets);
+    for (const auto& entry : ranked) {
+        if (static_cast<int>(seeds.size()) >= limit) {
+            break;
+        }
+        seeds.push_back(entry.second);
+    }
+    return seeds;
+}
+
+int FrontierExplorerCore::countVisibleUnknown(const Cell& from,
+                                              const double yaw) const {
+    const double resolution = mapResolution();
+    if (resolution <= 0.0 || config_.viewpoint_range_m <= 0.0) {
+        return 0;
+    }
+    const int width = static_cast<int>(map_.info.width);
+    const int height = static_cast<int>(map_.info.height);
+    const int range_cells =
+        std::max(1, static_cast<int>(config_.viewpoint_range_m / resolution));
+    // Angular step keeps adjacent rays within one cell at max range so the fan
+    // does not skip cells; clamped so a tiny FOV still casts at least one ray.
+    const double angular_step =
+        std::clamp(resolution / config_.viewpoint_range_m, 1e-3, 0.2);
+    std::unordered_set<int> seen;
+    int count = 0;
+    for (double offset = -config_.viewpoint_half_fov_rad;
+         offset <= config_.viewpoint_half_fov_rad + 1e-9;
+         offset += angular_step) {
+        const double angle = yaw + offset;
+        const double dx = std::cos(angle);
+        const double dy = std::sin(angle);
+        for (int step = 1; step <= range_cells; ++step) {
+            const int x = from.first + static_cast<int>(std::lround(dx * step));
+            const int y =
+                from.second + static_cast<int>(std::lround(dy * step));
+            if (!inBounds(x, y, width, height)) {
+                break;
+            }
+            const int idx = index(x, y, width);
+            const int value = map_.data[idx];
+            if (isOccupiedValue(value)) {
+                break;  // line of sight blocked by an obstacle
+            }
+            if (value == -1 && seen.insert(idx).second) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 bool FrontierExplorerCore::shouldPublishGoal(const WorldPoint& goal_xy,
                                              const double now_sec) const {
     if (!last_goal_) {
@@ -544,10 +797,15 @@ bool FrontierExplorerCore::shouldPublishGoal(const WorldPoint& goal_xy,
 
 void FrontierExplorerCore::noteGoalPublished(const WorldPoint& goal_xy,
                                              const double goal_yaw,
-                                             const double now_sec) {
+                                             const double now_sec,
+                                             const double path_length) {
     last_goal_ = goal_xy;
     last_goal_yaw_ = goal_yaw;
     last_goal_time_sec_ = now_sec;
+    if (config_.intention_distance_threshold_m > 0.0 &&
+        path_length >= config_.intention_distance_threshold_m) {
+        intention_ = IntentionState{goal_xy, now_sec};
+    }
 }
 
 FootprintCheck FrontierExplorerCore::footprintCheckAtWorld(const double wx,
@@ -711,7 +969,8 @@ std::optional<double> FrontierExplorerCore::findClearestEscapeDirection(
 ObstacleNeighborhood FrontierExplorerCore::analyzeObstacleNeighborhood(
     const Cell& cell, const int width, const int height) const {
     const double search_radius_m =
-        std::max(config_.wall_clearance_m, config_.min_wall_clearance_m);
+        std::max({config_.wall_clearance_m, config_.min_wall_clearance_m,
+                  config_.nav2_goal_clearance_m});
     const int radius_cells = std::max(
         1, static_cast<int>(std::ceil(search_radius_m / mapResolution())));
     double best = std::numeric_limits<double>::infinity();

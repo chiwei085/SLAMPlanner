@@ -1,6 +1,7 @@
 #include "yahboom_alc_bringup/recovery_state_machine.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace yahboom_alc_bringup
 {
@@ -53,8 +54,9 @@ std::optional<double> RecoveryStateMachine::nextSmallRotationYaw() {
     if (spin_attempts_ >= config_.recovery_small_spin_attempts) {
         return std::nullopt;
     }
-    const double sign = spin_attempts_ % 2 == 0 ? 1.0 : -1.0;
+    const double sign = lifetime_spin_count_ % 2 == 0 ? 1.0 : -1.0;
     ++spin_attempts_;
+    ++lifetime_spin_count_;
     return sign * config_.recovery_small_spin_yaw_rad;
 }
 
@@ -68,6 +70,27 @@ void RecoveryStateMachine::advanceToReversePulse() {
 
 void RecoveryStateMachine::hardFail() {
     stage_ = RecoveryStage::kHardFailed;
+}
+
+bool RecoveryStateMachine::noteTreeStartedAndCheckEscalation(const double x,
+                                                             const double y) {
+    const double dx = x - stagnation_anchor_x_;
+    const double dy = y - stagnation_anchor_y_;
+    if (!stagnation_anchor_valid_ ||
+        std::hypot(dx, dy) > config_.recovery_stagnation_radius_m) {
+        stagnation_anchor_valid_ = true;
+        stagnation_anchor_x_ = x;
+        stagnation_anchor_y_ = y;
+        stagnant_tree_count_ = 0;
+    }
+    ++stagnant_tree_count_;
+    if (config_.recovery_stagnation_escalation_trees <= 0 ||
+        stagnant_tree_count_ < config_.recovery_stagnation_escalation_trees) {
+        return false;
+    }
+    stagnant_tree_count_ = 0;
+    stagnation_anchor_valid_ = false;
+    return true;
 }
 
 void RecoveryStateMachine::latchRearBlocked(const double now_sec) {
