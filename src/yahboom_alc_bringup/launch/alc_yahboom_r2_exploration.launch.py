@@ -503,14 +503,11 @@ def generate_launch_description():
         "qos_image": qos,
         "qos_imu": qos,
         "wait_for_transform": 1.0,
-        # map->odom is republished by a 20 Hz loop (tf_delay 0.05) that shares
-        # a mutex with rtabmap's graph update, which can hold it 1-2 s on the
-        # Jetson. Future-dating each stamp by 0.5 s keeps the transform valid
-        # for consumers through most of a stall (run_20260707_135239 saw
-        # 1.2-2.2 s gaps abort FollowPath and trip the goal-check tf_help
-        # errors even at costmap tolerance 1.0). map->odom drifts slowly, so
-        # asserting it half a second ahead is safe.
-        "tf_tolerance": 0.5,
+        # publish_tf is disabled: rtabmap_map_tf_relay handles map→odom TF at 50 Hz
+        # using localization_pose (published from RTAB-Map's SLAM callback, outside
+        # the graph-optimization mutex). This breaks the 1–2 s TF stall caused by
+        # CoreWrapper::mapToOdomMutex_ contention under Jetson load.
+        "publish_tf": False,
         "Reg/Strategy": "0",
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",
@@ -563,6 +560,28 @@ def generate_launch_description():
             },
         ],
         remappings=rtabmap_remappings,
+    )
+
+    # Publishes map→odom TF at 50 Hz, decoupled from RTAB-Map's graph-optimization
+    # mutex. It publishes identity map→odom until /localization_pose first arrives,
+    # then caches the derived transform. During an optimization spike the relay keeps
+    # republishing the last known transform with a fresh timestamp, so Nav2 never
+    # sees a TF extrapolation gap.
+    rtabmap_map_tf_relay = Node(
+        package="yahboom_alc_bringup",
+        executable="rtabmap_map_tf_relay",
+        name="rtabmap_map_tf_relay",
+        output="screen",
+        parameters=[
+            {
+                "map_frame": "map",
+                "odom_frame": "odom",
+                "base_frame": "base_footprint",
+                "publish_rate_hz": 50.0,
+                "stale_warn_sec": 2.0,
+                "use_sim_time": use_sim_time,
+            }
+        ],
     )
 
     nav2 = IncludeLaunchDescription(
@@ -751,7 +770,8 @@ def generate_launch_description():
                         "slam": {
                             "subscribe_imu": True,
                             "optimizer_gravity_sigma": 0.3,
-                            "tf_tolerance": 0.5,
+                            "publish_tf": False,
+                            "map_tf_relay_rate_hz": 50.0,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }
@@ -921,6 +941,7 @@ def generate_launch_description():
                     rgbd_sync,
                     rtabmap_mapping,
                     rtabmap_localization,
+                    rtabmap_map_tf_relay,
                 ],
             ),
             TimerAction(period=nav2_start_delay_sec, actions=[nav2]),

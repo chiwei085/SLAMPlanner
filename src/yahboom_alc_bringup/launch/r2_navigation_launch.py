@@ -86,8 +86,8 @@ def generate_launch_description():
                 remappings=remappings,
             ),
             Node(
-                package="nav2_planner",
-                executable="planner_server",
+                package="yahboom_alc_bringup",
+                executable="r2_planner_server",
                 name="planner_server",
                 output="screen",
                 respawn=use_respawn,

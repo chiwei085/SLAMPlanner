@@ -11,7 +11,8 @@ bridge needed by the R2 driver.
 bringup, including `Ackman_driver_R2`, and the Astra RGB-D camera before
 launching RTAB-Map, Nav2, ALC-Planner, and the bridge.
 
-The launch uses RTAB-Map as the only `map -> odom` TF publisher. Nav2 is started
+The launch disables RTAB-Map's `map -> odom` TF publisher and runs
+`rtabmap_map_tf_relay` as the only `map -> odom` TF publisher. Nav2 is started
 with `navigation_launch.py` only, so AMCL and Nav2 map_server do not compete
 with RTAB-Map localization.
 
