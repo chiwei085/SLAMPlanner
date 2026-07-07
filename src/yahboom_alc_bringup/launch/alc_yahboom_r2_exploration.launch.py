@@ -43,11 +43,15 @@ NAV2_RUNTIME_METADATA = {
     "controller_use_rotate_to_heading": False,
     "local_inflation_radius": 0.45,
     "global_inflation_radius": 0.25,
-    "global_depth_voxel_layer": False,
+    "global_depth_voxel_layer": True,
     "local_depth_min_obstacle_height": 0.01,
     "local_depth_observation_persistence": 0.4,
     "local_footprint_padding": 0.02,
     "global_footprint_padding": 0.02,
+    "costmap_transform_tolerance": 1.0,
+    "controller_transform_tolerance": 1.0,
+    "bt_navigator_transform_tolerance": 1.0,
+    "recovery_stagnation_escalation_trees": 3,
     "bridge_reverse": {
         "enabled": True,
         "allowed_cost_max": 98,
@@ -155,6 +159,57 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "unknown_overlap_weight": 1.5,
                     "wall_clearance_m": 0.28,
                     "min_wall_clearance_m": 0.0,
+                    # Hard goal-clearance floor tracking the Nav2 global costmap
+                    # inflation_radius (0.25). Goals closer than this to an
+                    # obstacle sit in Nav2's inflated band and get aborted with
+                    # global_path_blocked; filtering them here stops the explorer
+                    # from recommending unplannable near-wall goals and
+                    # poisoning the blacklist. Kept in force under relaxed search.
+                    "nav2_goal_clearance_m": 0.22,
+                    # Stage 2 viewpoint / next-best-view scoring. Enabled at 0.1
+                    # after run_20260624_210848 validation: that run logged 10
+                    # best_candidates with visible_unknown=0 despite information
+                    # >200 (goals the camera physically cannot see past walls),
+                    # and weight ~0.05 already flips the worst blind cases, so 0.1
+                    # demotes them with margin while leaving information a say.
+                    # Revert by setting back to 0.0. range/fov match the Astra
+                    # depth camera (HFOV ~58 deg -> half ~0.5 rad).
+                    "viewpoint_information_weight": 0.1,
+                    "viewpoint_range_m": 3.0,
+                    "viewpoint_half_fov_rad": 0.5,
+                    # Stage 3 coverage revisit. With RangeMax 5.0 the map is
+                    # painted from far away, so distant rooms become known before
+                    # the robot drives near them and exploration stops caring.
+                    # This sends the robot to the nearest reachable known-free
+                    # region it has never approached within coverage_proximity_m,
+                    # but ONLY when frontier search (incl. relaxed) finds nothing
+                    # - a pure fallback that cannot affect active exploration, so
+                    # enabling it is regression-safe. Disable by setting
+                    # coverage_revisit_enabled False.
+                    "coverage_revisit_enabled": True,
+                    "coverage_proximity_m": 1.2,
+                    "coverage_sample_spacing_m": 0.4,
+                    "coverage_max_targets": 12,
+                    # Coverage blend (F1/F3). When > 0, unvisited known-free
+                    # regions compete directly with frontier candidates instead
+                    # of being a pure fallback. A value around 1.0-2.0 offsets
+                    # the typical information_weight * unknown_count advantage
+                    # that frontier candidates have. 0 = fallback-only (safe
+                    # default, identical to previous behaviour).
+                    "coverage_blend_weight": 1.5,
+                    # Intention commitment (F9). When
+                    # intention_distance_threshold_m > 0, selecting a goal
+                    # farther than this distance locks in a strategic intention.
+                    # Candidates within intention_clear_radius_m * 2 of that
+                    # goal receive an intention_continuation_bonus score
+                    # reduction in subsequent cycles, preventing nearby
+                    # opportunities from perpetually outbidding the committed
+                    # long-range target. intention_timeout_sec clears stale
+                    # intentions (0 = never expire). All disabled by default.
+                    "intention_distance_threshold_m": 3.0,
+                    "intention_continuation_bonus": 2.0,
+                    "intention_clear_radius_m": 1.5,
+                    "intention_timeout_sec": 35.0,
                     "corner_penalty_weight": 1.0,
                     "corridor_progress_weight": 0.4,
                     "heading_penalty_weight": 1.2,
@@ -200,11 +255,24 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "backtrace_backup_action": "/backup",
                     "recovery_reobserve_cycles": 1,
                     "recovery_small_spin_yaw_rad": 0.349066,
-                    "recovery_small_spin_attempts": 2,
+                    # Reduced from 2 → 1: each stationary spin generates fake
+                    # occupied cells via yaw odometry error + depth misalignment.
+                    # One attempt preserves basic reobservation; the backtrace
+                    # recovery (沿軌跡撤退) is the preferred escape mechanism.
+                    "recovery_small_spin_attempts": 1,
                     "recovery_forward_escape_distance_m": 1.5,
                     "rear_blocked_min_latch_sec": 15.0,
                     "rear_blocked_clear_forward_displacement_m": 0.25,
                     "recovery_clearance_backup_m": 0.30,
+                    # Cross-tree stagnation escalation: the explorer re-sends a
+                    # goal after every reobserve, which resets the recovery
+                    # tree (and its spin counter), so the backtrace stage was
+                    # unreachable — 4 runs on 2026-07-07 show backtrace=0
+                    # despite 18-47 recovery trees each.  When 3 consecutive
+                    # trees start with the robot inside a 0.25 m circle, jump
+                    # straight to the reverse-pulse/backtrace stage.
+                    "recovery_stagnation_escalation_trees": 3,
+                    "recovery_stagnation_radius_m": 0.25,
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }
@@ -401,11 +469,16 @@ def generate_launch_description():
             {
                 "approx_sync": True,
                 # Astra color/depth frames can arrive more than 10 ms apart on
-                # Jetson. A 10 ms cap drops otherwise valid RGB-D pairs and
-                # causes RTAB-Map conversion failures. Match RTAB-Map's
-                # unbounded approximate-sync default and retain a larger
-                # backlog for short camera scheduling stalls.
-                "approx_sync_max_interval": 0.0,
+                # Jetson, so a 10 ms cap dropped valid RGB-D pairs and caused
+                # RTAB-Map conversion failures. But a fully unbounded interval
+                # (0.0) lets the approximate-time policy pair frames that are
+                # far apart, which trips RTAB-Map's "time difference between rgb
+                # and depth frames is high" warning and feeds it badly registered
+                # pairs. 50 ms (~1.5 frame periods at 30 fps) is generous enough
+                # to keep genuine pairs while rejecting those spurious far
+                # associations; the queue of 30 still supplies a better-aligned
+                # pair when one is dropped.
+                "approx_sync_max_interval": 0.05,
                 "topic_queue_size": 30,
                 "sync_queue_size": 30,
                 "use_sim_time": use_sim_time,
@@ -430,6 +503,14 @@ def generate_launch_description():
         "qos_image": qos,
         "qos_imu": qos,
         "wait_for_transform": 1.0,
+        # map->odom is republished by a 20 Hz loop (tf_delay 0.05) that shares
+        # a mutex with rtabmap's graph update, which can hold it 1-2 s on the
+        # Jetson. Future-dating each stamp by 0.5 s keeps the transform valid
+        # for consumers through most of a stall (run_20260707_135239 saw
+        # 1.2-2.2 s gaps abort FollowPath and trip the goal-check tf_help
+        # errors even at costmap tolerance 1.0). map->odom drifts slowly, so
+        # asserting it half a second ahead is safe.
+        "tf_tolerance": 0.5,
         "Reg/Strategy": "0",
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",
@@ -441,6 +522,12 @@ def generate_launch_description():
         "Grid/RangeMax": "5.0",
         "Grid/MaxGroundHeight": "0.08",
         "Grid/MaxObstacleHeight": "1.2",
+        # Robot footprint radius used to force-clear cells the robot physically
+        # occupies. Any pose-graph node whose footprint overlaps a cell marks it
+        # as free unconditionally — the strongest possible clearing evidence since
+        # it requires no sensor. Diagonal half-size of R2 body (0.19 front +
+        # 0.115 half-width ≈ 0.22 m diagonal) plus a small margin.
+        "Grid/FootprintRadius": "0.25",
         "subscribe_imu": True,
         "Optimizer/GravitySigma": "0.3",
     }
@@ -664,6 +751,7 @@ def generate_launch_description():
                         "slam": {
                             "subscribe_imu": True,
                             "optimizer_gravity_sigma": 0.3,
+                            "tf_tolerance": 0.5,
                         },
                         "footprint": ROBOT_FOOTPRINT_PARAMS,
                     }

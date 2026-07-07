@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,59 @@ struct FrontierConfig
     double unknown_overlap_weight = 4.0;
     double wall_clearance_m = 0.22;
     double min_wall_clearance_m = 0.0;
+    // Hard floor on a goal pose's obstacle clearance, kept in lock-step with
+    // the Nav2 global costmap inflation_radius. A goal whose nearest obstacle
+    // is closer than this sits inside Nav2's inflated band, so
+    // SmacPlannerHybrid rejects it with global_path_blocked /
+    // empty_or_failed_path. Filtering here stops the explorer from recommending
+    // goals Nav2 can never accept (and from poisoning the blacklist with them).
+    // 0 disables the floor. Unlike wall_clearance_m (a soft penalty) and
+    // min_wall_clearance_m, this floor is preserved under relaxed search.
+    double nav2_goal_clearance_m = 0.0;
+    // Viewpoint / next-best-view scoring (Stage 2). When
+    // viewpoint_information_weight > 0, each goal pose is additionally scored
+    // by how much cluster-relevant unknown its camera can actually SEE: a
+    // forward ray-fan from the goal cell, bounded by viewpoint_range_m and
+    // +/-viewpoint_half_fov_rad around goal_yaw, counting unknown cells reached
+    // before any occupied cell blocks the line of sight. This lets the planner
+    // prefer a feasible standoff that observes a hard-to-enter (e.g. near-wall)
+    // pocket over a pose crammed against it. Weight 0 disables it entirely so
+    // selection is byte-identical to the pre-Stage-2 behaviour (no regression).
+    double viewpoint_information_weight = 0.0;
+    double viewpoint_range_m = 3.0;
+    double viewpoint_half_fov_rad = 0.5;
+    // Coverage revisit (Stage 3). With a long Grid/RangeMax the map gets
+    // painted from far away, so distant rooms become "known" (non-frontier)
+    // before the robot ever drives near them and exploration loses interest.
+    // When coverage_revisit_enabled and the normal frontier search yields NO
+    // candidate, the robot is instead sent to the nearest reachable known-free
+    // region it has never approached within coverage_proximity_m, to densify
+    // it. It is a pure fallback - it only runs when there would otherwise be
+    // zero candidates - so it cannot change active exploration (no regression).
+    bool coverage_revisit_enabled = false;
+    double coverage_proximity_m = 1.2;
+    double coverage_sample_spacing_m = 0.4;
+    int coverage_max_targets = 12;
+    // Score bonus (subtracted from score) given to coverage-revisit candidates
+    // when blended into the main frontier pool. Positive values make coverage
+    // candidates more attractive so they can compete with live frontier
+    // candidates rather than acting as a pure fallback. Zero (default)
+    // preserves the existing behaviour: coverage candidates are only generated
+    // when no frontier candidates exist.
+    double coverage_blend_weight = 0.0;
+    // Intention-based commitment (F9). When intention_distance_threshold_m > 0,
+    // selecting a goal farther than this distance locks in a strategic
+    // intention. Subsequent planning cycles give a score bonus
+    // (intention_continuation_bonus, subtracted from score) to candidates near
+    // the locked intention goal, preventing nearby small opportunities from
+    // perpetually outbidding a committed long-range target. Intention is
+    // cleared when the robot arrives within intention_clear_radius_m, when
+    // intention_timeout_sec elapses (0 = no timeout), or when the intention
+    // goal is blacklisted.
+    double intention_distance_threshold_m = 0.0;
+    double intention_continuation_bonus = 0.0;
+    double intention_clear_radius_m = 1.5;
+    double intention_timeout_sec = 0.0;
     double corner_penalty_weight = 1.0;
     double corridor_progress_weight = 0.4;
     double heading_penalty_weight = 0.0;
@@ -89,6 +143,8 @@ struct FrontierCounts
     int rejected_swept = 0;
     int rejected_unknown_ratio = 0;
     int rejected_clearance = 0;
+    int rejected_nav2_clearance = 0;
+    int coverage_candidates = 0;
 };
 
 struct FootprintCheck
@@ -131,6 +187,8 @@ struct FrontierCandidate
     std::vector<Cell> path;
     double path_length = 0.0;
     int information = 0;
+    int visible_unknown = 0;
+    bool is_coverage = false;
     bool reachable = false;
     bool soft_reachable = false;
     WorldPoint approach_xy;
@@ -164,6 +222,12 @@ struct AlignmentGraceStatus
     double heading_error = 0.0;
     double previous_heading_error = 0.0;
     double heading_error_delta = 0.0;
+};
+
+struct IntentionState
+{
+    WorldPoint goal_xy;
+    double committed_at_sec = 0.0;
 };
 
 class FrontierExplorerCore
@@ -202,9 +266,31 @@ public:
 
     double pathLength(const std::vector<Cell>& path) const;
     int countUnknownNear(const Cell& cell) const;
+    // Records that the robot occupied `robot_xy`, building the traversal
+    // history used by isUnderObserved(). Only called while coverage revisit is
+    // enabled.
+    void noteRobotVisited(const WorldPoint& robot_xy);
+    // True if the robot has never been within coverage_proximity_m of `xy`.
+    bool isUnderObserved(const WorldPoint& xy) const;
+    // Subsampled known-free, reachable-clearance cells the robot has never
+    // approached, nearest to robot_xy first, capped to coverage_max_targets.
+    std::vector<Cell> findCoverageSeeds(const WorldPoint& robot_xy, int width,
+                                        int height) const;
+    // Counts unique unknown cells visible from `from` within a forward camera
+    // ray-fan (viewpoint_range_m, +/-viewpoint_half_fov_rad around `yaw`),
+    // stopping each ray at the first occupied cell. Used for Stage 2 viewpoint
+    // scoring; see viewpoint_information_weight.
+    int countVisibleUnknown(const Cell& from, double yaw) const;
     bool shouldPublishGoal(const WorldPoint& goal_xy, double now_sec) const;
+    // path_length is used to decide whether to commit a strategic intention
+    // when intention_distance_threshold_m > 0.
     void noteGoalPublished(const WorldPoint& goal_xy, double goal_yaw,
-                           double now_sec);
+                           double now_sec, double path_length = 0.0);
+
+    const std::optional<IntentionState>& intention() const {
+        return intention_;
+    }
+    void clearIntention() { intention_.reset(); }
 
     FootprintCheck footprintCheckAtWorld(double wx, double wy, double yaw);
     std::optional<double> sweptPathUnknownRatio(const std::vector<Cell>& path);
@@ -275,6 +361,12 @@ private:
     CandidateResult findCandidatesOnce(const WorldPoint& robot_xy,
                                        double now_sec,
                                        std::optional<double> robot_yaw);
+    // Fills `result` with coverage-revisit candidates when coverage is enabled
+    // and frontier search produced none. No-op otherwise, so it can never alter
+    // an active-exploration result.
+    void appendCoverageCandidates(CandidateResult& result,
+                                  const WorldPoint& robot_xy,
+                                  std::optional<double> robot_yaw);
     std::optional<FrontierCandidate> makeCandidateImpl(
         const std::vector<Cell>& cluster, const Cell& start_cell,
         const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
@@ -292,6 +384,11 @@ private:
     std::vector<GoalAttemptRecord> goal_attempts_;
     std::optional<double> last_strict_candidate_sec_;
     bool relaxation_active_ = false;
+    // Quantised world cells (kVisitQuantM) the robot has occupied, for
+    // coverage-revisit under-observed detection.
+    static constexpr double kVisitQuantM = 0.25;
+    std::unordered_set<long long> visited_keys_;
+    std::optional<IntentionState> intention_;
 };
 
 }  // namespace yahboom_alc_bringup

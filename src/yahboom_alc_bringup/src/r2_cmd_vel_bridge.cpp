@@ -420,6 +420,20 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
     const auto status = footprintSafetyStatus(
         *costmap, *pose, frontExtension(check_distance), config_);
     if (status != FootprintSafetyStatus::kSafe) {
+        // Front is blocked; try a reverse arc as fallback — the path the robot
+        // just came from is a certified-free corridor and typically
+        // unobstructed.
+        const double reverse_check =
+            std::max(0.0, config_.reverse_check_distance_m +
+                              config_.reverse_safety_margin_m);
+        const auto reverse_status = footprintSafetyStatus(
+            *costmap, *pose, rearExtension(reverse_check), config_);
+        if (reverse_status == FootprintSafetyStatus::kSafe) {
+            output.linear.x = -output.linear.x;
+            publishPlannerEvent("stationary_arc_reversed",
+                                "front_blocked_reverse_ok");
+            return output;
+        }
         output.linear.x = 0.0;
         output.linear.y = 0.0;
         publishPlannerEvent("stationary_arc_blocked",
