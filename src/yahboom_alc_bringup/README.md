@@ -99,6 +99,19 @@ Launch the MVP pipeline:
 ros2 launch yahboom_alc_bringup alc_yahboom_r2_exploration.launch.py
 ```
 
+The launch attempts to run `ekf_filter_node` with
+`ekf_launch_prefix="nice -n -10"` so odom TF publication has scheduling
+priority during point-cloud spikes. On deployments without `CAP_SYS_NICE`, this
+prints a permission warning and continues at normal priority; systems with that
+capability can use `ekf_launch_prefix="chrt -f 80"` for stronger scheduling
+isolation.
+
+Depth cloud load is reduced by publishing a shared downsampled cloud on
+`/camera/depth/points_voxel_base`. Astra FPS defaults stay at 30 because this
+R2 camera rejected 640x480@15 for both depth and UVC color during launch; only
+override `camera_color_fps`, `camera_depth_fps`, or `camera_ir_fps` after
+confirming the mode is supported by the hardware.
+
 Keep `software/library_ws` before `yahboomcar_ws` in the shell environment.
 Astra camera, optional LiDAR drivers, and the R2 bringup's EKF dependency
 `robot_localization` are installed in `software/library_ws`.

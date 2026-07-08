@@ -28,6 +28,8 @@ find_package(lifecycle_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_planner REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(PCL REQUIRED COMPONENTS filters)
+find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -156,6 +158,25 @@ ament_target_dependencies(r2_planner_server
   rclcpp
 )
 
+add_executable(depth_cloud_preprocessor
+  src/depth_cloud_preprocessor.cpp
+)
+target_include_directories(depth_cloud_preprocessor
+  PRIVATE
+    ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(depth_cloud_preprocessor
+  ${PCL_LIBRARIES}
+)
+ament_target_dependencies(depth_cloud_preprocessor
+  pcl_conversions
+  rclcpp
+  sensor_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+)
+
 add_executable(rtabmap_map_tf_relay
   src/rtabmap_map_tf_relay.cpp
 )
@@ -198,6 +219,7 @@ install(
   TARGETS
     yahboom_alc_bringup_lib
     cluster_frontier_explorer
+    depth_cloud_preprocessor
     planner_runtime_logger
     r2_emergency_stop
     r2_safe_driver

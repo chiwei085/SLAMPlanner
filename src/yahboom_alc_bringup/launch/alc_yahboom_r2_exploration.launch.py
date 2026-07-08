@@ -44,6 +44,11 @@ NAV2_RUNTIME_METADATA = {
     "local_inflation_radius": 0.29,
     "global_inflation_radius": 0.16,
     "global_depth_voxel_layer": True,
+    "depth_cloud_preprocessor_leaf_size_m": 0.05,
+    "depth_cloud_preprocessor_target_frame": "base_footprint",
+    "depth_cloud_preprocessor_min_range_m": 0.2,
+    "depth_cloud_preprocessor_max_range_m": 6.0,
+    "depth_camera_fps": 30,
     "local_depth_min_obstacle_height": 0.01,
     "local_depth_observation_persistence": 0.4,
     "local_footprint_padding": 0.02,
@@ -314,12 +319,19 @@ def generate_launch_description():
     rviz_config = LaunchConfiguration("rviz_config")
     nav2_start_delay_sec = LaunchConfiguration("nav2_start_delay_sec")
     startup_motion_delay_sec = LaunchConfiguration("startup_motion_delay_sec")
+    camera_pointcloud_start_delay_sec = LaunchConfiguration(
+        "camera_pointcloud_start_delay_sec"
+    )
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     nav2_bt_xml = LaunchConfiguration("nav2_bt_xml")
     planner_log_dir = LaunchConfiguration("planner_log_dir")
     nav_cmd_vel_topic = LaunchConfiguration("nav_cmd_vel_topic")
     driver_cmd_vel_topic = LaunchConfiguration("driver_cmd_vel_topic")
     navigate_status_topic = LaunchConfiguration("navigate_status_topic")
+    ekf_launch_prefix = LaunchConfiguration("ekf_launch_prefix")
+    camera_color_fps = LaunchConfiguration("camera_color_fps")
+    camera_depth_fps = LaunchConfiguration("camera_depth_fps")
+    camera_ir_fps = LaunchConfiguration("camera_ir_fps")
 
     robot_description = ParameterValue(
         Command(["xacro ", LaunchConfiguration("model")]), value_type=str
@@ -374,6 +386,7 @@ def generate_launch_description():
         executable="ekf_node",
         name="ekf_filter_node",
         output="screen",
+        prefix=ekf_launch_prefix,
         parameters=[
             os.path.join(yahboom_alc_share, "params", "ekf_r2.yaml")
         ],
@@ -398,6 +411,9 @@ def generate_launch_description():
             "camera_name": "camera",
             "enable_color": "true",
             "enable_depth": "true",
+            "color_fps": camera_color_fps,
+            "depth_fps": camera_depth_fps,
+            "ir_fps": camera_ir_fps,
             # These extrinsics are fixed. Publishing them on /tf from the
             # camera's streaming thread lets a USB scheduling stall make the
             # transform expire at an RGB-D timestamp. They are published
@@ -460,6 +476,30 @@ def generate_launch_description():
             ],
         ),
     ]
+
+    depth_cloud_preprocessor = Node(
+        package="yahboom_alc_bringup",
+        executable="depth_cloud_preprocessor",
+        name="depth_cloud_preprocessor",
+        output="screen",
+        condition=IfCondition(enable_camera),
+        parameters=[
+            {
+                "input_topic": "/camera/depth/points",
+                "output_topic": "/camera/depth/points_voxel_base",
+                "target_frame": "base_footprint",
+                "leaf_size_m": 0.05,
+                "transform_timeout_sec": 0.2,
+                # Matches the costmaps' obstacle_min_range (nav2_rgbd_params.yaml):
+                # rejects invalid near-zero depth returns (common at camera
+                # startup) here so collision_monitor's pointcloud source --
+                # which has no range filter of its own -- is protected too.
+                "min_range_m": 0.2,
+                "max_range_m": 6.0,
+                "use_sim_time": use_sim_time,
+            }
+        ],
+    )
 
     rgbd_sync = Node(
         package="rtabmap_sync",
@@ -878,6 +918,14 @@ def generate_launch_description():
                 description="Delay Nav2 startup until RTAB-Map has time to publish map and TF.",
             ),
             DeclareLaunchArgument(
+                "camera_pointcloud_start_delay_sec",
+                default_value="6.0",
+                description=(
+                    "Delay raw depth point-cloud consumers until the Astra "
+                    "driver has finished opening depth/color streams."
+                ),
+            ),
+            DeclareLaunchArgument(
                 "startup_motion_delay_sec",
                 default_value="12.0",
                 description="Delay goal-producing nodes so the robot remains stopped after launch.",
@@ -925,6 +973,39 @@ def generate_launch_description():
                 default_value="/navigate_to_pose/_action/status",
                 description="NavigateToPose action status topic observed by the runtime logger.",
             ),
+            DeclareLaunchArgument(
+                "ekf_launch_prefix",
+                default_value="nice -n -10",
+                description=(
+                    "Prefix for ekf_filter_node scheduling priority. Systems "
+                    "with CAP_SYS_NICE may override with 'chrt -f 80'."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "camera_color_fps",
+                default_value="30",
+                description=(
+                    "Astra color stream FPS. Keep 30 by default because this "
+                    "camera's UVC color mode rejects 640x480@15 and can crash "
+                    "the driver."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "camera_depth_fps",
+                default_value="30",
+                description=(
+                    "Astra depth stream FPS. Keep 30 by default because "
+                    "640x480@15 is not advertised by the observed depth mode."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "camera_ir_fps",
+                default_value="30",
+                description=(
+                    "Astra IR stream FPS. IR is disabled here, but keep the "
+                    "argument available for deployments that enable it."
+                ),
+            ),
             joint_state_publisher,
             robot_state_publisher,
             ackman_driver_node,
@@ -935,6 +1016,10 @@ def generate_launch_description():
             OpaqueFunction(function=launch_lidar),
             astra_camera,
             *camera_static_transforms,
+            TimerAction(
+                period=camera_pointcloud_start_delay_sec,
+                actions=[depth_cloud_preprocessor],
+            ),
             TimerAction(
                 period=tf_warmup_delay_sec,
                 actions=[

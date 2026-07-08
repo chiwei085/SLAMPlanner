@@ -161,7 +161,14 @@ local_costmap:
         mark_threshold: 0
         observation_sources: depth_cloud
         depth_cloud:
-          topic: /camera/depth/points
+          topic: /camera/depth/points_voxel_base
+          # depth_cloud_preprocessor pre-transforms points into base_footprint
+          # and rewrites header.frame_id accordingly. Without sensor_frame set,
+          # ObservationBuffer would use that rewritten frame_id as the raytrace
+          # origin (0,0,0 of base_footprint = ground-level robot center) instead
+          # of the camera's real elevated, forward-offset position, corrupting
+          # the clearing geometry that low chair-leg detection depends on.
+          sensor_frame: camera_depth_optical_frame
           obstacle_min_range: 0.2
           obstacle_max_range: 1.5
           raytrace_min_range: 0.2
@@ -216,7 +223,11 @@ global_costmap:
         mark_threshold: 0
         observation_sources: depth_cloud
         depth_cloud:
-          topic: /camera/depth/points
+          topic: /camera/depth/points_voxel_base
+          # See local_costmap voxel_layer comment: without sensor_frame, the
+          # raytrace origin would come from the preprocessor's rewritten
+          # base_footprint header instead of the real camera pose.
+          sensor_frame: camera_depth_optical_frame
           obstacle_min_range: 0.2
           obstacle_max_range: 4.0
           raytrace_min_range: 0.2
@@ -368,7 +379,7 @@ collision_monitor:
     observation_sources: ["depth_cloud"]
     depth_cloud:
       type: "pointcloud"
-      topic: "/camera/depth/points"
+      topic: "/camera/depth/points_voxel_base"
       min_height: 0.01
       max_height: 0.8
       enabled: true
