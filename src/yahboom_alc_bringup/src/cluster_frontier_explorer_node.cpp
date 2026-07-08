@@ -942,13 +942,13 @@ private:
                         const GoalHandle::SharedPtr& handle) {
         if (generation != nav_goal_generation_) {
             if (handle) {
-                nav_client_->async_cancel_goal(handle);
+                safeCancelGoal(nav_client_, handle, "stale_nav_goal");
             }
             return;
         }
         if (!goal_active_) {
             if (handle) {
-                nav_client_->async_cancel_goal(handle);
+                safeCancelGoal(nav_client_, handle, "inactive_nav_goal");
             }
             return;
         }
@@ -1213,7 +1213,7 @@ private:
         spin_recovery_active_ = true;
         spin_started_sec_ = now;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
 
@@ -1259,7 +1259,7 @@ private:
         }
         if (!spin_recovery_active_) {
             if (handle) {
-                spin_client_->async_cancel_goal(handle);
+                safeCancelGoal(spin_client_, handle, "stale_spin_goal");
             }
             return;
         }
@@ -1296,7 +1296,7 @@ private:
             return;
         }
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         finishSpinRecovery("spin_timeout");
     }
@@ -1411,7 +1411,7 @@ private:
         }
         ++nav_goal_generation_;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
         goal_active_ = false;
@@ -1519,7 +1519,8 @@ private:
         const BackUpGoalHandle::SharedPtr& handle) {
         if (!recovery_clearance_backup_active_) {
             if (handle) {
-                backup_client_->async_cancel_goal(handle);
+                safeCancelGoal(backup_client_, handle,
+                               "stale_clearance_backup_goal");
             }
             return;
         }
@@ -1561,7 +1562,7 @@ private:
         recovery_spin_active_ = true;
         spin_started_sec_ = nowSec();
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
 
@@ -1598,7 +1599,7 @@ private:
             return;
         }
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         finishRecoverySpin("spin_timeout", FailureClass::kRecoveryFailed);
     }
@@ -1717,7 +1718,7 @@ private:
         backtrace_cancel_started_sec_ = nowSec();
         ++nav_goal_generation_;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
         goal_active_ = false;
@@ -1749,7 +1750,8 @@ private:
                         robot_pose->xy, *start_xy,
                         backtrace_config_.min_actual_displacement_m)) {
                     if (backup_goal_handle_) {
-                        backup_client_->async_cancel_goal(backup_goal_handle_);
+                        safeCancelGoal(backup_client_, backup_goal_handle_,
+                                       "backtrace_backup_goal");
                         backup_goal_handle_.reset();
                     }
                     backtrace_backup_active_ = false;
@@ -1817,7 +1819,7 @@ private:
     void onBacktraceGoalResponse(const BackUpGoalHandle::SharedPtr& handle) {
         if (!backtrace_recovery_active_) {
             if (handle) {
-                backup_client_->async_cancel_goal(handle);
+                safeCancelGoal(backup_client_, handle, "stale_backup_goal");
             }
             return;
         }
@@ -1938,7 +1940,7 @@ private:
                              {"active_waypoint_xy", activeGoalJson()}});
         blacklistActiveGoal(failure_class);
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
         }
         clearActiveGoal();
     }
@@ -1955,7 +1957,7 @@ private:
         const auto active_waypoint = activeGoalJson();
         clearPendingRouteSelection();
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
         }
         clearActiveGoal();
         clearGoalMarker();
@@ -1976,13 +1978,15 @@ private:
 
     void clearActiveGoal() {
         if (clearance_backup_goal_handle_) {
-            backup_client_->async_cancel_goal(clearance_backup_goal_handle_);
+            safeCancelGoal(backup_client_, clearance_backup_goal_handle_,
+                           "clearance_backup_goal");
         }
         clearance_backup_goal_handle_.reset();
         recovery_clearance_backup_active_ = false;
         pending_recovery_spin_yaw_ = 0.0;
         if (backup_goal_handle_) {
-            backup_client_->async_cancel_goal(backup_goal_handle_);
+            safeCancelGoal(backup_client_, backup_goal_handle_,
+                           "backtrace_backup_goal");
         }
         backup_goal_handle_.reset();
         backtrace_recovery_active_ = false;
@@ -1994,7 +1998,7 @@ private:
         goal_active_ = false;
         goal_handle_.reset();
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         spin_goal_handle_.reset();
         spin_recovery_active_ = false;
@@ -2133,6 +2137,21 @@ private:
         event_pub_->publish(msg);
     }
 
+    template <typename ClientT, typename GoalHandleT>
+    void safeCancelGoal(const ClientT& client, const GoalHandleT& handle,
+                        const char* label) {
+        if (!handle) {
+            return;
+        }
+        try {
+            client->async_cancel_goal(handle);
+        }
+        catch (const std::exception& exception) {
+            RCLCPP_WARN(get_logger(), "Ignoring stale %s cancel: %s", label,
+                        exception.what());
+        }
+    }
+
     void onPlannerEvent(const std_msgs::msg::String& msg) {
         handleReverseBlockedEvent(msg.data);
         handleStallOrSlipEvent(msg.data);
@@ -2157,7 +2176,8 @@ private:
         if (recoveryActive()) {
             latchRearBlocked("reverse_blocked");
             if (backup_goal_handle_) {
-                backup_client_->async_cancel_goal(backup_goal_handle_);
+                safeCancelGoal(backup_client_, backup_goal_handle_,
+                               "backtrace_backup_goal");
                 backup_goal_handle_.reset();
             }
             backtrace_backup_active_ = false;
