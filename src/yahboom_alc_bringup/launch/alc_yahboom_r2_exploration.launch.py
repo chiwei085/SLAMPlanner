@@ -697,7 +697,23 @@ def generate_launch_description():
                 "reverse_check_distance_m": 0.12,
                 "reverse_safety_margin_m": 0.0,
                 "reverse_allowed_cost_max": 98,
-                "reverse_unknown_is_blocked": False,
+                # Was False (8d610ce, "suppress zombie frontier zones") to
+                # stop unknown cells near frontiers from blocking recovery
+                # backups entirely. That traded blocked-recovery stalls for
+                # blind reversing into never-observed space, which is what
+                # let BackUp goals reverse straight into unseen obstacles at
+                # the frontier edge. Restored to True now that the
+                # depth_voxel_layer sensor_frame fix (nav2_rgbd_params.yaml)
+                # gives accurate raytrace clearing again, so "unknown" behind
+                # the robot means genuinely unobserved, not just stale.
+                "reverse_unknown_is_blocked": True,
+                # Deliberately the opposite default of reverse_unknown_is_blocked:
+                # this gates the stationary in-place turn that runs at the start
+                # of nearly every frontier goal, and a frontier goal always
+                # borders unknown space by definition. Blocking on unknown ahead
+                # here stalled the robot at (0,0) for entire runs instead of just guarding the rare
+                # blind-reverse case reverse_unknown_is_blocked targets.
+                "stationary_arc_unknown_is_blocked": False,
                 **ROBOT_FOOTPRINT_PARAMS,
             }
         ],
@@ -791,7 +807,8 @@ def generate_launch_description():
                             "reverse_allowed_cost_max": 98,
                             "reverse_check_distance_m": 0.12,
                             "reverse_safety_margin_m": 0.0,
-                            "reverse_unknown_is_blocked": False,
+                            "reverse_unknown_is_blocked": True,
+                            "stationary_arc_unknown_is_blocked": False,
                             "min_turning_radius_m": 0.50,
                             "max_curvature": 2.0,
                         },

@@ -42,9 +42,10 @@ bool worldToMap(const nav_msgs::msg::OccupancyGrid& costmap, const double wx,
            my < static_cast<int>(costmap.info.height);
 }
 
-bool isFreeCostmapCell(const int value, const R2CmdVelBridgeConfig& config) {
+bool isFreeCostmapCell(const int value, const bool unknown_is_blocked,
+                       const R2CmdVelBridgeConfig& config) {
     if (value < 0) {
-        return !config.reverse_unknown_is_blocked;
+        return !unknown_is_blocked;
     }
     return value <= config.reverse_allowed_cost_max;
 }
@@ -89,7 +90,8 @@ const char* safetyReason(const FootprintSafetyStatus status,
 
 FootprintSafetyStatus footprintSafetyStatus(
     const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
-    const FootprintExtensions extensions, const R2CmdVelBridgeConfig& config) {
+    const FootprintExtensions extensions, const bool unknown_is_blocked,
+    const R2CmdVelBridgeConfig& config) {
     const double resolution = costmap.info.resolution;
     if (resolution <= 0.0 || costmap.data.empty()) {
         return FootprintSafetyStatus::kBlocked;
@@ -139,7 +141,8 @@ FootprintSafetyStatus footprintSafetyStatus(
             const auto index =
                 static_cast<std::size_t>(my) * costmap.info.width + mx;
             if (index >= costmap.data.size() ||
-                !isFreeCostmapCell(costmap.data[index], config)) {
+                !isFreeCostmapCell(costmap.data[index], unknown_is_blocked,
+                                   config)) {
                 return FootprintSafetyStatus::kBlocked;
             }
         }
@@ -181,6 +184,7 @@ bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
     // footprint rectangle with the rear extended by a short fail-closed backup
     // horizon.
     return footprintSafetyStatus(costmap, pose, rearExtension(check_distance),
+                                 config.reverse_unknown_is_blocked,
                                  config) == FootprintSafetyStatus::kSafe;
 }
 
@@ -193,6 +197,7 @@ bool isStationaryArcForwardSafeInCostmap(
     const double check_distance =
         std::max(0.0, config.stationary_arc_check_distance_m);
     return footprintSafetyStatus(costmap, pose, frontExtension(check_distance),
+                                 config.stationary_arc_unknown_is_blocked,
                                  config) == FootprintSafetyStatus::kSafe;
 }
 
@@ -373,8 +378,9 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
     const double check_distance =
         std::max(0.0, config_.reverse_check_distance_m +
                           config_.reverse_safety_margin_m);
-    const auto status = footprintSafetyStatus(
-        *costmap, *pose, rearExtension(check_distance), config_);
+    const auto status =
+        footprintSafetyStatus(*costmap, *pose, rearExtension(check_distance),
+                              config_.reverse_unknown_is_blocked, config_);
     if (status != FootprintSafetyStatus::kSafe) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
@@ -418,7 +424,8 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
     const double check_distance =
         std::max(0.0, config_.stationary_arc_check_distance_m);
     const auto status = footprintSafetyStatus(
-        *costmap, *pose, frontExtension(check_distance), config_);
+        *costmap, *pose, frontExtension(check_distance),
+        config_.stationary_arc_unknown_is_blocked, config_);
     if (status != FootprintSafetyStatus::kSafe) {
         // Front is blocked; try a reverse arc as fallback — the path the robot
         // just came from is a certified-free corridor and typically
@@ -426,8 +433,9 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
         const double reverse_check =
             std::max(0.0, config_.reverse_check_distance_m +
                               config_.reverse_safety_margin_m);
-        const auto reverse_status = footprintSafetyStatus(
-            *costmap, *pose, rearExtension(reverse_check), config_);
+        const auto reverse_status =
+            footprintSafetyStatus(*costmap, *pose, rearExtension(reverse_check),
+                                  config_.reverse_unknown_is_blocked, config_);
         if (reverse_status == FootprintSafetyStatus::kSafe) {
             output.linear.x = -output.linear.x;
             publishPlannerEvent("stationary_arc_reversed",
