@@ -41,8 +41,8 @@ NAV2_RUNTIME_METADATA = {
     ),
     "controller_allow_reversing": True,
     "controller_use_rotate_to_heading": False,
-    "local_inflation_radius": 0.45,
-    "global_inflation_radius": 0.25,
+    "local_inflation_radius": 0.29,
+    "global_inflation_radius": 0.16,
     "global_depth_voxel_layer": True,
     "local_depth_min_obstacle_height": 0.01,
     "local_depth_observation_persistence": 0.4,
@@ -160,7 +160,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "wall_clearance_m": 0.28,
                     "min_wall_clearance_m": 0.0,
                     # Hard goal-clearance floor tracking the Nav2 global costmap
-                    # inflation_radius (0.25). Goals closer than this to an
+                    # inflation_radius (0.16). Goals closer than this to an
                     # obstacle sit in Nav2's inflated band and get aborted with
                     # global_path_blocked; filtering them here stops the explorer
                     # from recommending unplannable near-wall goals and
