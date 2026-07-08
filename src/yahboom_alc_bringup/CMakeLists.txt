@@ -21,6 +21,7 @@ if(CCACHE_PROGRAM)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
@@ -124,6 +125,7 @@ target_link_libraries(r2_safe_driver
   yahboom_alc_bringup_lib
 )
 ament_target_dependencies(r2_safe_driver
+  ament_index_cpp
   geometry_msgs
   rclcpp
 )

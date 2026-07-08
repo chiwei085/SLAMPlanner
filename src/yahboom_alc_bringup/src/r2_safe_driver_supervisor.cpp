@@ -1,3 +1,4 @@
+#include <ament_index_cpp/get_package_prefix.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sys/prctl.h>
@@ -86,6 +87,32 @@ public:
     }
 
     int run() {
+        // Resolve the real executable path (<prefix>/lib/<pkg>/<exe>, the
+        // same convention `ros2 run` itself uses) and exec it directly,
+        // instead of exec'ing into `ros2 run`. `ros2 run` does not replace
+        // itself in-place -- it forks its OWN child to run the target -- so
+        // routing through it puts the actual driver process one fork
+        // generation below the PR_SET_PDEATHSIG we set below. PDEATHSIG does
+        // not cascade to grandchildren: when the supervisor dies, the kernel
+        // correctly kills the `ros2 run` wrapper, but the driver process it
+        // spawned is simply orphaned and keeps running unsupervised (seen
+        // live 2026-07-08: 11 leaked Ackman_driver_R2 processes across a
+        // single day of relaunches). Exec'ing the resolved path directly
+        // means this forked+prctl'd process IS the driver, with no
+        // ungoverned grandchild for PDEATHSIG to miss.
+        std::string driver_path;
+        try {
+            driver_path = ament_index_cpp::get_package_prefix(driver_package_) +
+                          "/lib/" + driver_package_ + "/" + driver_executable_;
+        }
+        catch (const std::exception& exc) {
+            RCLCPP_ERROR(get_logger(),
+                         "Cannot resolve driver executable %s/%s: %s",
+                         driver_package_.c_str(), driver_executable_.c_str(),
+                         exc.what());
+            return 1;
+        }
+
         child_pid_ = fork();
         if (child_pid_ < 0) {
             RCLCPP_ERROR(get_logger(), "Failed to fork Yahboom driver process");
@@ -102,11 +129,10 @@ public:
             }
             setsid();  // detach from terminal so Ctrl+C SIGINT doesn't reach
                        // child
-            execlp("ros2", "ros2", "run", driver_package_.c_str(),
-                   driver_executable_.c_str(), "--ros-args", "-p",
-                   pub_odom_tf_arg_.c_str(), "-p", linear_scale_x_arg_.c_str(),
-                   "-p", linear_scale_y_arg_.c_str(),
-                   static_cast<char*>(nullptr));
+            execl(driver_path.c_str(), driver_path.c_str(), "--ros-args", "-p",
+                  pub_odom_tf_arg_.c_str(), "-p", linear_scale_x_arg_.c_str(),
+                  "-p", linear_scale_y_arg_.c_str(),
+                  static_cast<char*>(nullptr));
             _exit(127);
         }
 
