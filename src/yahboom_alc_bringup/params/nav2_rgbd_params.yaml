@@ -8,7 +8,16 @@ bt_navigator:
     # so the old 1.0 s stall-absorption value is no longer needed. 0.3 s
     # is a small safety net against any unexpected TF hiccup.
     transform_tolerance: 0.3
-    default_bt_xml_filename: "navigate_to_pose_w_replanning_and_recovery.xml"
+    # Humble renamed this from default_bt_xml_filename to
+    # default_nav_to_pose_bt_xml. r2_navigation_launch.py's RewrittenYaml
+    # param_rewrites already targets the new key name, but RewrittenYaml only
+    # rewrites leaf keys that already exist in the source YAML -- it never
+    # inserts missing ones. With the old key name still here, the rewrite had
+    # nothing to match, so bt_navigator silently fell back to its own
+    # compiled-in default (the stock navigate_to_pose_w_replanning_and_recovery.xml,
+    # whose RoundRobin recovery contains Spin(1.57) = phantom left turns)
+    # instead of navigate_to_pose_rgbd.xml. See memory: stock-bt-loaded-param-rename.
+    default_nav_to_pose_bt_xml: "navigate_to_pose_rgbd.xml"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
