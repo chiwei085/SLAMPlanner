@@ -657,6 +657,11 @@ def generate_launch_description():
                 "degraded_exploration_window_sec": 60.0,
                 "degraded_exploration_min_events": 3,
                 "use_approach_heading": True,
+                "rotation_risk_enabled": True,
+                "rotation_risk_weight": 0.1,
+                "rotation_risk_reference_det": 1.0e-6,
+                "rotation_risk_max_lambda": 2.0,
+                "rotation_risk_max_yaw_rad": 3.141592653589793,
                 "planner_event_topic": "/planner/events",
             }
         ],
