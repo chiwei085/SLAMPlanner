@@ -735,10 +735,10 @@ def generate_launch_description():
                 "imu_topic": "/imu/data",
                 "planner_event_topic": "/planner/events",
                 "safety_stop_topic": "/collision_safety_stop_active",
-                "command_vx_threshold_mps": 0.01,
+                "command_vx_threshold_mps": 0.05,
                 "imu_stale_timeout_sec": 0.5,
                 "imu_baseline_samples": 20,
-                "imu_impact_decel_threshold_mps2": 1.5,
+                "imu_impact_decel_threshold_mps2": 3.0,
                 "impact_stop_hold_sec": 0.5,
                 "impact_cooldown_sec": 3.0,
             }
