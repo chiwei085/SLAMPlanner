@@ -14,6 +14,9 @@
 #include <optional>
 #include <string>
 
+#include "yahboom_alc_bringup/recent_free_costmap_history.hpp"
+#include "yahboom_alc_bringup/temporal_signal.hpp"
+
 namespace yahboom_alc_bringup
 {
 
@@ -48,6 +51,11 @@ struct R2CmdVelBridgeConfig
     double reverse_safety_margin_m = 0.0;
     int reverse_allowed_cost_max = 98;
     bool reverse_unknown_is_blocked = true;
+    // A cell that flips to unknown (falls out of the rolling costmap's
+    // observation window) but was seen clearly free within this many
+    // seconds is treated as free rather than blocked. 0 disables the
+    // distinction and restores strict fail-closed-on-unknown behavior.
+    double reverse_recent_free_grace_sec = 2.0;
     // Unlike reverse_unknown_is_blocked, this defaults to false: the
     // stationary-arc forward check runs on every goal that points toward a
     // frontier, and a frontier's entire purpose is bordering unknown space.
@@ -68,14 +76,17 @@ struct ReverseSafetyPose
     double yaw = 0.0;
 };
 
-bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
-                            const ReverseSafetyPose& pose,
-                            const double reverse_speed,
-                            const R2CmdVelBridgeConfig& config);
+bool isReverseSafeInCostmap(
+    const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
+    double reverse_speed, const R2CmdVelBridgeConfig& config,
+    const RecentFreeCostmapHistory* recent_free_history = nullptr,
+    double now_sec = 0.0);
 
 bool isStationaryArcForwardSafeInCostmap(
     const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
-    const double forward_speed, const R2CmdVelBridgeConfig& config);
+    double forward_speed, const R2CmdVelBridgeConfig& config,
+    const RecentFreeCostmapHistory* recent_free_history = nullptr,
+    double now_sec = 0.0);
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
     const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config,
@@ -110,7 +121,11 @@ private:
         const geometry_msgs::msg::Twist& target);
     std::optional<ReverseSafetyPose> lookupReverseSafetyPose(
         const nav_msgs::msg::OccupancyGrid& costmap, const char* warning_label);
-    bool isCostmapFresh(const nav_msgs::msg::OccupancyGrid& costmap);
+    // Freshness is judged from receive-silence on the host clock (time since
+    // the last costmap message actually arrived), not from the message's own
+    // header stamp -- the producer's clock domain may not agree with ours,
+    // and a stamp-age check would silently inherit that skew.
+    bool isCostmapFresh();
     void publishPlannerEvent(const std::string& event,
                              const std::string& reason);
 
@@ -123,6 +138,9 @@ private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_costmap_;
+    RecentFreeCostmapHistory reverse_recent_free_history_;
+    TemporalSignalState costmap_temporal_state_;
+    TemporalSignalObservation costmap_temporal_;
     geometry_msgs::msg::Twist last_output_;
     rclcpp::Time last_output_time_;
     std::atomic<bool> stopping_{false};
@@ -189,6 +207,8 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "reverse_allowed_cost_max"),
             named(&R2CmdVelBridgeConfig::reverse_unknown_is_blocked,
                   "reverse_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::reverse_recent_free_grace_sec,
+                  "reverse_recent_free_grace_sec"),
             named(&R2CmdVelBridgeConfig::stationary_arc_unknown_is_blocked,
                   "stationary_arc_unknown_is_blocked"),
             named(&R2CmdVelBridgeConfig::footprint_front_m,

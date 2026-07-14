@@ -5,6 +5,7 @@
 #include <string>
 
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
+#include "yahboom_alc_bringup/temporal_signal.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -89,8 +90,8 @@ TEST(PlannerRuntimeLogger,
         {"type", "snapshot"},
         {"map", nullptr},
         {"commands",
-         {{"nav", {{"twist", nullptr}, {"age_sec", nullptr}}},
-          {"driver", {{"twist", nullptr}, {"age_sec", nullptr}}}}},
+         {{"nav", {{"twist", nullptr}, {"receive_silence_sec", nullptr}}},
+          {"driver", {{"twist", nullptr}, {"receive_silence_sec", nullptr}}}}},
         {"sources", sources}};
 
     EXPECT_EQ(snapshot[std::string("map")].dump(), "null");
@@ -106,7 +107,7 @@ TEST(PlannerRuntimeLogger,
                       [std::string("message_count")],
               0);
     EXPECT_EQ(snapshot[std::string("sources")][std::string("nav_cmd")]
-                      [std::string("age_sec")]
+                      [std::string("receive_silence_sec")]
                           .dump(),
               "null");
 }
@@ -118,18 +119,34 @@ TEST(PlannerRuntimeLogger, SourcesReportReceivedMapAndTwistInputs) {
 
     EXPECT_EQ(sources[std::string("map")][std::string("seen")].dump(), "true");
     EXPECT_EQ(sources[std::string("map")][std::string("message_count")], 2);
-    EXPECT_DOUBLE_EQ(sources[std::string("map")][std::string("age_sec")],
-                     0.125);
+    EXPECT_DOUBLE_EQ(
+        sources[std::string("map")][std::string("receive_silence_sec")], 0.125);
     EXPECT_EQ(sources[std::string("nav_cmd")][std::string("seen")].dump(),
               "true");
     EXPECT_EQ(sources[std::string("nav_cmd")][std::string("message_count")], 3);
-    EXPECT_DOUBLE_EQ(sources[std::string("nav_cmd")][std::string("age_sec")],
-                     1.235);
+    EXPECT_DOUBLE_EQ(
+        sources[std::string("nav_cmd")][std::string("receive_silence_sec")],
+        1.235);
     EXPECT_EQ(sources[std::string("driver_cmd")][std::string("seen")].dump(),
               "true");
-    EXPECT_EQ(
-        sources[std::string("navigate_status")][std::string("age_sec")].dump(),
-        "null");
+    EXPECT_EQ(sources[std::string("navigate_status")]
+                     [std::string("receive_silence_sec")]
+                         .dump(),
+              "null");
+}
+
+TEST(PlannerRuntimeLogger, TemporalSignalSeparatesLagGapAndSilence) {
+    TemporalSignalState state;
+    const auto first = observeTemporalSignal(8.0, 10.0, state);
+    ASSERT_TRUE(first.producer_lag_sec);
+    EXPECT_DOUBLE_EQ(*first.producer_lag_sec, 2.0);
+    EXPECT_FALSE(first.consume_gap_sec);
+    const auto second = observeTemporalSignal(10.5, 12.0, state);
+    ASSERT_TRUE(second.consume_gap_sec);
+    EXPECT_DOUBLE_EQ(*second.consume_gap_sec, 2.0);
+    const auto silent = temporalSignalAt(state, 16.0);
+    ASSERT_TRUE(silent.receive_silence_sec);
+    EXPECT_DOUBLE_EQ(*silent.receive_silence_sec, 4.0);
 }
 
 }  // namespace

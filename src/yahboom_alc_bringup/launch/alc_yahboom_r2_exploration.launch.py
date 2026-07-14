@@ -41,8 +41,10 @@ NAV2_RUNTIME_METADATA = {
     ),
     "controller_allow_reversing": True,
     "controller_use_rotate_to_heading": False,
-    "local_inflation_radius": 0.29,
-    "global_inflation_radius": 0.16,
+    "local_inflation_radius": 0.45,
+    "global_inflation_radius": 0.55,
+    "local_inflation_cost_scaling_factor": 3.0,
+    "global_inflation_cost_scaling_factor": 3.5,
     "global_depth_voxel_layer": True,
     "depth_cloud_preprocessor_leaf_size_m": 0.05,
     "depth_cloud_preprocessor_target_frame": "base_footprint",
@@ -164,12 +166,13 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "unknown_overlap_weight": 1.5,
                     "wall_clearance_m": 0.28,
                     "min_wall_clearance_m": 0.0,
-                    # Hard goal-clearance floor tracking the Nav2 global costmap
-                    # inflation_radius (0.16). Goals closer than this to an
-                    # obstacle sit in Nav2's inflated band and get aborted with
-                    # global_path_blocked; filtering them here stops the explorer
-                    # from recommending unplannable near-wall goals and
-                    # poisoning the blacklist. Kept in force under relaxed search.
+                    # Hard goal-clearance floor. The global costmap now uses a
+                    # weighted inflation gradient (radius 0.55, scaling 3.5):
+                    # only the inscribed band (~0.135 m) is lethal, and beyond
+                    # that cost decays exponentially. 0.22 m keeps goals below
+                    # the planner's analytic_expansion_max_cost band (~200 at
+                    # d<0.2 m) while not rejecting reachable near-wall goals in
+                    # the non-lethal gradient. Kept in force under relaxed search.
                     "nav2_goal_clearance_m": 0.22,
                     # Stage 2 viewpoint / next-best-view scoring. Enabled at 0.1
                     # after run_20260624_210848 validation: that run logged 10
@@ -238,6 +241,12 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "failed_goal_blacklist_radius_m": 0.35,
                     "failed_goal_blacklist_sec": 600.0,
                     "failed_goal_max_retries": 2,
+                    "hazard_region_enabled": True,
+                    "hazard_region_severity1_radius_m": 0.6,
+                    "hazard_region_severity2_radius_m": 1.0,
+                    "hazard_region_ttl_sec": 600.0,
+                    "hazard_region_path_penalty": 100.0,
+                    "hazard_region_safe_traversal_clear_enabled": True,
                     "enable_subgoals": True,
                     "max_subgoals": 3,
                     "subgoal_path_tolerance_m": 0.30,
@@ -701,6 +710,12 @@ def generate_launch_description():
                 "reverse_costmap_max_age_sec": 1.0,
                 "reverse_check_distance_m": 0.12,
                 "reverse_safety_margin_m": 0.0,
+                # /local_costmap/costmap is an OccupancyGrid (0-100 scale:
+                # inflated gradient <=98, inscribed=99, lethal=100), so 98
+                # blocks only inscribed/lethal/unknown. The weighted inflation
+                # gradient (radius 0.45) maps to <=98 and does NOT block
+                # reversing -- do not "compensate" this threshold for
+                # inflation changes; it is not on the 0-254 raw cost scale.
                 "reverse_allowed_cost_max": 98,
                 # Was False (8d610ce, "suppress zombie frontier zones") to
                 # stop unknown cells near frontiers from blocking recovery
@@ -712,6 +727,13 @@ def generate_launch_description():
                 # gives accurate raytrace clearing again, so "unknown" behind
                 # the robot means genuinely unobserved, not just stale.
                 "reverse_unknown_is_blocked": True,
+                # A cell that flips to unknown the instant it falls out of the
+                # rolling costmap's observation window (camera FOV / raytrace
+                # persistence), but was seen clearly free within this many
+                # seconds, is treated as free rather than blocked -- this is
+                # what lets a spin-in-place recovery actually clear a
+                # reverse_blocked latch instead of re-triggering it forever.
+                "reverse_recent_free_grace_sec": 2.0,
                 # Deliberately the opposite default of reverse_unknown_is_blocked:
                 # this gates the stationary in-place turn that runs at the start
                 # of nearly every frontier goal, and a frontier goal always
@@ -798,6 +820,8 @@ def generate_launch_description():
                 "log_dir": planner_log_dir,
                 "event_topic": "/planner/events",
                 "map_topic": "/map",
+                "global_costmap_topic": "/global_costmap/costmap",
+                "wheel_odom_topic": "/odom",
                 "nav_cmd_topic": nav_cmd_vel_topic,
                 "driver_cmd_topic": driver_cmd_vel_topic,
                 "navigate_status_topic": navigate_status_topic,
@@ -813,6 +837,7 @@ def generate_launch_description():
                             "reverse_check_distance_m": 0.12,
                             "reverse_safety_margin_m": 0.0,
                             "reverse_unknown_is_blocked": True,
+                            "reverse_recent_free_grace_sec": 2.0,
                             "stationary_arc_unknown_is_blocked": False,
                             "min_turning_radius_m": 0.50,
                             "max_curvature": 2.0,

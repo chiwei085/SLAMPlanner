@@ -47,6 +47,7 @@ add_library(yahboom_alc_bringup_lib
   src/r2_collision_safety_core.cpp
   src/r2_cmd_vel_bridge.cpp
   src/r2_stall_detector_core.cpp
+  src/recent_free_costmap_history.cpp
   src/recovery_state_machine.cpp
 )
 set_target_properties(yahboom_alc_bringup_lib PROPERTIES UNITY_BUILD ON)

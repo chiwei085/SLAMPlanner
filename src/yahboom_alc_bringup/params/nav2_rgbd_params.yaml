@@ -107,6 +107,11 @@ controller_server:
       max_allowed_time_to_collision_up_to_carrot: 1.0
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true
+      # Must mirror local_costmap inflation_layer (0.45 / 3.0) so the
+      # cost->distance inversion inside the cost-regulated scaling is exact.
+      cost_scaling_dist: 0.45
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 3.0
       regulated_linear_scaling_min_radius: 0.50
       regulated_linear_scaling_min_speed: 0.05
       use_fixed_curvature_lookahead: false
@@ -148,7 +153,12 @@ local_costmap:
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.29
+        # Weighted inflation for the local window: steep near obstacles,
+        # gentle tail out to 0.45 m so RPP's cost-regulated velocity scaling
+        # sees a smooth gradient (it slows near obstacles instead of hitting
+        # a cost cliff). cost_scaling_factor must stay in sync with
+        # FollowPath.inflation_cost_scaling_factor.
+        inflation_radius: 0.45
         cost_scaling_factor: 3.0
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -241,8 +251,20 @@ global_costmap:
           inf_is_valid: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.16
+        # Weighted (non-uniform) inflation. The previous radius (0.11) was
+        # smaller than the footprint's inscribed radius (~0.135 m: half-width
+        # 0.115 + padding 0.02), so there was NO cost gradient at all -- one
+        # cell past an obstacle the cost dropped straight to 0 and Smac had no
+        # reason to prefer corridor centers over corner-hugging paths.
+        # cost(d) = 252 * exp(-3.5 * (d - 0.135)):
+        #   d=0.20 m -> 200   (steep repulsion right next to obstacles)
+        #   d=0.30 m -> 141   (center of a 0.6 m doorway: costly but passable)
+        #   d=0.55 m -> ~59   (gentle tail that pulls paths toward open space)
+        # The gradient never reaches INSCRIBED (253) outside the true
+        # collision zone, so narrow passages stay plannable -- unlike the old
+        # oversized-radius attempt that saturated whole corridors.
+        cost_scaling_factor: 3.5
+        inflation_radius: 0.55
       always_send_full_costmap: True
   global_costmap_client:
     ros__parameters:
@@ -275,7 +297,10 @@ planner_server:
       reverse_penalty: 5.0
       change_penalty: 0.0
       non_straight_penalty: 1.2
-      cost_penalty: 2.0
+      # Raised from 2.0 alongside the weighted global inflation gradient:
+      # the gradient only steers paths to corridor centers if the planner
+      # actually weighs traversal cost against path length.
+      cost_penalty: 2.5
       retrospective_penalty: 0.015
       lookup_table_size: 10.0
       cache_obstacle_heuristic: false

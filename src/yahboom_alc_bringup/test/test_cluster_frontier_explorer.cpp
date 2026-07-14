@@ -422,6 +422,118 @@ TEST(ClusterFrontierExplorer, FailureWeightAcceleratesBlacklist) {
     EXPECT_TRUE(core.isBlacklisted(goal));
 }
 
+TEST(ClusterFrontierExplorer, HazardRegionsMergeAndUseMaximumSeverity) {
+    auto core = makeCore(buildGrid(40, 20, 0.1));
+
+    const auto first = core.recordHazardRegion({1.0, 1.0}, 10.0, 1);
+    ASSERT_TRUE(first);
+    EXPECT_TRUE(first->created);
+    EXPECT_EQ(first->region.severity, 1);
+    EXPECT_NEAR(first->region.radius, 0.6, 1e-6);
+
+    const auto repeated = core.recordHazardRegion({1.2, 1.0}, 20.0, 1);
+    ASSERT_TRUE(repeated);
+    EXPECT_FALSE(repeated->created);
+    EXPECT_EQ(repeated->region.severity, 1);
+    EXPECT_NEAR(repeated->region.radius, 0.6, 1e-6);
+
+    const auto escalated = core.recordHazardRegion({1.2, 1.0}, 30.0, 2);
+    ASSERT_TRUE(escalated);
+    EXPECT_FALSE(escalated->created);
+    EXPECT_EQ(escalated->region.severity, 2);
+    EXPECT_NEAR(escalated->region.radius, 1.0, 1e-6);
+    EXPECT_NEAR(escalated->region.expires_at_sec, 630.0, 1e-6);
+    EXPECT_EQ(core.hazardRegions().size(), 1u);
+}
+
+TEST(ClusterFrontierExplorer, HazardGoalIsRejectedSeparatelyFromBlacklist) {
+    auto grid = buildGrid(20, 10, 0.1);
+    auto core = makeCore(grid);
+    const auto goal_xy = core.mapToWorld(8, 5);
+    ASSERT_TRUE(core.recordHazardRegion(goal_xy, 0.0, 1));
+
+    FrontierCounts counts;
+    const auto candidate = core.makeCandidate(
+        {{8, 5}, {9, 5}, {10, 5}}, {2, 5}, core.mapToWorld(2, 5),
+        std::vector<std::uint8_t>(grid.data.size(), false), 20, 10, counts);
+
+    EXPECT_FALSE(candidate);
+    EXPECT_GT(counts.rejected_hazard, 0);
+    EXPECT_EQ(counts.rejected_blacklist, 0);
+}
+
+TEST(ClusterFrontierExplorer, HazardPathPenaltyAddsOncePerRegion) {
+    auto core = makeCore(buildGrid(30, 30, 0.1));
+    const auto center = core.mapToWorld(10, 5);
+    ASSERT_TRUE(core.recordHazardRegion(center, 0.0, 2));
+
+    EXPECT_NEAR(core.hazardPathPenalty({{2, 5}, {10, 5}, {18, 5}}), 200.0,
+                1e-6);
+    EXPECT_NEAR(core.hazardPathPenalty({{2, 25}, {18, 25}}), 0.0, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, SafeDistanceClearsHazardAtDiameter) {
+    auto core = makeCore(buildGrid(40, 20, 0.1));
+    ASSERT_TRUE(core.recordHazardRegion({1.0, 1.0}, 0.0, 1));
+
+    EXPECT_TRUE(core.noteHazardTraversal({0.4, 1.0}).empty());
+    EXPECT_TRUE(core.noteHazardTraversal({1.0, 1.0}).empty());
+    EXPECT_TRUE(core.noteHazardTraversal({0.45, 1.0}).empty());
+    const auto cleared = core.noteHazardTraversal({1.6, 1.0});
+
+    ASSERT_EQ(cleared.size(), 1u);
+    EXPECT_TRUE(core.hazardRegions().empty());
+}
+
+TEST(ClusterFrontierExplorer, LeavingHazardResetsTraversalEntry) {
+    auto core = makeCore(buildGrid(40, 20, 0.1));
+    ASSERT_TRUE(core.recordHazardRegion({1.0, 1.0}, 0.0, 1));
+
+    core.noteHazardTraversal({0.5, 1.0});
+    core.noteHazardTraversal({1.0, 1.0});
+    core.noteHazardTraversal({2.0, 1.0});  // leaves the region: entry resets
+    core.noteHazardTraversal({1.5, 1.0});
+    const auto cleared = core.noteHazardTraversal({1.0, 1.0});
+
+    EXPECT_TRUE(cleared.empty());
+    ASSERT_EQ(core.hazardRegions().size(), 1u);
+    const auto& region = core.hazardRegions().front();
+    ASSERT_TRUE(region.traversal_entry_xy.has_value());
+    EXPECT_NEAR(region.traversal_entry_xy->first, 1.5, 1e-6);
+    EXPECT_NEAR(region.traversal_min_distance_to_center_m, 0.0, 1e-6);
+}
+
+TEST(ClusterFrontierExplorer, SkirtingBoundaryDoesNotClearHazard) {
+    // Regression test: walking a wide arc that stays near the boundary the
+    // whole time covers a chord as long as the diameter, but never actually
+    // revisits the hazard point -- that should NOT be treated as a safe
+    // traversal, even though naive path-length accounting would clear it.
+    auto core = makeCore(buildGrid(60, 60, 0.1));
+    ASSERT_TRUE(core.recordHazardRegion({0.0, 0.0}, 0.0, 2));
+    ASSERT_NEAR(core.hazardRegions().front().radius, 1.0, 1e-6);
+
+    core.noteHazardTraversal({1.0, 0.0});
+    core.noteHazardTraversal({0.5, 0.8660254});
+    core.noteHazardTraversal({-0.5, 0.8660254});
+    const auto cleared = core.noteHazardTraversal({-1.0, 0.0});
+
+    EXPECT_TRUE(cleared.empty());
+    ASSERT_EQ(core.hazardRegions().size(), 1u);
+    EXPECT_GT(core.hazardRegions().front().traversal_min_distance_to_center_m,
+              0.5);
+}
+
+TEST(ClusterFrontierExplorer, HazardRegionExpires) {
+    auto core = makeCore(buildGrid(20, 10, 0.1));
+    ASSERT_TRUE(core.recordHazardRegion({1.0, 1.0}, 0.0, 1));
+
+    EXPECT_TRUE(core.pruneHazardRegions(599.0).empty());
+    const auto expired = core.pruneHazardRegions(600.0);
+
+    EXPECT_EQ(expired.size(), 1u);
+    EXPECT_TRUE(core.hazardRegions().empty());
+}
+
 TEST(ClusterFrontierExplorer, GoalOptionsExcludeUnknownCells) {
     auto grid = buildGrid(30, 20, 0.05, -1);
     for (int y = 2; y <= 17; ++y) {

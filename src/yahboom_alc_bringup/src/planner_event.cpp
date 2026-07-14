@@ -32,6 +32,10 @@ std::optional<std::string> parseFailureClass(const std::string& payload) {
     return parseJsonStringField(payload, "failure_class");
 }
 
+std::optional<std::string> parseReason(const std::string& payload) {
+    return parseJsonStringField(payload, "reason");
+}
+
 CoordinationAction classifyPlannerEvent(const std::string& payload) {
     // Subscribers on the event topic see every event, including their own;
     // skip the JSON parse unless the payload can name an ALC transition.

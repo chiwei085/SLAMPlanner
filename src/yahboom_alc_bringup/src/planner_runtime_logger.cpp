@@ -54,11 +54,12 @@ nlohmann::json twistSummaryJson(const TwistSummary& twist) {
 }
 
 nlohmann::json sourceHealthJson(const SourceHealth& health) {
-    return {
-        {"seen", health.message_count > 0},
-        {"message_count", health.message_count},
-        {"age_sec", health.age_sec ? nlohmann::json(rounded(*health.age_sec))
-                                   : nlohmann::json(nullptr)}};
+    return {{"seen", health.message_count > 0},
+            {"message_count", health.message_count},
+            {"receive_silence_sec",
+             health.receive_silence_sec
+                 ? nlohmann::json(rounded(*health.receive_silence_sec))
+                 : nlohmann::json(nullptr)}};
 }
 
 nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
@@ -84,7 +85,9 @@ nlohmann::json runStartJson(const double time_sec,
                        {"map_topic", topics.map_topic},
                        {"nav_cmd_topic", topics.nav_cmd_topic},
                        {"driver_cmd_topic", topics.driver_cmd_topic},
-                       {"navigate_status_topic", topics.navigate_status_topic}};
+                       {"navigate_status_topic", topics.navigate_status_topic},
+                       {"global_costmap_topic", topics.global_costmap_topic},
+                       {"wheel_odom_topic", topics.wheel_odom_topic}};
     if (runtime_metadata.dump() != "null" && runtime_metadata.dump() != "{}") {
         record[std::string("runtime_metadata")] = runtime_metadata;
     }

@@ -12,6 +12,15 @@
 
 namespace yahboom_alc_bringup
 {
+namespace
+{
+constexpr double kHazardBoundaryEpsilonM = 1e-9;
+// A traversal only counts as "safe" once the robot got this close (relative
+// to the region radius) to the recorded hazard point -- otherwise skirting
+// the boundary back and forth could rack up the same crossing distance
+// without ever revisiting the spot that actually failed.
+constexpr double kHazardSafeTraversalCenterProximityFactor = 0.5;
+}  // namespace
 
 double FootprintCheck::unknownRatio() const {
     return total <= 0 ? 1.0 : static_cast<double>(unknown) / total;
@@ -50,7 +59,8 @@ CandidateResult FrontierExplorerCore::findCandidates(
                                now_sec - intention_->committed_at_sec >=
                                    config_.intention_timeout_sec;
         const bool blacklisted = isBlacklisted(intention_->goal_xy);
-        if (arrived || timed_out || blacklisted) {
+        const bool hazardous = isInHazardRegion(intention_->goal_xy);
+        if (arrived || timed_out || blacklisted || hazardous) {
             intention_.reset();
         }
     }
@@ -264,6 +274,10 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
             ++counts.rejected_blacklist;
             continue;
         }
+        if (isInHazardRegion(goal_xy)) {
+            ++counts.rejected_hazard;
+            continue;
+        }
         const double goal_distance = std::hypot(
             goal_xy.first - robot_xy.first, goal_xy.second - robot_xy.second);
         if (goal_distance < config_.min_frontier_distance) {
@@ -344,6 +358,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
                        config_.unknown_overlap_weight * unknown_ratio +
                        config_.corner_penalty_weight * obstacle.corner_penalty -
                        viewpoint_bonus;
+        score += hazardPathPenalty(*path);
         // Intention continuation bonus: reduce score (make more attractive) for
         // candidates near the committed intention goal so the planner sustains
         // progress toward a chosen distant region across replanning cycles.
@@ -1194,6 +1209,142 @@ void FrontierExplorerCore::pruneBlacklist(const double now_sec) {
                            return record.expires_at_sec <= now_sec;
                        }),
         goal_attempts_.end());
+}
+
+bool FrontierExplorerCore::isInHazardRegion(const WorldPoint& xy) const {
+    if (!config_.hazard_region_enabled) {
+        return false;
+    }
+    return std::any_of(hazard_regions_.begin(), hazard_regions_.end(),
+                       [&xy](const auto& region) {
+                           return std::hypot(xy.first - region.xy.first,
+                                             xy.second - region.xy.second) <=
+                                  region.radius + kHazardBoundaryEpsilonM;
+                       });
+}
+
+double FrontierExplorerCore::hazardPathPenalty(
+    const std::vector<Cell>& path) const {
+    if (!config_.hazard_region_enabled || path.empty()) {
+        return 0.0;
+    }
+    double penalty = 0.0;
+    for (const auto& region : hazard_regions_) {
+        const bool intersects =
+            std::any_of(path.begin(), path.end(), [&](const Cell& cell) {
+                const auto xy = mapToWorldUnchecked(cell.first, cell.second);
+                return std::hypot(xy.first - region.xy.first,
+                                  xy.second - region.xy.second) <=
+                       region.radius + kHazardBoundaryEpsilonM;
+            });
+        if (intersects) {
+            penalty += config_.hazard_region_path_penalty * region.severity;
+        }
+    }
+    return penalty;
+}
+
+std::optional<HazardRegionUpdate> FrontierExplorerCore::recordHazardRegion(
+    const WorldPoint& robot_xy, const double now_sec, const int severity) {
+    if (!config_.hazard_region_enabled) {
+        return std::nullopt;
+    }
+    const int clamped_severity = std::clamp(severity, 1, 2);
+    const auto radius = [this](const int value) {
+        return value >= 2 ? config_.hazard_region_severity2_radius_m
+                          : config_.hazard_region_severity1_radius_m;
+    };
+    auto existing = std::find_if(
+        hazard_regions_.begin(), hazard_regions_.end(),
+        [&robot_xy](const auto& region) {
+            return std::hypot(robot_xy.first - region.xy.first,
+                              robot_xy.second - region.xy.second) <=
+                   region.radius + kHazardBoundaryEpsilonM;
+        });
+    if (existing == hazard_regions_.end()) {
+        HazardRegion region;
+        region.xy = robot_xy;
+        region.severity = clamped_severity;
+        region.radius = radius(clamped_severity);
+        region.expires_at_sec = now_sec + config_.hazard_region_ttl_sec;
+        hazard_regions_.push_back(region);
+        return HazardRegionUpdate{region, true};
+    }
+    existing->severity = std::max(existing->severity, clamped_severity);
+    existing->radius = radius(existing->severity);
+    existing->expires_at_sec = now_sec + config_.hazard_region_ttl_sec;
+    existing->traversal_entry_xy.reset();
+    return HazardRegionUpdate{*existing, false};
+}
+
+std::vector<HazardRegion> FrontierExplorerCore::noteHazardTraversal(
+    const WorldPoint& robot_xy) {
+    std::vector<HazardRegion> cleared;
+    if (!config_.hazard_region_enabled ||
+        !config_.hazard_region_safe_traversal_clear_enabled) {
+        return cleared;
+    }
+    for (auto& region : hazard_regions_) {
+        const double distance_to_center =
+            std::hypot(robot_xy.first - region.xy.first,
+                       robot_xy.second - region.xy.second);
+        const bool inside =
+            distance_to_center <= region.radius + kHazardBoundaryEpsilonM;
+        if (!inside) {
+            region.traversal_entry_xy.reset();
+            continue;
+        }
+        if (!region.traversal_entry_xy) {
+            region.traversal_entry_xy = robot_xy;
+            region.traversal_min_distance_to_center_m = distance_to_center;
+        }
+        else {
+            region.traversal_min_distance_to_center_m = std::min(
+                region.traversal_min_distance_to_center_m, distance_to_center);
+        }
+    }
+    hazard_regions_.erase(
+        std::remove_if(
+            hazard_regions_.begin(), hazard_regions_.end(),
+            [&cleared, &robot_xy](const auto& region) {
+                if (!region.traversal_entry_xy) {
+                    return false;
+                }
+                // Crossed roughly the full diameter since first entering...
+                const double chord = std::hypot(
+                    robot_xy.first - region.traversal_entry_xy->first,
+                    robot_xy.second - region.traversal_entry_xy->second);
+                const bool crossed_diameter =
+                    chord >= 2.0 * region.radius - kHazardBoundaryEpsilonM;
+                // ...and actually passed near the point that failed, not
+                // just along the boundary the whole time.
+                const bool passed_near_center =
+                    region.traversal_min_distance_to_center_m <=
+                    region.radius * kHazardSafeTraversalCenterProximityFactor;
+                if (!crossed_diameter || !passed_near_center) {
+                    return false;
+                }
+                cleared.push_back(region);
+                return true;
+            }),
+        hazard_regions_.end());
+    return cleared;
+}
+
+std::vector<HazardRegion> FrontierExplorerCore::pruneHazardRegions(
+    const double now_sec) {
+    std::vector<HazardRegion> expired;
+    hazard_regions_.erase(
+        std::remove_if(hazard_regions_.begin(), hazard_regions_.end(),
+                       [now_sec, &expired](const auto& region) {
+                           if (region.expires_at_sec > now_sec) {
+                               return false;
+                           }
+                           expired.push_back(region);
+                           return true;
+                       }),
+        hazard_regions_.end());
+    return expired;
 }
 
 std::optional<std::size_t> FrontierExplorerCore::findGoalAttemptIndex(

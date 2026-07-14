@@ -17,6 +17,20 @@ enum class RecoveryStage : std::uint8_t
     kHardFailed
 };
 
+// Outcome of resolving a reobserve cycle-count expiry against whether /map
+// has actually kept producing during the wait.
+enum class ReobserveCompletion : std::uint8_t
+{
+    kConfirmed,  // perception was alive: safe to treat as complete
+    kExtended,   // perception silent, extension budget remains
+    kPerceptionStallExhausted  // extension budget exhausted: caller should
+                               // try an active small-rotation scan (waiting
+                               // longer cannot help -- standing still is why
+                               // /map stopped) and only pause, never
+                               // blacklist, once that budget is also spent --
+                               // the goal was never the problem
+};
+
 struct RecoveryStateMachineConfig
 {
     int recovery_reobserve_cycles = 1;
@@ -35,6 +49,25 @@ struct RecoveryStateMachineConfig
     // 0 disables escalation.
     int recovery_stagnation_escalation_trees = 3;
     double recovery_stagnation_radius_m = 0.25;
+    // A stop_reobserve stage that finishes its cycle count while /map has not
+    // delivered a new message in this long is not "observed and found
+    // nothing" -- the producer is silent, so the cycle-count timer alone
+    // cannot tell quiescence apart from a dead perception pipeline.  Treat it
+    // as inconclusive: re-arm reobserve instead of declaring completion.
+    double recovery_reobserve_map_stall_ceiling_sec = 8.0;
+    // Bound on how many times reobserve may be re-armed for map silence
+    // before giving up and pausing exploration outright (never blacklists a
+    // goal for this -- the goal was never the problem).
+    int recovery_reobserve_perception_stall_max_extensions = 3;
+    // Wall-clock bound on a perception-stall pause.  The pause's normal exit
+    // is /map receiving again, but /map only publishes on robot motion and
+    // the pause itself keeps the robot stationary -- and a stale_costmap
+    // pause is really about the local costmap, which this node does not
+    // observe at all.  Waiting on /map silence alone can therefore deadlock
+    // forever; after this long the pause lifts unconditionally and
+    // exploration retries, re-pausing (bounded, observable) if the bridge
+    // still cannot see.
+    double recovery_perception_stall_pause_max_sec = 30.0;
 };
 
 class RecoveryStateMachine
@@ -55,6 +88,11 @@ public:
     int spinAttempts() const { return spin_attempts_; }
 
     bool tickReobserve();
+    // Call only after tickReobserve() returns true.  map_silent is whether
+    // /map's receive-silence has exceeded
+    // recovery_reobserve_map_stall_ceiling_sec.  Re-arms reobserve
+    // internally (via beginReobserve()) on kExtended.
+    ReobserveCompletion resolveReobserveCompletion(bool map_silent);
     std::optional<double> nextSmallRotationYaw();
     void advanceToForwardArc();
     void advanceToReversePulse();
@@ -90,6 +128,9 @@ private:
     double stagnation_anchor_x_ = 0.0;
     double stagnation_anchor_y_ = 0.0;
     int stagnant_tree_count_ = 0;
+    // Deliberately not touched by reset(): a stalled perception pipeline
+    // outlives any single recovery tree's reobserve stage.
+    int reobserve_perception_stall_extensions_ = 0;
 };
 
 std::string recoveryStageName(RecoveryStage stage);

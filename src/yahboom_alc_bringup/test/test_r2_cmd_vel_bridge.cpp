@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
+#include "yahboom_alc_bringup/recent_free_costmap_history.hpp"
 
 namespace
 {
@@ -13,6 +14,7 @@ using yahboom_alc_bringup::convertNavTwistToR2;
 using yahboom_alc_bringup::isReverseSafeInCostmap;
 using yahboom_alc_bringup::isStationaryArcForwardSafeInCostmap;
 using yahboom_alc_bringup::R2CmdVelBridgeConfig;
+using yahboom_alc_bringup::RecentFreeCostmapHistory;
 using yahboom_alc_bringup::ReverseSafetyPose;
 
 constexpr double kTolerance = 1e-9;
@@ -256,6 +258,51 @@ TEST(R2CmdVelBridge, ReverseSafetyBlocksUnknownRearFootprint) {
     const ReverseSafetyPose pose{0.0, 0.0, 0.0};
 
     EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+// A cell that flips to unknown (e.g. it just fell out of the rolling
+// costmap's observation window) but was seen clearly free moments ago should
+// not fail closed the same way a cell that was never observed does.
+TEST(R2CmdVelBridge, ReverseSafetyAllowsRecentlyFreeUnknownRearFootprint) {
+    RecentFreeCostmapHistory history;
+    history.observe(buildCostmap(), /*now_sec=*/100.0,
+                    defaultConfig().reverse_allowed_cost_max);
+
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig(),
+                                       &history, /*now_sec=*/101.0));
+}
+
+TEST(R2CmdVelBridge,
+     ReverseSafetyBlocksNeverObservedUnknownRearFootprintEvenWithHistory) {
+    RecentFreeCostmapHistory history;  // Never observed anything free.
+
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig(),
+                                        &history, /*now_sec=*/101.0));
+}
+
+TEST(R2CmdVelBridge,
+     ReverseSafetyBlocksUnknownRearFootprintOnceRecentFreeGraceExpires) {
+    RecentFreeCostmapHistory history;
+    history.observe(buildCostmap(), /*now_sec=*/100.0,
+                    defaultConfig().reverse_allowed_cost_max);
+
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+    auto config = defaultConfig();
+    config.reverse_recent_free_grace_sec = 2.0;
+
+    // The grace window (100.0 + 2.0s) has fully elapsed by now_sec=103.0.
+    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, config, &history,
+                                        /*now_sec=*/103.0));
 }
 
 TEST(R2CmdVelBridge, ReverseSafetyBlocksSweptRearCorner) {
