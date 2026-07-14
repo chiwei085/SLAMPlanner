@@ -105,6 +105,10 @@ struct FrontierConfig
     double alignment_min_rotation_delta_rad = 0.05;
     double failed_goal_blacklist_radius_m = 0.35;
     double failed_goal_blacklist_sec = 600.0;
+    double hazard_region_severity1_radius_m = 0.6;
+    double hazard_region_severity2_radius_m = 1.0;
+    double hazard_region_ttl_sec = 600.0;
+    double hazard_region_path_penalty = 100.0;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
     double no_frontier_relax_sec = 0.0;
@@ -125,6 +129,8 @@ struct FrontierConfig
     bool alignment_grace_enabled = true;
     bool enable_subgoals = true;
     bool alignment_spin_enabled = false;
+    bool hazard_region_enabled = true;
+    bool hazard_region_safe_traversal_clear_enabled = true;
 };
 
 struct FrontierCounts
@@ -136,6 +142,7 @@ struct FrontierCounts
     int clusters = 0;
     int rejected_no_options = 0;
     int rejected_blacklist = 0;
+    int rejected_hazard = 0;
     int rejected_too_near = 0;
     int rejected_too_far = 0;
     int rejected_no_path = 0;
@@ -176,6 +183,25 @@ struct GoalAttemptRecord
     WorldPoint xy;
     int failures = 0;
     double expires_at_sec = 0.0;
+};
+
+struct HazardRegion
+{
+    WorldPoint xy;
+    int severity = 1;
+    double radius = 0.0;
+    double expires_at_sec = 0.0;
+    // Tracked across the current uninterrupted stay inside the region, used
+    // by noteHazardTraversal() to tell "actually crossed near the hazard
+    // point" apart from "wandered back and forth along the boundary".
+    std::optional<WorldPoint> traversal_entry_xy;
+    double traversal_min_distance_to_center_m = 0.0;
+};
+
+struct HazardRegionUpdate
+{
+    HazardRegion region;
+    bool created = false;
 };
 
 struct FrontierCandidate
@@ -324,6 +350,19 @@ public:
         return goal_attempts_;
     }
 
+    bool isInHazardRegion(const WorldPoint& xy) const;
+    double hazardPathPenalty(const std::vector<Cell>& path) const;
+    std::optional<HazardRegionUpdate> recordHazardRegion(
+        const WorldPoint& robot_xy, double now_sec, int severity);
+    std::vector<HazardRegion> noteHazardTraversal(const WorldPoint& robot_xy);
+    std::vector<HazardRegion> pruneHazardRegions(double now_sec);
+    const std::vector<HazardRegion>& hazardRegions() const {
+        return hazard_regions_;
+    }
+    std::vector<HazardRegion>& hazardRegionsForTest() {
+        return hazard_regions_;
+    }
+
     bool isFreeValue(int value) const;
     bool isOccupiedValue(int value) const;
     bool hasUnknownNeighbor(int width, int index) const;
@@ -382,6 +421,7 @@ private:
     double last_goal_yaw_ = 0.0;
     double last_goal_time_sec_ = 0.0;
     std::vector<GoalAttemptRecord> goal_attempts_;
+    std::vector<HazardRegion> hazard_regions_;
     std::optional<double> last_strict_candidate_sec_;
     bool relaxation_active_ = false;
     // Quantised world cells (kVisitQuantM) the robot has occupied, for

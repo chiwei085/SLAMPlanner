@@ -288,6 +288,18 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "failed_goal_blacklist_sec"),
             named(&FrontierConfig::failed_goal_max_retries,
                   "failed_goal_max_retries"),
+            named(&FrontierConfig::hazard_region_enabled,
+                  "hazard_region_enabled"),
+            named(&FrontierConfig::hazard_region_severity1_radius_m,
+                  "hazard_region_severity1_radius_m"),
+            named(&FrontierConfig::hazard_region_severity2_radius_m,
+                  "hazard_region_severity2_radius_m"),
+            named(&FrontierConfig::hazard_region_ttl_sec,
+                  "hazard_region_ttl_sec"),
+            named(&FrontierConfig::hazard_region_path_penalty,
+                  "hazard_region_path_penalty"),
+            named(&FrontierConfig::hazard_region_safe_traversal_clear_enabled,
+                  "hazard_region_safe_traversal_clear_enabled"),
             named(&FrontierConfig::enable_subgoals, "enable_subgoals"),
             named(&FrontierConfig::max_subgoals, "max_subgoals"),
             named(&FrontierConfig::subgoal_path_tolerance_m,
@@ -521,6 +533,9 @@ private:
             logWaiting("Waiting for /map");
             return;
         }
+        for (const auto& region : core_.pruneHazardRegions(nowSec())) {
+            publishHazardCleared(region, "expired");
+        }
         if (perception_stall_paused_) {
             const double paused_for =
                 nowSec() - perception_stall_pause_started_sec_;
@@ -560,6 +575,7 @@ private:
         if (goal_active_) {
             const auto robot_pose = lookupRobotPose();
             if (robot_pose) {
+                observeHazardTraversal(robot_pose->xy);
                 checkActiveGoalProgress(*robot_pose);
             }
             return;
@@ -576,6 +592,7 @@ private:
         if (!robot_pose) {
             return;
         }
+        observeHazardTraversal(robot_pose->xy);
         findAndBeginCandidateRoute(*robot_pose, false);
     }
 
@@ -2127,7 +2144,59 @@ private:
         if (!active_final_goal_) {
             return;
         }
+        recordPhysicalHazard(failure_class);
         recordGoalFailure(*active_final_goal_, failure_class);
+    }
+
+    static bool isPhysicalFailure(const FailureClass failure_class) {
+        return failure_class == FailureClass::kStallOrSlip ||
+               failure_class == FailureClass::kLocalHazard ||
+               failure_class == FailureClass::kRecoveryFailed;
+    }
+
+    void recordPhysicalHazard(const FailureClass failure_class) {
+        if (!isPhysicalFailure(failure_class)) {
+            return;
+        }
+        const auto robot_pose = lookupRobotPose();
+        if (!robot_pose) {
+            publishPlannerEvent(
+                "hazard_region_record_failed",
+                {{"reason", "missing_robot_pose"},
+                 {"failure_class", failureClassName(failure_class)}});
+            return;
+        }
+        const auto update = core_.recordHazardRegion(
+            robot_pose->xy, nowSec(), blacklistWeight(failure_class));
+        if (!update) {
+            return;
+        }
+        const auto& region = update->region;
+        publishPlannerEvent(
+            update->created ? "hazard_region_recorded"
+                            : "hazard_region_updated",
+            {{"hazard_xy", pointJson(region.xy)},
+             {"robot_xy", pointJson(robot_pose->xy)},
+             {"failure_class", failureClassName(failure_class)},
+             {"severity", region.severity},
+             {"radius_m", rounded(region.radius)},
+             {"expires_at_sec", rounded(region.expires_at_sec)}});
+    }
+
+    void observeHazardTraversal(const WorldPoint& robot_xy) {
+        for (const auto& region : core_.noteHazardTraversal(robot_xy)) {
+            publishHazardCleared(region, "safe_traversal");
+        }
+    }
+
+    void publishHazardCleared(const HazardRegion& region,
+                              const std::string& reason) {
+        publishPlannerEvent("hazard_region_cleared",
+                            {{"hazard_xy", pointJson(region.xy)},
+                             {"severity", region.severity},
+                             {"radius_m", rounded(region.radius)},
+                             {"expires_at_sec", rounded(region.expires_at_sec)},
+                             {"reason", reason}});
     }
 
     void recordValidationFailure(const FailureClass failure_class) {
@@ -2204,6 +2273,7 @@ private:
                {"clusters", counts.clusters},
                {"rejected_no_options", counts.rejected_no_options},
                {"rejected_blacklist", counts.rejected_blacklist},
+               {"rejected_hazard", counts.rejected_hazard},
                {"rejected_too_near", counts.rejected_too_near},
                {"rejected_too_far", counts.rejected_too_far},
                {"rejected_no_path", counts.rejected_no_path},
@@ -2457,6 +2527,7 @@ private:
 
     void markActiveGoalUnsafe(const std::string& reason,
                               const FailureClass failure_class) {
+        recordPhysicalHazard(failure_class);
         publishPlannerEvent("frontier_marked_unsafe",
                             {{"reason", reason},
                              {"failure_class", failureClassName(failure_class)},
