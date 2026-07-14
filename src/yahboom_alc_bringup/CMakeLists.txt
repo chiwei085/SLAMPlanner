@@ -21,15 +21,21 @@ if(CCACHE_PROGRAM)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(nav2_planner REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(PCL REQUIRED COMPONENTS filters)
+find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
@@ -67,6 +73,7 @@ target_link_libraries(cluster_frontier_explorer
 )
 ament_target_dependencies(cluster_frontier_explorer
   geometry_msgs
+  lifecycle_msgs
   nav2_msgs
   nav_msgs
   rclcpp
@@ -120,6 +127,7 @@ target_link_libraries(r2_safe_driver
   yahboom_alc_bringup_lib
 )
 ament_target_dependencies(r2_safe_driver
+  ament_index_cpp
   geometry_msgs
   rclcpp
 )
@@ -140,6 +148,44 @@ ament_target_dependencies(yahboom_r2_cmd_vel_bridge
 
 add_executable(r2_stall_detector
   src/r2_stall_detector.cpp
+)
+
+add_executable(r2_planner_server
+  src/r2_planner_server.cpp
+)
+ament_target_dependencies(r2_planner_server
+  nav2_planner
+  rclcpp
+)
+
+add_executable(depth_cloud_preprocessor
+  src/depth_cloud_preprocessor.cpp
+)
+target_include_directories(depth_cloud_preprocessor
+  PRIVATE
+    ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(depth_cloud_preprocessor
+  ${PCL_LIBRARIES}
+)
+ament_target_dependencies(depth_cloud_preprocessor
+  pcl_conversions
+  rclcpp
+  sensor_msgs
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
+)
+
+add_executable(rtabmap_map_tf_relay
+  src/rtabmap_map_tf_relay.cpp
+)
+ament_target_dependencies(rtabmap_map_tf_relay
+  geometry_msgs
+  rclcpp
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
 )
 
 add_executable(r2_collision_safety_gate
@@ -173,12 +219,15 @@ install(
   TARGETS
     yahboom_alc_bringup_lib
     cluster_frontier_explorer
+    depth_cloud_preprocessor
     planner_runtime_logger
     r2_emergency_stop
     r2_safe_driver
     r2_safety_stop
     r2_stall_detector
     r2_collision_safety_gate
+    r2_planner_server
+    rtabmap_map_tf_relay
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -271,6 +320,13 @@ if(BUILD_TESTING)
     nav_msgs
     rclcpp
     sensor_msgs
+  )
+
+  ament_add_gtest(test_rtabmap_map_tf_relay
+    test/test_rtabmap_map_tf_relay.cpp
+  )
+  ament_target_dependencies(test_rtabmap_map_tf_relay
+    tf2
   )
 
 endif()

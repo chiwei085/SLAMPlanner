@@ -44,7 +44,7 @@ def generate_launch_description():
             param_rewrites={
                 "use_sim_time": use_sim_time,
                 "autostart": autostart,
-                "default_bt_xml_filename": bt_xml_filename,
+                "default_nav_to_pose_bt_xml": bt_xml_filename,
                 "cmd_vel_out_topic": nav_cmd_vel_topic,
             },
             convert_types=True,
@@ -86,8 +86,8 @@ def generate_launch_description():
                 remappings=remappings,
             ),
             Node(
-                package="nav2_planner",
-                executable="planner_server",
+                package="yahboom_alc_bringup",
+                executable="r2_planner_server",
                 name="planner_server",
                 output="screen",
                 respawn=use_respawn,

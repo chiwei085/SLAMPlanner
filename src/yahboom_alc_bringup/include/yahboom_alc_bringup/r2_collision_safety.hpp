@@ -15,10 +15,10 @@ struct R2CollisionSafetyConfig
     std::string imu_topic = "/imu/data";
     std::string planner_event_topic = "/planner/events";
     std::string safety_stop_topic = "/collision_safety_stop_active";
-    double command_vx_threshold_mps = 0.01;
+    double command_vx_threshold_mps = 0.05;
     double imu_stale_timeout_sec = 0.5;
     int imu_baseline_samples = 20;
-    double imu_impact_decel_threshold_mps2 = 1.5;
+    double imu_impact_decel_threshold_mps2 = 3.0;
     double impact_stop_hold_sec = 0.5;
     double impact_cooldown_sec = 3.0;
 };

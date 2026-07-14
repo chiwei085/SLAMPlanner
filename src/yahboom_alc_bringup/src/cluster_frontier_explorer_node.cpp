@@ -1,5 +1,7 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+#include <lifecycle_msgs/srv/get_state.hpp>
 #include <nav2_msgs/action/back_up.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
@@ -15,6 +17,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <iostream>
@@ -368,6 +371,9 @@ constexpr int kConsecutiveReverseChurnEscapeThreshold = 2;
 // at the goal and didn't actually navigate anywhere.  Blacklist the goal to
 // break the "frontier never clears" cycling loop.
 constexpr double kTrivialSuccessThresholdSec = 2.0;
+constexpr double kNav2ReadinessPollSec = 1.0;
+constexpr double kNav2ReadinessRetrySec = 1.0;
+constexpr double kNav2ReadinessRequestTimeoutSec = 2.0;
 // Nav2 humble's ControllerServer::isGoalReached() ignores the return value of
 // the end-pose transform: when the map->odom lookup fails the goal checker
 // compares the robot against a default-constructed (identity) pose.  A robot
@@ -405,6 +411,7 @@ public:
     using SpinGoalHandle = rclcpp_action::ClientGoalHandle<Spin>;
     using BackUp = nav2_msgs::action::BackUp;
     using BackUpGoalHandle = rclcpp_action::ClientGoalHandle<BackUp>;
+    using GetState = lifecycle_msgs::srv::GetState;
 
     explicit ClusterFrontierExplorerNode(
         const rclcpp::NodeOptions& options = rclcpp::NodeOptions{})
@@ -417,6 +424,7 @@ public:
         loadParams();
         backup_client_ = rclcpp_action::create_client<BackUp>(
             this, backtrace_backup_action_);
+        createNav2LifecycleClients();
 
         rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
         map_qos.reliable().transient_local();
@@ -438,6 +446,9 @@ public:
         timer_ =
             create_wall_timer(std::chrono::duration<double>(cycle_period_sec_),
                               [this]() { onTimer(); });
+        nav2_readiness_poll_timer_ = create_wall_timer(
+            std::chrono::duration<double>(kNav2ReadinessPollSec),
+            [this]() { pollNav2LifecycleStates(); });
     }
 
 private:
@@ -857,6 +868,15 @@ private:
             return;
         }
         const auto& waypoint = active_route_[active_route_index_];
+        if (!nav2LifecycleReady()) {
+            publishPlannerEvent("nav2_not_active",
+                                {{"goal_xy", pointJson(waypoint.xy)},
+                                 {"goal_yaw", rounded(waypoint.yaw)},
+                                 {"index", active_route_index_},
+                                 {"states", nav2LifecycleStatesJson()}});
+            scheduleNav2ReadinessRetry();
+            return;
+        }
         publishPlannerEvent(waypoint.final ? "goal_sent" : "subgoal_sent",
                             {{"goal_xy", pointJson(waypoint.xy)},
                              {"goal_yaw", rounded(waypoint.yaw)},
@@ -881,6 +901,14 @@ private:
 
     void sendGoal(const WorldPoint& goal_xy, const double goal_yaw) {
         if (alc_gate_.paused()) {
+            return;
+        }
+        if (!nav2LifecycleReady()) {
+            publishPlannerEvent("nav2_not_active",
+                                {{"goal_xy", pointJson(goal_xy)},
+                                 {"goal_yaw", rounded(goal_yaw)},
+                                 {"states", nav2LifecycleStatesJson()}});
+            scheduleNav2ReadinessRetry();
             return;
         }
         NavigateToPose::Goal goal;
@@ -914,13 +942,13 @@ private:
                         const GoalHandle::SharedPtr& handle) {
         if (generation != nav_goal_generation_) {
             if (handle) {
-                nav_client_->async_cancel_goal(handle);
+                safeCancelGoal(nav_client_, handle, "stale_nav_goal");
             }
             return;
         }
         if (!goal_active_) {
             if (handle) {
-                nav_client_->async_cancel_goal(handle);
+                safeCancelGoal(nav_client_, handle, "inactive_nav_goal");
             }
             return;
         }
@@ -1185,7 +1213,7 @@ private:
         spin_recovery_active_ = true;
         spin_started_sec_ = now;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
 
@@ -1231,7 +1259,7 @@ private:
         }
         if (!spin_recovery_active_) {
             if (handle) {
-                spin_client_->async_cancel_goal(handle);
+                safeCancelGoal(spin_client_, handle, "stale_spin_goal");
             }
             return;
         }
@@ -1268,7 +1296,7 @@ private:
             return;
         }
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         finishSpinRecovery("spin_timeout");
     }
@@ -1383,7 +1411,7 @@ private:
         }
         ++nav_goal_generation_;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
         goal_active_ = false;
@@ -1491,7 +1519,8 @@ private:
         const BackUpGoalHandle::SharedPtr& handle) {
         if (!recovery_clearance_backup_active_) {
             if (handle) {
-                backup_client_->async_cancel_goal(handle);
+                safeCancelGoal(backup_client_, handle,
+                               "stale_clearance_backup_goal");
             }
             return;
         }
@@ -1533,7 +1562,7 @@ private:
         recovery_spin_active_ = true;
         spin_started_sec_ = nowSec();
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
 
@@ -1570,7 +1599,7 @@ private:
             return;
         }
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         finishRecoverySpin("spin_timeout", FailureClass::kRecoveryFailed);
     }
@@ -1689,7 +1718,7 @@ private:
         backtrace_cancel_started_sec_ = nowSec();
         ++nav_goal_generation_;
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
             goal_handle_.reset();
         }
         goal_active_ = false;
@@ -1721,7 +1750,8 @@ private:
                         robot_pose->xy, *start_xy,
                         backtrace_config_.min_actual_displacement_m)) {
                     if (backup_goal_handle_) {
-                        backup_client_->async_cancel_goal(backup_goal_handle_);
+                        safeCancelGoal(backup_client_, backup_goal_handle_,
+                                       "backtrace_backup_goal");
                         backup_goal_handle_.reset();
                     }
                     backtrace_backup_active_ = false;
@@ -1789,7 +1819,7 @@ private:
     void onBacktraceGoalResponse(const BackUpGoalHandle::SharedPtr& handle) {
         if (!backtrace_recovery_active_) {
             if (handle) {
-                backup_client_->async_cancel_goal(handle);
+                safeCancelGoal(backup_client_, handle, "stale_backup_goal");
             }
             return;
         }
@@ -1910,7 +1940,7 @@ private:
                              {"active_waypoint_xy", activeGoalJson()}});
         blacklistActiveGoal(failure_class);
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
         }
         clearActiveGoal();
     }
@@ -1927,7 +1957,7 @@ private:
         const auto active_waypoint = activeGoalJson();
         clearPendingRouteSelection();
         if (goal_handle_) {
-            nav_client_->async_cancel_goal(goal_handle_);
+            safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
         }
         clearActiveGoal();
         clearGoalMarker();
@@ -1948,13 +1978,15 @@ private:
 
     void clearActiveGoal() {
         if (clearance_backup_goal_handle_) {
-            backup_client_->async_cancel_goal(clearance_backup_goal_handle_);
+            safeCancelGoal(backup_client_, clearance_backup_goal_handle_,
+                           "clearance_backup_goal");
         }
         clearance_backup_goal_handle_.reset();
         recovery_clearance_backup_active_ = false;
         pending_recovery_spin_yaw_ = 0.0;
         if (backup_goal_handle_) {
-            backup_client_->async_cancel_goal(backup_goal_handle_);
+            safeCancelGoal(backup_client_, backup_goal_handle_,
+                           "backtrace_backup_goal");
         }
         backup_goal_handle_.reset();
         backtrace_recovery_active_ = false;
@@ -1966,7 +1998,7 @@ private:
         goal_active_ = false;
         goal_handle_.reset();
         if (spin_goal_handle_) {
-            spin_client_->async_cancel_goal(spin_goal_handle_);
+            safeCancelGoal(spin_client_, spin_goal_handle_, "spin_goal");
         }
         spin_goal_handle_.reset();
         spin_recovery_active_ = false;
@@ -2105,6 +2137,21 @@ private:
         event_pub_->publish(msg);
     }
 
+    template <typename ClientT, typename GoalHandleT>
+    void safeCancelGoal(const ClientT& client, const GoalHandleT& handle,
+                        const char* label) {
+        if (!handle) {
+            return;
+        }
+        try {
+            client->async_cancel_goal(handle);
+        }
+        catch (const std::exception& exception) {
+            RCLCPP_WARN(get_logger(), "Ignoring stale %s cancel: %s", label,
+                        exception.what());
+        }
+    }
+
     void onPlannerEvent(const std_msgs::msg::String& msg) {
         handleReverseBlockedEvent(msg.data);
         handleStallOrSlipEvent(msg.data);
@@ -2129,7 +2176,8 @@ private:
         if (recoveryActive()) {
             latchRearBlocked("reverse_blocked");
             if (backup_goal_handle_) {
-                backup_client_->async_cancel_goal(backup_goal_handle_);
+                safeCancelGoal(backup_client_, backup_goal_handle_,
+                               "backtrace_backup_goal");
                 backup_goal_handle_.reset();
             }
             backtrace_backup_active_ = false;
@@ -2333,6 +2381,130 @@ private:
 
     double nowSec() { return get_clock()->now().seconds(); }
 
+    struct LifecycleStateClient
+    {
+        std::string node_name;
+        rclcpp::Client<GetState>::SharedPtr client;
+        std::optional<uint8_t> state_id;
+        bool request_pending = false;
+        double request_sent_sec = 0.0;
+    };
+
+    void createNav2LifecycleClients() {
+        for (const auto& node_name : {"planner_server", "controller_server",
+                                      "bt_navigator", "behavior_server"}) {
+            const std::string node_name_str{node_name};
+            nav2_lifecycle_clients_.push_back(LifecycleStateClient{
+                node_name_str,
+                create_client<GetState>(node_name_str + "/get_state"),
+                std::nullopt, false, 0.0});
+        }
+    }
+
+    void pollNav2LifecycleStates() {
+        const double now = nowSec();
+        for (std::size_t i = 0; i < nav2_lifecycle_clients_.size(); ++i) {
+            auto& lifecycle_client = nav2_lifecycle_clients_[i];
+            if (lifecycle_client.request_pending) {
+                if (now - lifecycle_client.request_sent_sec <
+                    kNav2ReadinessRequestTimeoutSec) {
+                    continue;
+                }
+                lifecycle_client.request_pending = false;
+                lifecycle_client.state_id.reset();
+            }
+            if (!lifecycle_client.client->service_is_ready()) {
+                lifecycle_client.state_id.reset();
+                continue;
+            }
+            lifecycle_client.request_pending = true;
+            lifecycle_client.request_sent_sec = now;
+            auto request = std::make_shared<GetState::Request>();
+            lifecycle_client.client->async_send_request(
+                request,
+                [this, i](rclcpp::Client<GetState>::SharedFuture future) {
+                    auto& lifecycle_client = nav2_lifecycle_clients_[i];
+                    lifecycle_client.request_pending = false;
+                    try {
+                        lifecycle_client.state_id =
+                            future.get()->current_state.id;
+                    }
+                    catch (const std::exception& exc) {
+                        lifecycle_client.state_id.reset();
+                        RCLCPP_DEBUG(
+                            get_logger(),
+                            "Failed to read lifecycle state for %s: %s",
+                            lifecycle_client.node_name.c_str(), exc.what());
+                    }
+                });
+        }
+    }
+
+    bool nav2LifecycleReady() const {
+        return std::all_of(
+            nav2_lifecycle_clients_.begin(), nav2_lifecycle_clients_.end(),
+            [](const LifecycleStateClient& lifecycle_client) {
+                return lifecycle_client.state_id &&
+                       lifecycle_client.state_id.value() ==
+                           lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+            });
+    }
+
+    void scheduleNav2ReadinessRetry() {
+        if (nav2_readiness_retry_timer_) {
+            return;
+        }
+        nav2_readiness_retry_timer_ = create_wall_timer(
+            std::chrono::duration<double>(kNav2ReadinessRetrySec), [this]() {
+                nav2_readiness_retry_timer_.reset();
+                if (!goal_active_ && !active_route_.empty()) {
+                    sendActiveWaypoint();
+                }
+            });
+    }
+
+    static const char* lifecycleStateName(const uint8_t state_id) {
+        switch (state_id) {
+            case lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN:
+                return "unknown";
+            case lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED:
+                return "unconfigured";
+            case lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE:
+                return "inactive";
+            case lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE:
+                return "active";
+            case lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED:
+                return "finalized";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_CONFIGURING:
+                return "configuring";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_CLEANINGUP:
+                return "cleaningup";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_SHUTTINGDOWN:
+                return "shuttingdown";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_ACTIVATING:
+                return "activating";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_DEACTIVATING:
+                return "deactivating";
+            case lifecycle_msgs::msg::State::TRANSITION_STATE_ERRORPROCESSING:
+                return "errorprocessing";
+            default:
+                return "other";
+        }
+    }
+
+    nlohmann::json nav2LifecycleStatesJson() const {
+        nlohmann::json states = nlohmann::json::object();
+        for (const auto& lifecycle_client : nav2_lifecycle_clients_) {
+            if (!lifecycle_client.state_id) {
+                states[lifecycle_client.node_name] = "unavailable";
+                continue;
+            }
+            states[lifecycle_client.node_name] =
+                lifecycleStateName(lifecycle_client.state_id.value());
+        }
+        return states;
+    }
+
     FrontierExplorerCore core_;
     bool enabled_ = true;
     bool map_received_ = false;
@@ -2417,6 +2589,7 @@ private:
     rclcpp_action::Client<Spin>::SharedPtr spin_client_;
     rclcpp_action::Client<BackUp>::SharedPtr backup_client_;
     rclcpp_action::Client<ComputePathToPose>::SharedPtr compute_path_client_;
+    std::vector<LifecycleStateClient> nav2_lifecycle_clients_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         marker_pub_;
@@ -2425,6 +2598,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr nav2_readiness_poll_timer_;
+    rclcpp::TimerBase::SharedPtr nav2_readiness_retry_timer_;
 };
 
 }  // namespace yahboom_alc_bringup

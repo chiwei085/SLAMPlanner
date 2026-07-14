@@ -30,8 +30,8 @@ Build and tests must pass before committing.
   `python3 .agent-hooks/clang_tidy.py`.
 - After changing launch files or launch arguments: run
   `python3 .agent-hooks/launch_check.py`.
-- Before reporting a complete implementation, prefer the full sequence:
-  `python3 .agent-hooks/run_all.py`.
+<!-- - Before reporting a complete implementation, prefer the full sequence:
+  `python3 .agent-hooks/run_all.py`. -->
 
 ## Hook Expectations
 

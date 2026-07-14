@@ -48,6 +48,13 @@ struct R2CmdVelBridgeConfig
     double reverse_safety_margin_m = 0.0;
     int reverse_allowed_cost_max = 98;
     bool reverse_unknown_is_blocked = true;
+    // Unlike reverse_unknown_is_blocked, this defaults to false: the
+    // stationary-arc forward check runs on every goal that points toward a
+    // frontier, and a frontier's entire purpose is bordering unknown space.
+    // Blocking on unknown ahead stalls the robot at every goal instead of
+    // just the rare, high-consequence blind-reverse case that
+    // reverse_unknown_is_blocked exists for.
+    bool stationary_arc_unknown_is_blocked = false;
     double footprint_front_m = 0.19;
     double footprint_rear_m = 0.19;
     double footprint_half_width_m = 0.115;
@@ -182,6 +189,8 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "reverse_allowed_cost_max"),
             named(&R2CmdVelBridgeConfig::reverse_unknown_is_blocked,
                   "reverse_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::stationary_arc_unknown_is_blocked,
+                  "stationary_arc_unknown_is_blocked"),
             named(&R2CmdVelBridgeConfig::footprint_front_m,
                   "footprint_front_m"),
             named(&R2CmdVelBridgeConfig::footprint_rear_m, "footprint_rear_m"),

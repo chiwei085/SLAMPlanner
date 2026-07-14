@@ -306,13 +306,30 @@ TEST(R2CmdVelBridge, StationaryArcForwardSafetyAllowsInflatedFrontCost) {
                                                     defaultConfig()));
 }
 
-TEST(R2CmdVelBridge, StationaryArcForwardSafetyBlocksUnknownFront) {
+// Unlike reverse safety, the stationary-arc forward check must not block on
+// unknown cells by default: it runs on every goal that turns toward a
+// frontier, and a frontier borders unknown space by definition. Blocking here
+// stalled the robot at every goal (run_20260708_161710.jsonl) instead of just
+// guarding the rare blind-reverse case.
+TEST(R2CmdVelBridge, StationaryArcForwardSafetyAllowsUnknownFrontByDefault) {
     auto costmap = buildCostmap();
     setWorldCell(costmap, 0.22, 0.0, -1);
     const ReverseSafetyPose pose{0.0, 0.0, 0.0};
 
-    EXPECT_FALSE(isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05,
-                                                     defaultConfig()));
+    EXPECT_TRUE(isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05,
+                                                    defaultConfig()));
+}
+
+TEST(R2CmdVelBridge,
+     StationaryArcForwardSafetyBlocksUnknownFrontWhenConfigured) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, 0.22, 0.0, -1);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+    auto config = defaultConfig();
+    config.stationary_arc_unknown_is_blocked = true;
+
+    EXPECT_FALSE(
+        isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05, config));
 }
 
 TEST(R2CmdVelBridge, StationaryArcForwardSafetyBlocksOutOfBoundsSweep) {

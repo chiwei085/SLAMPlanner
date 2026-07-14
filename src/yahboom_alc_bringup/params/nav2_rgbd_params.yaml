@@ -4,10 +4,20 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: odom
-    # Robot pose feedback is looked up in the map frame; the default 0.1 s
-    # cannot ride out RTAB-Map map->odom stalls (see FollowPath below).
-    transform_tolerance: 1.0
-    default_bt_xml_filename: "navigate_to_pose_w_replanning_and_recovery.xml"
+    # rtabmap_map_tf_relay publishes map->odom at 50 Hz (≤20 ms latency),
+    # so the old 1.0 s stall-absorption value is no longer needed. 0.3 s
+    # is a small safety net against any unexpected TF hiccup.
+    transform_tolerance: 0.3
+    # Humble renamed this from default_bt_xml_filename to
+    # default_nav_to_pose_bt_xml. r2_navigation_launch.py's RewrittenYaml
+    # param_rewrites already targets the new key name, but RewrittenYaml only
+    # rewrites leaf keys that already exist in the source YAML -- it never
+    # inserts missing ones. With the old key name still here, the rewrite had
+    # nothing to match, so bt_navigator silently fell back to its own
+    # compiled-in default (the stock navigate_to_pose_w_replanning_and_recovery.xml,
+    # whose RoundRobin recovery contains Spin(1.57) = phantom left turns)
+    # instead of navigate_to_pose_rgbd.xml. See memory: stock-bt-loaded-param-rename.
+    default_nav_to_pose_bt_xml: "navigate_to_pose_rgbd.xml"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -106,12 +116,10 @@ controller_server:
       rotate_to_heading_min_angle: 0.785
       rotate_to_heading_angular_vel: 0.3
       max_angular_accel: 0.5
-      # RTAB-Map's map->odom publish loop shares a mutex with graph updates
-      # and stalls 1-2 s under Jetson load. run_20260707_135239 logged 35
-      # "Exception in transformPose ... extrapolation into the future" errors
-      # at 0.2, each aborting FollowPath mid-drive. Match the costmap
-      # tolerance so the controller waits out the stall instead of aborting.
-      transform_tolerance: 1.0
+      # rtabmap_map_tf_relay decouples map->odom publishing from the SLAM
+      # graph-optimization mutex; the relay runs at 50 Hz so FollowPath
+      # never sees a stale transform. 0.3 s provides a small safety margin.
+      transform_tolerance: 0.3
       max_robot_pose_search_dist: 2.0
       use_interpolation: true
 
@@ -127,12 +135,10 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_footprint
       use_sim_time: False
-      # Controller server uses this costmap's tolerance when transforming the
-      # path end pose (map frame) into odom for the goal check.  RTAB-Map's
-      # map->odom can stall >0.2 s under load on the Jetson; with the default
-      # 0.3 s the (unchecked) transform fails and nav2 humble compares the
-      # robot against an identity pose — phantom SUCCEEDED near the origin.
-      transform_tolerance: 1.0
+      # rtabmap_map_tf_relay keeps map->odom fresh at 50 Hz, eliminating the
+      # phantom-SUCCEEDED bug caused by the transform failing silently under
+      # load (run_20260707_fix notes). 0.3 s is a conservative safety net.
+      transform_tolerance: 0.3
       rolling_window: true
       width: 3
       height: 3
@@ -142,7 +148,7 @@ local_costmap:
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.45
+        inflation_radius: 0.29
         cost_scaling_factor: 3.0
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -155,7 +161,14 @@ local_costmap:
         mark_threshold: 0
         observation_sources: depth_cloud
         depth_cloud:
-          topic: /camera/depth/points
+          topic: /camera/depth/points_voxel_base
+          # depth_cloud_preprocessor pre-transforms points into base_footprint
+          # and rewrites header.frame_id accordingly. Without sensor_frame set,
+          # ObservationBuffer would use that rewritten frame_id as the raytrace
+          # origin (0,0,0 of base_footprint = ground-level robot center) instead
+          # of the camera's real elevated, forward-offset position, corrupting
+          # the clearing geometry that low chair-leg detection depends on.
+          sensor_frame: camera_depth_optical_frame
           obstacle_min_range: 0.2
           obstacle_max_range: 1.5
           raytrace_min_range: 0.2
@@ -183,8 +196,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: False
-      # Tolerate RTAB-Map map->odom publication stalls (see local_costmap).
-      transform_tolerance: 1.0
+      # rtabmap_map_tf_relay provides fresh map->odom at 50 Hz (see local_costmap).
+      transform_tolerance: 0.3
       footprint: "[[0.19, 0.115], [0.19, -0.115], [-0.19, -0.115], [-0.19, 0.115]]"
       footprint_padding: 0.02
       resolution: 0.05
@@ -210,7 +223,11 @@ global_costmap:
         mark_threshold: 0
         observation_sources: depth_cloud
         depth_cloud:
-          topic: /camera/depth/points
+          topic: /camera/depth/points_voxel_base
+          # See local_costmap voxel_layer comment: without sensor_frame, the
+          # raytrace origin would come from the preprocessor's rewritten
+          # base_footprint header instead of the real camera pose.
+          sensor_frame: camera_depth_optical_frame
           obstacle_min_range: 0.2
           obstacle_max_range: 4.0
           raytrace_min_range: 0.2
@@ -225,7 +242,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.25
+        inflation_radius: 0.16
       always_send_full_costmap: True
   global_costmap_client:
     ros__parameters:
@@ -362,7 +379,7 @@ collision_monitor:
     observation_sources: ["depth_cloud"]
     depth_cloud:
       type: "pointcloud"
-      topic: "/camera/depth/points"
+      topic: "/camera/depth/points_voxel_base"
       min_height: 0.01
       max_height: 0.8
       enabled: true
