@@ -49,6 +49,22 @@ bool RecoveryStateMachine::tickReobserve() {
     return reobserve_cycles_remaining_ <= 0;
 }
 
+ReobserveCompletion RecoveryStateMachine::resolveReobserveCompletion(
+    const bool map_silent) {
+    if (!map_silent) {
+        reobserve_perception_stall_extensions_ = 0;
+        return ReobserveCompletion::kConfirmed;
+    }
+    ++reobserve_perception_stall_extensions_;
+    if (reobserve_perception_stall_extensions_ >=
+        config_.recovery_reobserve_perception_stall_max_extensions) {
+        reobserve_perception_stall_extensions_ = 0;
+        return ReobserveCompletion::kPerceptionStallExhausted;
+    }
+    beginReobserve();
+    return ReobserveCompletion::kExtended;
+}
+
 std::optional<double> RecoveryStateMachine::nextSmallRotationYaw() {
     stage_ = RecoveryStage::kSmallRotation;
     if (spin_attempts_ >= config_.recovery_small_spin_attempts) {

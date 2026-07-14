@@ -137,5 +137,65 @@ TEST(RecoveryStateMachine, StagnationDisabledWithZeroThreshold) {
     }
 }
 
+TEST(RecoveryStateMachine, ReobserveConfirmsImmediatelyWhenMapNotSilent) {
+    RecoveryStateMachine recovery(testConfig());
+    recovery.start();
+    ASSERT_TRUE(recovery.tickReobserve());
+
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/false),
+              ReobserveCompletion::kConfirmed);
+}
+
+TEST(RecoveryStateMachine, ReobserveExtendsAndRearmsWhileMapSilent) {
+    auto config = testConfig();
+    config.recovery_reobserve_perception_stall_max_extensions = 3;
+    RecoveryStateMachine recovery(config);
+    recovery.start();
+    ASSERT_TRUE(recovery.tickReobserve());
+
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/true),
+              ReobserveCompletion::kExtended);
+    // beginReobserve() re-armed the cycle count: still in reobserve, and the
+    // next tick must expire again before completion is re-resolved.
+    EXPECT_EQ(recovery.stage(), RecoveryStage::kReobserve);
+    EXPECT_TRUE(recovery.tickReobserve());
+}
+
+TEST(RecoveryStateMachine,
+     ReobservePausesAfterExhaustingStallBudgetNotBlacklist) {
+    auto config = testConfig();
+    config.recovery_reobserve_perception_stall_max_extensions = 2;
+    RecoveryStateMachine recovery(config);
+    recovery.start();
+    ASSERT_TRUE(recovery.tickReobserve());
+
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/true),
+              ReobserveCompletion::kExtended);
+    ASSERT_TRUE(recovery.tickReobserve());
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/true),
+              ReobserveCompletion::kPerceptionStallExhausted);
+}
+
+TEST(RecoveryStateMachine, ReobserveStallCounterResetsOnceMapRecovers) {
+    auto config = testConfig();
+    config.recovery_reobserve_perception_stall_max_extensions = 2;
+    RecoveryStateMachine recovery(config);
+    recovery.start();
+    ASSERT_TRUE(recovery.tickReobserve());
+
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/true),
+              ReobserveCompletion::kExtended);
+    ASSERT_TRUE(recovery.tickReobserve());
+    // Map recovered before the budget was exhausted: back to normal, and a
+    // later stall starts a fresh budget rather than picking up where the
+    // first stall left off.
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/false),
+              ReobserveCompletion::kConfirmed);
+    recovery.beginReobserve();
+    ASSERT_TRUE(recovery.tickReobserve());
+    EXPECT_EQ(recovery.resolveReobserveCompletion(/*map_silent=*/true),
+              ReobserveCompletion::kExtended);
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

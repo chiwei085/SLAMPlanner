@@ -21,6 +21,9 @@ std::optional<std::string> parseEventName(const std::string& payload);
 // Extracts the optional "failure_class" field from planner events.
 std::optional<std::string> parseFailureClass(const std::string& payload);
 
+// Extracts the optional "reason" field from planner events.
+std::optional<std::string> parseReason(const std::string& payload);
+
 // Classifies a planner coordination event payload (JSON with an "event"
 // field). Malformed payloads and unrelated events map to kNone.
 CoordinationAction classifyPlannerEvent(const std::string& payload);

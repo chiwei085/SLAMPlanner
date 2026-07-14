@@ -38,12 +38,14 @@ struct LoggerTopics
     std::string nav_cmd_topic;
     std::string driver_cmd_topic;
     std::string navigate_status_topic;
+    std::string global_costmap_topic;
+    std::string wheel_odom_topic;
 };
 
 struct SourceHealth
 {
     int message_count = 0;
-    std::optional<double> age_sec;
+    std::optional<double> receive_silence_sec;
 };
 
 MapCellCounts countMapCells(const nav_msgs::msg::OccupancyGrid& msg,

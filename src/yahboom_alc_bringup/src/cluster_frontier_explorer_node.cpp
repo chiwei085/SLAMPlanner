@@ -21,6 +21,7 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +33,7 @@
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
 #include "yahboom_alc_bringup/recovery_state_machine.hpp"
+#include "yahboom_alc_bringup/temporal_signal.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
@@ -152,7 +154,16 @@ struct descriptor<yahboom_alc_bringup::RecoveryStateMachineConfig>
                       recovery_stagnation_escalation_trees,
                   "recovery_stagnation_escalation_trees"),
             named(&RecoveryStateMachineConfig::recovery_stagnation_radius_m,
-                  "recovery_stagnation_radius_m"));
+                  "recovery_stagnation_radius_m"),
+            named(&RecoveryStateMachineConfig::
+                      recovery_reobserve_map_stall_ceiling_sec,
+                  "recovery_reobserve_map_stall_ceiling_sec"),
+            named(&RecoveryStateMachineConfig::
+                      recovery_reobserve_perception_stall_max_extensions,
+                  "recovery_reobserve_perception_stall_max_extensions"),
+            named(&RecoveryStateMachineConfig::
+                      recovery_perception_stall_pause_max_sec,
+                  "recovery_perception_stall_pause_max_sec"));
     }
 };
 
@@ -325,6 +336,9 @@ enum class FailureClass : std::uint8_t
     kStallOrSlip,
     kLocalHazard,     // weight 2: physical blockage confirmed by stall/slip
     kRecoveryFailed,  // weight 2: all recovery strategies exhausted
+    // The bridge blocked motion because it couldn't see (stale local
+    // costmap / no TF), not because it saw an obstacle. Never blames a goal.
+    kPerceptionStall,
 };
 
 constexpr int blacklistWeight(const FailureClass fc) noexcept {
@@ -350,6 +364,8 @@ constexpr const char* failureClassName(const FailureClass fc) noexcept {
             return "local_hazard";
         case FailureClass::kRecoveryFailed:
             return "recovery_failed";
+        case FailureClass::kPerceptionStall:
+            return "perception_stall";
     }
     return "unknown";
 }
@@ -358,15 +374,10 @@ constexpr const char* failureClassName(const FailureClass fc) noexcept {
 // to cover action transport before declaring a spin lost.
 constexpr double kSpinTransportMarginSec = 5.0;
 constexpr int kReverseBlockedBacktraceThreshold = 3;
-constexpr double kImmediateReverseBlockWindowSec = 3.0;
 constexpr double kRecentReverseBlockedWindowSec = 3.0;
 // After this many consecutive backup_stalled failures, the rear is blocked;
 // skip backtrace and directly abandon to avoid spinning wheels in place.
 constexpr int kBacktraceStallSkipThreshold = 3;
-// After this many consecutive immediate reverse-blocked abandons across
-// different frontiers, the robot's current pose is the trap — trigger a
-// forward escape instead of cycling through more doomed frontier candidates.
-constexpr int kConsecutiveReverseChurnEscapeThreshold = 2;
 // If nav2 declares SUCCEEDED in under this many seconds the robot was already
 // at the goal and didn't actually navigate anywhere.  Blacklist the goal to
 // break the "frontier never clears" cycling loop.
@@ -496,6 +507,9 @@ private:
 
     void onMap(const nav_msgs::msg::OccupancyGrid& msg) {
         map_received_ = true;
+        map_temporal_ =
+            observeTemporalSignal(rclcpp::Time(msg.header.stamp).seconds(),
+                                  nowSec(), map_temporal_state_);
         core_.setMap(msg);
     }
 
@@ -506,6 +520,34 @@ private:
         if (!map_received_) {
             logWaiting("Waiting for /map");
             return;
+        }
+        if (perception_stall_paused_) {
+            const double paused_for =
+                nowSec() - perception_stall_pause_started_sec_;
+            const bool map_receiving =
+                mapReceiveSilenceSec() <=
+                recovery_config_.recovery_reobserve_map_stall_ceiling_sec;
+            // /map silence alone can never clear while the robot stands
+            // still (RTAB-Map publishes on motion), so a wall-clock budget
+            // is the guaranteed exit: retry, and re-pause if the bridge
+            // still cannot see.
+            if (map_receiving ||
+                paused_for >=
+                    recovery_config_.recovery_perception_stall_pause_max_sec) {
+                perception_stall_paused_ = false;
+                publishPlannerEvent(
+                    "exploration_resumed_perception_recovered",
+                    {{"reason", map_receiving ? "map_receiving"
+                                              : "pause_budget_exhausted"},
+                     {"paused_for_sec", rounded(paused_for)}});
+            }
+            else {
+                publishPlannerEvent("exploration_paused_perception_stalled",
+                                    {{"map_receive_silence_sec",
+                                      rounded(mapReceiveSilenceSec())},
+                                     {"paused_for_sec", rounded(paused_for)}});
+                return;
+            }
         }
         if (alc_gate_.paused()) {
             logWaiting("Frontier exploration paused for ALC");
@@ -1046,14 +1088,12 @@ private:
                                  {"failure_class", "global_path_blocked"},
                                  {"duration_sec", rounded(route_duration)}});
             blacklistActiveGoal(FailureClass::kGlobalPathBlocked);
-            consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
             clearActiveGoal();
             return;
         }
         publishPlannerEvent("route_completed",
                             {{"goal_xy", activeFinalGoalJson()}});
-        consecutive_immediate_reverse_streak_ = 0;
         consecutive_backtrace_stall_count_ = 0;
         clearActiveGoal();
     }
@@ -1371,6 +1411,7 @@ private:
         pending_recovery_spin_yaw_ = 0.0;
         recovery_reason_.clear();
         recovery_start_xy_.reset();
+        reverse_pulse_escalation_pending_ = false;
     }
 
     void startRecoveryTree(const std::string& reason) {
@@ -1394,6 +1435,7 @@ private:
         }
         if (escalate_to_backtrace && backtrace_config_.enabled) {
             recovery_.advanceToReversePulse();
+            reverse_pulse_escalation_pending_ = true;
             publishPlannerEvent(
                 "recovery_stagnation_escalation",
                 {{"reason", reason},
@@ -1447,6 +1489,49 @@ private:
     void checkRecoveryReobserve() {
         if (!recovery_.tickReobserve()) {
             return;
+        }
+        // Cycle count alone can't tell "observed and found nothing new"
+        // apart from "perception stopped producing" -- both look identical
+        // to a timer.  Only trust completion when /map has actually kept
+        // arriving during the wait.
+        const bool map_silent =
+            mapReceiveSilenceSec() >
+            recovery_config_.recovery_reobserve_map_stall_ceiling_sec;
+        switch (recovery_.resolveReobserveCompletion(map_silent)) {
+            case ReobserveCompletion::kExtended:
+                publishPlannerEvent(
+                    "reobserve_perception_stalled",
+                    recoveryEventFields("map_receive_silence_exceeded"));
+                return;
+            case ReobserveCompletion::kPerceptionStallExhausted: {
+                // Perception itself is the failure, not this goal or any
+                // other candidate -- never blacklist for this.  But sitting
+                // still is exactly why /map stopped: RTAB-Map only inserts a
+                // new node (and republishes /map, since map_always_update is
+                // false) on sufficient motion.  Waiting longer cannot help;
+                // spin in place instead -- it sweeps the camera across
+                // whatever is behind/beside the robot (resolving unknown-vs-
+                // occupied ambiguity) and gives SLAM the angular displacement
+                // it needs to unstick itself.  Only once that bounded spin
+                // budget (recovery_small_spin_attempts) is exhausted do we
+                // fall back to a passive pause.
+                const auto yaw = recovery_.nextSmallRotationYaw();
+                if (!yaw) {
+                    perception_stall_paused_ = true;
+                    perception_stall_pause_started_sec_ = nowSec();
+                    publishPlannerEvent(
+                        "exploration_paused_perception_stalled",
+                        recoveryEventFields("map_stall_exhausted"));
+                    return;
+                }
+                publishPlannerEvent("perception_stall_scan_started",
+                                    recoveryEventFields("map_stall_exhausted"));
+                pending_recovery_spin_yaw_ = *yaw;
+                sendRecoveryClearanceBackup(*yaw);
+                return;
+            }
+            case ReobserveCompletion::kConfirmed:
+                break;
         }
         publishPlannerEvent("recovery_stage_finished",
                             recoveryEventFields("reobserve_complete"));
@@ -1645,6 +1730,20 @@ private:
     void checkRecoveryReversePulse() {
         if (backtrace_recovery_active_) {
             checkBacktraceRecovery();
+            return;
+        }
+        // Stagnation escalation reaches this stage precisely because a
+        // reverse_blocked event just fired, so the latch/recency guard
+        // below would otherwise always be tripped on this first check --
+        // bouncing the escalated attempt into the non-blacklisting
+        // finishRecoveryHardFail() path and defeating the escalation.  Let
+        // the one escalated attempt actually run the backtrace; its own
+        // segment-level checks (checkBacktraceRecovery /
+        // finishBacktraceRecovery) still catch a genuinely blocked rear and
+        // blacklist correctly.
+        if (reverse_pulse_escalation_pending_) {
+            reverse_pulse_escalation_pending_ = false;
+            startBacktraceRecovery(recovery_reason_);
             return;
         }
         const double now = nowSec();
@@ -1903,7 +2002,6 @@ private:
              {"active_waypoint_xy", activeGoalJson()}});
         blacklistActiveGoal(success ? FailureClass::kControllerNoProgress : fc);
         if (success) {
-            consecutive_immediate_reverse_streak_ = 0;
             consecutive_backtrace_stall_count_ = 0;
         }
         else if (fc == FailureClass::kLocalHazard ||
@@ -1924,15 +2022,6 @@ private:
     void abandonActiveGoal(
         const std::string& reason,
         const FailureClass failure_class = FailureClass::kRecoveryFailed) {
-        if (failure_class == FailureClass::kReverseUnsafe) {
-            if (nowSec() - active_waypoint_sent_time_sec_ <
-                kImmediateReverseBlockWindowSec) {
-                ++consecutive_immediate_reverse_streak_;
-            }
-        }
-        else {
-            consecutive_immediate_reverse_streak_ = 0;
-        }
         publishPlannerEvent("route_abandoned",
                             {{"reason", reason},
                              {"failure_class", failureClassName(failure_class)},
@@ -2131,6 +2220,23 @@ private:
         const nlohmann::json& fields = nlohmann::json::object()) {
         std_msgs::msg::String msg;
         nlohmann::json payload = fields;
+        if (event.rfind("nav2_validation_", 0) == 0) {
+            const auto silence =
+                temporalSignalAt(map_temporal_state_, nowSec());
+            payload["map_temporal"] = {
+                {"producer_lag_sec",
+                 map_temporal_.producer_lag_sec
+                     ? nlohmann::json(rounded(*map_temporal_.producer_lag_sec))
+                     : nlohmann::json(nullptr)},
+                {"consume_gap_sec",
+                 map_temporal_.consume_gap_sec
+                     ? nlohmann::json(rounded(*map_temporal_.consume_gap_sec))
+                     : nlohmann::json(nullptr)},
+                {"receive_silence_sec",
+                 silence.receive_silence_sec
+                     ? nlohmann::json(rounded(*silence.receive_silence_sec))
+                     : nlohmann::json(nullptr)}};
+        }
         payload["event"] = event;
         payload["time_sec"] = rounded(nowSec());
         msg.data = payload.dump();
@@ -2167,30 +2273,116 @@ private:
         }
     }
 
+    // "stale_costmap" / "tf_unavailable" mean the bridge couldn't see, not
+    // that it saw an obstacle. Everything else (rear_blocked, out_of_bounds)
+    // is a real footprint-safety verdict from a fresh costmap.
+    static bool isPerceptionStallReason(const std::string& reason) {
+        return reason == "stale_costmap" || reason == "tf_unavailable";
+    }
+
+    void handlePerceptionStallReverseBlock(const std::string& reason) {
+        // The bridge streams one reverse_blocked per blocked command; only
+        // the first one needs to act.
+        if (perception_stall_paused_) {
+            return;
+        }
+        perception_stall_paused_ = true;
+        perception_stall_pause_started_sec_ = nowSec();
+        publishPlannerEvent(
+            "exploration_paused_perception_stalled",
+            {{"source", "reverse_gate"},
+             {"reason", reason},
+             {"goal_xy", activeFinalGoalJson()},
+             {"active_waypoint_xy", activeGoalJson()},
+             {"failure_class",
+              failureClassName(FailureClass::kPerceptionStall)}});
+        // The robot didn't fail to reverse -- the bridge just couldn't
+        // verify it was safe to -- so nothing here assigns blame: no
+        // blacklist, no unsafe marking, no reverse-blocked streak.  But the
+        // pause gate stops every onTimer watchdog, so anything left in
+        // flight (nav goal, backtrace backup, recovery spin) would keep
+        // commanding the robot unsupervised, and a backup left to die on
+        // its time allowance would come back through onBacktraceResult as
+        // "backup_failed" and blacklist the goal after all.  Cancel it all
+        // instead; goal selection is idempotent, so resuming replans the
+        // same frontier at no cost.
+        clearPendingRouteSelection();
+        clearActiveGoal();
+    }
+
     void handleReverseBlockedEvent(const std::string& data) {
         const auto event = parseEventName(data);
         if (!event || *event != "reverse_blocked") {
             return;
         }
+        const auto reason = parseReason(data);
+        if (reason && isPerceptionStallReason(*reason)) {
+            handlePerceptionStallReverseBlock(*reason);
+            return;
+        }
         last_reverse_blocked_sec_ = nowSec();
         if (recoveryActive()) {
             latchRearBlocked("reverse_blocked");
-            if (backup_goal_handle_) {
-                safeCancelGoal(backup_client_, backup_goal_handle_,
-                               "backtrace_backup_goal");
-                backup_goal_handle_.reset();
-            }
-            backtrace_backup_active_ = false;
             if (backtrace_recovery_active_) {
+                // The recovery's own backtrace backup is what got blocked:
+                // this is a real segment-level failure and does blacklist.
+                if (backup_goal_handle_) {
+                    safeCancelGoal(backup_client_, backup_goal_handle_,
+                                   "backtrace_backup_goal");
+                    backup_goal_handle_.reset();
+                }
+                backtrace_backup_active_ = false;
                 markActiveGoalUnsafe("REVERSE_UNSAFE",
                                      FailureClass::kReverseUnsafe);
                 finishBacktraceRecovery(false, "REVERSE_UNSAFE",
                                         FailureClass::kReverseUnsafe);
             }
-            else {
+            else if (recovery_clearance_backup_active_) {
+                // The pre-spin clearance backup is optional headroom, and
+                // the spin it precedes exists precisely to resolve an
+                // ambiguous rear.  Skip the backup and run the spin instead
+                // of failing the tree.  onClearanceBackupResult ignores the
+                // cancelled goal's result via its active-flag guard.
+                if (clearance_backup_goal_handle_) {
+                    safeCancelGoal(backup_client_,
+                                   clearance_backup_goal_handle_,
+                                   "clearance_backup_goal");
+                    clearance_backup_goal_handle_.reset();
+                }
+                recovery_clearance_backup_active_ = false;
+                publishPlannerEvent("recovery_clearance_backup_skipped",
+                                    recoveryEventFields("reverse_blocked"));
+                sendRecoverySpin(pending_recovery_spin_yaw_);
+            }
+            else if (reverse_pulse_escalation_pending_) {
+                // Same race as checkRecoveryReversePulse(): the rear is
+                // genuinely blocked, so reverse_blocked events keep
+                // streaming in and this handler -- not the timer tick --
+                // is almost always the first to observe kReversePulse
+                // after an escalation. Consume the flag here too and
+                // actually attempt the backtrace instead of hard-failing
+                // before it ever runs; any subsequent reverse_blocked in
+                // this burst will then hit the backtrace_recovery_active_
+                // branch above, which does blacklist.
+                reverse_pulse_escalation_pending_ = false;
+                startBacktraceRecovery("reverse_blocked");
+            }
+            else if (recovery_.stage() == RecoveryStage::kReversePulse) {
+                // About to attempt reverse and the rear just re-confirmed
+                // blocked: same verdict the timer-tick preflight would
+                // reach.
                 finishRecoveryHardFail("REVERSE_UNSAFE",
                                        FailureClass::kReverseUnsafe);
             }
+            // Any other stage (reobserve, small-rotation wait, forward
+            // arc) commands no reverse motion of its own, so this event is
+            // residual -- the bridge blocking stragglers from the nav goal
+            // startRecoveryTree() just cancelled (cancellation is async;
+            // the controller keeps publishing for another cycle or two).
+            // Killing the tree here is what previously hard-failed 38/60
+            // trees within ~50 ms of starting, before reobserve ran even
+            // one cycle.  The latch above already records the rear state
+            // for the reverse-pulse preflight; let the tree run.
             return;
         }
         if (!goal_active_) {
@@ -2198,34 +2390,23 @@ private:
         }
         ++consecutive_reverse_blocked_;
         if (consecutive_reverse_blocked_ >= kReverseBlockedBacktraceThreshold) {
-            // Rear is confirmed blocked by costmap; backtrace uses /backup
-            // (backward motion) which the bridge will also block, so skip
-            // directly to goal abandonment rather than wasting time on a
-            // doomed backup sequence.
+            // Rear is confirmed blocked by costmap for several ticks in a
+            // row.  Route into the recovery tree instead of blacklisting
+            // immediately: reobserve + small-rotation gives the depth camera
+            // and SLAM the motion needed to resolve the common case (an
+            // ambiguous unknown-vs-occupied read behind the robot), and
+            // forward-arc is the same escape this used to reach only via a
+            // separate churn counter.  Only the backtrace/hard-fail tail end
+            // -- reached after those attempts fail -- blacklists the goal.
+            // If the robot's pose is the real trap rather than this one
+            // frontier, cross-tree stagnation tracking inside
+            // startRecoveryTree() escalates straight to that tail end once
+            // consecutive trees keep starting from the same spot, so this
+            // still can't spin forever.
             latchRearBlocked("reverse_blocked");
             markActiveGoalUnsafe("REVERSE_UNSAFE",
                                  FailureClass::kReverseUnsafe);
-            abandonActiveGoal("REVERSE_UNSAFE", FailureClass::kReverseUnsafe);
-            // consecutive_immediate_reverse_streak_ was just incremented inside
-            // abandonActiveGoal.  When the count reaches the churn threshold it
-            // means every recently-chosen frontier triggered an immediate
-            // reverse block — the robot's current pose is the trap, not any
-            // individual frontier.  Skip picking yet another doomed candidate
-            // and instead drive the robot forward to break the deadlock.
-            if (consecutive_immediate_reverse_streak_ >=
-                kConsecutiveReverseChurnEscapeThreshold) {
-                const int streak = consecutive_immediate_reverse_streak_;
-                consecutive_immediate_reverse_streak_ = 0;
-                const auto robot_pose = lookupRobotPose();
-                publishPlannerEvent(
-                    "startup_reverse_churn_detected",
-                    {{"streak", streak},
-                     {"robot_xy", robot_pose ? pointJson(robot_pose->xy)
-                                             : nlohmann::json(nullptr)}});
-                if (!robot_pose || !triggerForwardEscape(*robot_pose)) {
-                    startRecoveryTree("startup_reverse_churn");
-                }
-            }
+            startRecoveryTree("reverse_blocked");
         }
     }
 
@@ -2247,23 +2428,17 @@ private:
         const auto escape_yaw =
             core_.findClearestEscapeDirection(robot_pose.xy, distance);
         if (!escape_yaw) {
-            publishPlannerEvent(
-                "escape_fully_blocked",
-                {{"robot_xy", pointJson(robot_pose.xy)},
-                 {"streak", consecutive_immediate_reverse_streak_}});
-            consecutive_immediate_reverse_streak_ = 0;
+            publishPlannerEvent("escape_fully_blocked",
+                                {{"robot_xy", pointJson(robot_pose.xy)}});
             consecutive_backtrace_stall_count_ = 0;
             return false;
         }
 
         const WorldPoint escape_xy =
             projectPoint(robot_pose.xy, *escape_yaw, distance);
-        publishPlannerEvent(
-            "forward_escape_started",
-            {{"robot_xy", pointJson(robot_pose.xy)},
-             {"escape_xy", pointJson(escape_xy)},
-             {"streak", consecutive_immediate_reverse_streak_}});
-        consecutive_immediate_reverse_streak_ = 0;
+        publishPlannerEvent("forward_escape_started",
+                            {{"robot_xy", pointJson(robot_pose.xy)},
+                             {"escape_xy", pointJson(escape_xy)}});
 
         FrontierCandidate escape_cand;
         escape_cand.goal_xy = escape_xy;
@@ -2380,6 +2555,14 @@ private:
     }
 
     double nowSec() { return get_clock()->now().seconds(); }
+
+    // Fail-closed: a missing signal (state never initialized) reads as
+    // maximally stale rather than fresh.
+    double mapReceiveSilenceSec() {
+        const auto silence =
+            temporalSignalAt(map_temporal_state_, nowSec()).receive_silence_sec;
+        return silence.value_or(std::numeric_limits<double>::max());
+    }
 
     struct LifecycleStateClient
     {
@@ -2508,6 +2691,8 @@ private:
     FrontierExplorerCore core_;
     bool enabled_ = true;
     bool map_received_ = false;
+    TemporalSignalState map_temporal_state_;
+    TemporalSignalObservation map_temporal_;
     std::string map_topic_;
     std::string robot_frame_;
     std::string global_frame_;
@@ -2549,7 +2734,6 @@ private:
     double backtrace_segment_start_time_sec_ = 0.0;
     std::string backtrace_reason_;
     int consecutive_reverse_blocked_ = 0;
-    int consecutive_immediate_reverse_streak_ = 0;
     int consecutive_backtrace_stall_count_ = 0;
     int spurious_success_resend_streak_ = 0;
     BackUpGoalHandle::SharedPtr backup_goal_handle_;
@@ -2560,7 +2744,18 @@ private:
     double pending_recovery_spin_yaw_ = 0.0;
     BackUpGoalHandle::SharedPtr clearance_backup_goal_handle_;
     bool recovery_reobserve_used_ = false;
+    bool perception_stall_paused_ = false;
+    double perception_stall_pause_started_sec_ = 0.0;
     bool recovery_escape_active_ = false;
+    // The stagnation escalation that jumps straight to kReversePulse is
+    // triggered BY a reverse_blocked event, which always leaves the rear
+    // latch/recency guard in checkRecoveryReversePulse() tripped.  Without
+    // this flag every escalated attempt would bounce off that guard into
+    // finishRecoveryHardFail() -- which never blacklists -- so the goal
+    // would never actually reach the backtrace tail end that does.  Set
+    // when escalating, consumed (and cleared) by the first reverse-pulse
+    // check so later non-escalated arrivals still get the guard.
+    bool reverse_pulse_escalation_pending_ = false;
     std::string recovery_reason_;
     std::optional<WorldPoint> recovery_start_xy_;
     double last_reverse_blocked_sec_ = -1.0;

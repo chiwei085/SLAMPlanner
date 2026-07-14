@@ -11,6 +11,7 @@
 #include <string>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/temporal_signal.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
@@ -43,9 +44,10 @@ bool worldToMap(const nav_msgs::msg::OccupancyGrid& costmap, const double wx,
 }
 
 bool isFreeCostmapCell(const int value, const bool unknown_is_blocked,
+                       const bool recently_free,
                        const R2CmdVelBridgeConfig& config) {
     if (value < 0) {
-        return !unknown_is_blocked;
+        return !unknown_is_blocked || recently_free;
     }
     return value <= config.reverse_allowed_cost_max;
 }
@@ -91,7 +93,9 @@ const char* safetyReason(const FootprintSafetyStatus status,
 FootprintSafetyStatus footprintSafetyStatus(
     const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
     const FootprintExtensions extensions, const bool unknown_is_blocked,
-    const R2CmdVelBridgeConfig& config) {
+    const R2CmdVelBridgeConfig& config,
+    const RecentFreeCostmapHistory* recent_free_history = nullptr,
+    const double now_sec = 0.0) {
     const double resolution = costmap.info.resolution;
     if (resolution <= 0.0 || costmap.data.empty()) {
         return FootprintSafetyStatus::kBlocked;
@@ -140,9 +144,18 @@ FootprintSafetyStatus footprintSafetyStatus(
 
             const auto index =
                 static_cast<std::size_t>(my) * costmap.info.width + mx;
-            if (index >= costmap.data.size() ||
-                !isFreeCostmapCell(costmap.data[index], unknown_is_blocked,
-                                   config)) {
+            if (index >= costmap.data.size()) {
+                return FootprintSafetyStatus::kBlocked;
+            }
+            bool recently_free = false;
+            if (unknown_is_blocked && costmap.data[index] < 0 &&
+                recent_free_history != nullptr) {
+                recently_free = recent_free_history->wasRecentlyFree(
+                    cell_x, cell_y, now_sec,
+                    config.reverse_recent_free_grace_sec);
+            }
+            if (!isFreeCostmapCell(costmap.data[index], unknown_is_blocked,
+                                   recently_free, config)) {
                 return FootprintSafetyStatus::kBlocked;
             }
         }
@@ -174,7 +187,9 @@ double clampAngularForCurvature(const double angular, const double linear_x,
 bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
                             const ReverseSafetyPose& pose,
                             const double reverse_speed,
-                            const R2CmdVelBridgeConfig& config) {
+                            const R2CmdVelBridgeConfig& config,
+                            const RecentFreeCostmapHistory* recent_free_history,
+                            const double now_sec) {
     if (reverse_speed >= 0.0) {
         return true;
     }
@@ -184,13 +199,15 @@ bool isReverseSafeInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
     // footprint rectangle with the rear extended by a short fail-closed backup
     // horizon.
     return footprintSafetyStatus(costmap, pose, rearExtension(check_distance),
-                                 config.reverse_unknown_is_blocked,
-                                 config) == FootprintSafetyStatus::kSafe;
+                                 config.reverse_unknown_is_blocked, config,
+                                 recent_free_history,
+                                 now_sec) == FootprintSafetyStatus::kSafe;
 }
 
 bool isStationaryArcForwardSafeInCostmap(
     const nav_msgs::msg::OccupancyGrid& costmap, const ReverseSafetyPose& pose,
-    const double forward_speed, const R2CmdVelBridgeConfig& config) {
+    const double forward_speed, const R2CmdVelBridgeConfig& config,
+    const RecentFreeCostmapHistory* recent_free_history, const double now_sec) {
     if (forward_speed <= 0.0) {
         return true;
     }
@@ -198,7 +215,8 @@ bool isStationaryArcForwardSafeInCostmap(
         std::max(0.0, config.stationary_arc_check_distance_m);
     return footprintSafetyStatus(costmap, pose, frontExtension(check_distance),
                                  config.stationary_arc_unknown_is_blocked,
-                                 config) == FootprintSafetyStatus::kSafe;
+                                 config, recent_free_history,
+                                 now_sec) == FootprintSafetyStatus::kSafe;
 }
 
 geometry_msgs::msg::Twist convertNavTwistToR2(
@@ -299,6 +317,12 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
             config_.reverse_costmap_topic, costmap_qos,
             [this](const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& msg) {
                 latest_costmap_ = msg;
+                const double now_sec = get_clock()->now().seconds();
+                costmap_temporal_ = observeTemporalSignal(
+                    rclcpp::Time(msg->header.stamp).seconds(), now_sec,
+                    costmap_temporal_state_);
+                reverse_recent_free_history_.observe(
+                    *msg, now_sec, config_.reverse_allowed_cost_max);
             });
     }
 
@@ -357,7 +381,7 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
 
     geometry_msgs::msg::Twist output = target;
     const auto costmap = latest_costmap_;
-    if (!costmap || !isCostmapFresh(*costmap)) {
+    if (!costmap || !isCostmapFresh()) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
         publishPlannerEvent("reverse_blocked", "stale_costmap");
@@ -378,9 +402,10 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
     const double check_distance =
         std::max(0.0, config_.reverse_check_distance_m +
                           config_.reverse_safety_margin_m);
-    const auto status =
-        footprintSafetyStatus(*costmap, *pose, rearExtension(check_distance),
-                              config_.reverse_unknown_is_blocked, config_);
+    const auto status = footprintSafetyStatus(
+        *costmap, *pose, rearExtension(check_distance),
+        config_.reverse_unknown_is_blocked, config_,
+        &reverse_recent_free_history_, get_clock()->now().seconds());
     if (status != FootprintSafetyStatus::kSafe) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
@@ -402,7 +427,7 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
 
     geometry_msgs::msg::Twist output = target;
     const auto costmap = latest_costmap_;
-    if (!costmap || !isCostmapFresh(*costmap)) {
+    if (!costmap || !isCostmapFresh()) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
         publishPlannerEvent("stationary_arc_blocked", "stale_costmap");
@@ -421,11 +446,13 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
         return output;
     }
 
+    const double now_sec = get_clock()->now().seconds();
     const double check_distance =
         std::max(0.0, config_.stationary_arc_check_distance_m);
-    const auto status = footprintSafetyStatus(
-        *costmap, *pose, frontExtension(check_distance),
-        config_.stationary_arc_unknown_is_blocked, config_);
+    const auto status =
+        footprintSafetyStatus(*costmap, *pose, frontExtension(check_distance),
+                              config_.stationary_arc_unknown_is_blocked,
+                              config_, &reverse_recent_free_history_, now_sec);
     if (status != FootprintSafetyStatus::kSafe) {
         // Front is blocked; try a reverse arc as fallback — the path the robot
         // just came from is a certified-free corridor and typically
@@ -435,7 +462,8 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
                               config_.reverse_safety_margin_m);
         const auto reverse_status =
             footprintSafetyStatus(*costmap, *pose, rearExtension(reverse_check),
-                                  config_.reverse_unknown_is_blocked, config_);
+                                  config_.reverse_unknown_is_blocked, config_,
+                                  &reverse_recent_free_history_, now_sec);
         if (reverse_status == FootprintSafetyStatus::kSafe) {
             output.linear.x = -output.linear.x;
             publishPlannerEvent("stationary_arc_reversed",
@@ -476,17 +504,15 @@ std::optional<ReverseSafetyPose> R2CmdVelBridgeNode::lookupReverseSafetyPose(
     }
 }
 
-bool R2CmdVelBridgeNode::isCostmapFresh(
-    const nav_msgs::msg::OccupancyGrid& costmap) {
+bool R2CmdVelBridgeNode::isCostmapFresh() {
     if (config_.reverse_costmap_max_age_sec <= 0.0) {
         return true;
     }
-    const rclcpp::Time stamp{costmap.header.stamp};
-    if (stamp.nanoseconds() == 0) {
-        return false;
-    }
-    return (get_clock()->now() - stamp).seconds() <=
-           config_.reverse_costmap_max_age_sec;
+    const auto silence =
+        temporalSignalAt(costmap_temporal_state_, get_clock()->now().seconds())
+            .receive_silence_sec;
+    // No observation yet, or the subscription has gone silent: fail closed.
+    return silence && *silence <= config_.reverse_costmap_max_age_sec;
 }
 
 void R2CmdVelBridgeNode::publishPlannerEvent(const std::string& event,
@@ -495,10 +521,24 @@ void R2CmdVelBridgeNode::publishPlannerEvent(const std::string& event,
         return;
     }
     std_msgs::msg::String msg;
-    msg.data = nlohmann::json{{"event", event},
-                              {"reason", reason},
-                              {"time_sec", get_clock()->now().seconds()}}
-                   .dump();
+    const auto now = get_clock()->now().seconds();
+    const auto jsonValue = [](const std::optional<double>& value) {
+        return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+    };
+    auto temporal = costmap_temporal_;
+    temporal.receive_silence_sec =
+        temporalSignalAt(costmap_temporal_state_, now).receive_silence_sec;
+    msg.data =
+        nlohmann::json{
+            {"event", event},
+            {"reason", reason},
+            {"time_sec", now},
+            {"local_costmap_temporal",
+             {{"producer_lag_sec", jsonValue(temporal.producer_lag_sec)},
+              {"consume_gap_sec", jsonValue(temporal.consume_gap_sec)},
+              {"receive_silence_sec",
+               jsonValue(temporal.receive_silence_sec)}}}}
+            .dump();
     event_pub_->publish(msg);
 }
 
