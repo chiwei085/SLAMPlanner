@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Yahboom R2 手把映射檢查</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 32px auto; padding: 0 20px; background: #111827; color: #e5e7eb; }
+    h1 { margin-bottom: 6px; } .muted { color: #9ca3af; }
+    .status { padding: 14px; border-radius: 10px; background: #1f2937; margin: 20px 0; }
+    .ok { border-left: 5px solid #22c55e; } .wait { border-left: 5px solid #f59e0b; }
+    .mapping, .grid { display: grid; gap: 12px; }
+    .mapping { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin: 20px 0; }
+    .grid { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); }
+    .card { background: #1f2937; padding: 12px; border-radius: 10px; border: 1px solid #374151; }
+    .active { border-color: #22c55e; background: #123426; }
+    .used { box-shadow: inset 0 0 0 2px #38bdf8; }
+    .value { font: 700 1.35rem ui-monospace, monospace; margin-top: 6px; }
+    code { color: #7dd3fc; word-break: break-all; }
+    input { width: 60px; padding: 6px; color: inherit; background: #111827; border: 1px solid #4b5563; border-radius: 5px; }
+    label { margin-right: 18px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <h1>Yahboom R2 手把映射檢查</h1>
+  <p class="muted">純前端頁面。連接手把後按任意按鍵，瀏覽器就會顯示即時輸入。</p>
+  <div id="status" class="status wait">等待手把…</div>
+  <div class="mapping">
+    <div class="card"><b>油門</b><br>Axis <input id="throttle" type="number" value="1" min="0"></div>
+    <div class="card"><b>前輪轉向</b><br>Axis <input id="steering" type="number" value="2" min="0"></div>
+    <div class="card"><b>啟用／急停切換（START）</b><br>Button <input id="enable" type="number" value="11" min="0"></div>
+  </div>
+  <p>對應 launch：<code id="launch"></code></p>
+  <p>ROS 最終確認：<code>ros2 topic echo /joy</code>（瀏覽器與 Linux joy_node 的 index 可能不同）</p>
+  <h2>Axes</h2><div id="axes" class="grid"></div>
+  <h2>Buttons</h2><div id="buttons" class="grid"></div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const selected = id => Number($(id).value);
+    function card(label, value, active, used) {
+      return `<div class="card ${active ? 'active' : ''} ${used ? 'used' : ''}"><b>${label}</b><div class="value">${value}</div></div>`;
+    }
+    function draw() {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const pad = Array.from(pads).find(Boolean);
+      $('launch').textContent = `ros2 launch yahboom_r2_teleop r2_teleop_mapping.launch.py throttle_axis:=${selected('throttle')} steering_axis:=${selected('steering')} enable_button:=${selected('enable')}`;
+      if (!pad) {
+        $('status').className = 'status wait'; $('status').textContent = '等待手把…請按任意按鍵。';
+        $('axes').innerHTML = ''; $('buttons').innerHTML = ''; requestAnimationFrame(draw); return;
+      }
+      $('status').className = 'status ok';
+      $('status').textContent = `已連接：${pad.id}｜mapping=${pad.mapping || 'raw'}｜${pad.axes.length} axes / ${pad.buttons.length} buttons`;
+      $('axes').innerHTML = pad.axes.map((v, i) => card(`Axis ${i}`, v.toFixed(3), Math.abs(v) > 0.15, i === selected('throttle') || i === selected('steering'))).join('');
+      $('buttons').innerHTML = pad.buttons.map((b, i) => card(`Button ${i}`, `${b.value.toFixed(2)} ${b.pressed ? 'PRESSED' : ''}`, b.pressed, i === selected('enable'))).join('');
+      requestAnimationFrame(draw);
+    }
+    window.addEventListener('gamepadconnected', draw);
+    draw();
+  </script>
+</body>
+</html>
