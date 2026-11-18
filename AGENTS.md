@@ -1,52 +1,42 @@
 # Agent Instructions
 
-This repo uses local Python hooks under `.agent-hooks/` for repeatable
-formatting and verification. The hook directory is intentionally ignored by
-Git, but it is the preferred local automation when present.
-
 ## Commit Style
 
-Use the `[type] short desciption` format. lowercase, imperative mood, no period:
+Use the `[type] short description` format: lowercase, imperative mood, no period.
 
-[type]:
+[type]: feat, fix, test, chore, build, docs
 
-- feat
-- fix
-- test
-- chore
-- build
-- docs
+Committing does not require re-running verification; follow the style above.
 
-Build and tests must pass before committing.
+`ThirdParty/ALC-Planner` is a git submodule (`alc_planner`). Commit changes
+there inside the submodule first, then commit the updated pointer here.
 
-## When To Run Hooks
+## Verification
 
-- After editing C++ headers/sources/tests: run `python3 .agent-hooks/format.py`,
-  then `python3 .agent-hooks/build.py`, then `python3 .agent-hooks/test.py`.
-- After changing CMake, package manifests, dependencies, or compile database
-  behavior: run `python3 .agent-hooks/build.py`, then
-  `python3 .agent-hooks/clangd_check.py`.
-- After changing bridge logic or tests: run `python3 .agent-hooks/test.py` and
-  `python3 .agent-hooks/clang_tidy.py`.
-- After changing launch files or launch arguments: run
-  `python3 .agent-hooks/launch_check.py`.
-<!-- - Before reporting a complete implementation, prefer the full sequence:
-  `python3 .agent-hooks/run_all.py`. -->
+Run from the repo root in a shell that has sourced
+`/opt/ros/humble/setup.bash`. After a build, also source `install/setup.bash`.
 
-## Hook Expectations
+```bash
+# Format C++ (skip vendored include/rik_sd)
+find src -name '*.cpp' -o -name '*.hpp' | grep -v include/rik_sd | xargs clang-format -i
 
-- `format.py` runs clang-format on repo-owned C++ files and excludes vendored
-  `include/rik_sd`.
-- `build.py` builds `alc_planner` and `yahboom_alc_bringup` with colcon and
-  force-configures CMake so stale build dependency files do not poison checks.
-- `test.py` runs the `yahboom_alc_bringup` gtests and prints test results.
-- `clangd_check.py` verifies `.clangd` and `build/compile_commands.json`.
-  `clangd --check` may return nonzero on template/dependent-type tweak checks;
-  compile database validation is the hard failure condition.
-- `clang_tidy.py` runs the current analyzer set:
-  `clang-analyzer-*`, `bugprone-*`, and `performance-*`.
-- `launch_check.py` runs the integrated launch file with `--show-args`; it does
-  not start the robot pipeline.
+# Build (slow on the Jetson; never run two colcon builds in this workspace at once)
+colcon build --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop --cmake-args -GNinja
 
-If `.agent-hooks/` is absent, reproduce the equivalent commands manually rather
-than adding tracked copies of agent-local hook scripts.
+# Test (test-result exits nonzero on failures)
+colcon test --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop
+colcon test-result --verbose
+
+# Launch files: parse only, does not start the robot
+ros2 launch <package> <file> --show-args
+```
+
+| Changed | Run |
+| --- | --- |
+| C++ sources/headers/tests | format → build → test |
+| CMake, `package.xml`, `setup.py`, dependencies | build → test |
+| Launch files or launch arguments | build → `--show-args` on each changed launch file |
+
+`build/compile_commands.json` is not regenerated automatically. clangd
+diagnostics can be stale, and the unity-built library sources have no entries
+of their own. Trust the colcon build output over clangd.
