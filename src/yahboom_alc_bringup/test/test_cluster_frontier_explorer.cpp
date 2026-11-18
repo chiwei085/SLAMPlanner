@@ -1363,5 +1363,94 @@ TEST(LethalCostmapCell, DetectsLethalStartCellOnly) {
         isLethalCostmapCell(nav_msgs::msg::OccupancyGrid{}, {0.02, 0.07}));
 }
 
+nav_msgs::msg::OccupancyGrid bearingGrid() {
+    // 41x41 cells at 0.05 m centred on the origin, all free.
+    nav_msgs::msg::OccupancyGrid map;
+    map.info.resolution = 0.05;
+    map.info.width = 41;
+    map.info.height = 41;
+    map.info.origin.position.x = -1.025;
+    map.info.origin.position.y = -1.025;
+    map.data.assign(41 * 41, 0);
+    return map;
+}
+
+TEST(UnknownBearing, PointsTowardUnknownBehindRobot) {
+    auto map = bearingGrid();
+    for (int my = 0; my < 41; ++my) {
+        for (int mx = 0; mx < 15; ++mx) {  // unknown band at x < -0.3
+            map.data[my * 41 + mx] = -1;
+        }
+    }
+    const auto bearing = unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0);
+    ASSERT_TRUE(bearing.has_value());
+    EXPECT_NEAR(std::abs(*bearing), kPi, 0.15);
+}
+
+TEST(UnknownBearing, IgnoresUnknownInsideCurrentView) {
+    // Robot faces +x; the unknown ahead (occluded) outweighs the strip
+    // behind, but only the strip behind is outside the view.
+    auto map = bearingGrid();
+    for (int my = 0; my < 41; ++my) {
+        for (int mx = 0; mx < 41; ++mx) {
+            // Ahead band limited to |y| <= 0.3 m so it stays inside the
+            // +-50 deg view; the strip behind is outside it.
+            if ((mx > 26 && my >= 14 && my <= 26) ||
+                (mx < 8 && my > 15 && my < 25)) {
+                map.data[my * 41 + mx] = -1;
+            }
+        }
+    }
+    const auto bearing = unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0);
+    ASSERT_TRUE(bearing.has_value());
+    EXPECT_NEAR(std::abs(*bearing), kPi, 0.2);
+}
+
+TEST(UnknownBearing, NoneWhenAllUnknownIsInsideView) {
+    auto map = bearingGrid();
+    for (int my = 0; my < 41; ++my) {
+        for (int mx = 27; mx < 41; ++mx) {
+            if (my >= 14 && my <= 26) {
+                map.data[my * 41 + mx] = -1;  // unknown only ahead, in view
+            }
+        }
+    }
+    EXPECT_FALSE(unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 0.8).has_value());
+}
+
+TEST(UnknownBearing, NoneWhenKnownAndBehindWhenSurrounded) {
+    auto map = bearingGrid();
+    EXPECT_FALSE(unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0).has_value());
+    // Unknown ring all around: with the view cone excluded, what is left is
+    // to the sides and behind, so the turn points behind.
+    for (int my = 0; my < 41; ++my) {
+        for (int mx = 0; mx < 41; ++mx) {
+            const double x = -1.0 + mx * 0.05;
+            const double y = -1.0 + my * 0.05;
+            if (std::hypot(x, y) > 0.6) {
+                map.data[my * 41 + mx] = -1;
+            }
+        }
+    }
+    const auto bearing = unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0);
+    ASSERT_TRUE(bearing.has_value());
+    EXPECT_NEAR(std::abs(*bearing), kPi, 0.15);
+}
+
+TEST(UnknownBearing, SpaceOutsideMapCountsAsUnknown) {
+    // Like a fresh RTAB-Map /map: the grid starts at the robot and only
+    // covers the observed area ahead, so everything behind is off the grid.
+    nav_msgs::msg::OccupancyGrid map;
+    map.info.resolution = 0.05;
+    map.info.width = 30;
+    map.info.height = 60;
+    map.info.origin.position.x = -0.025;
+    map.info.origin.position.y = -1.5;
+    map.data.assign(30 * 60, 0);
+    const auto bearing = unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0);
+    ASSERT_TRUE(bearing.has_value());
+    EXPECT_NEAR(std::abs(*bearing), kPi, 0.15);
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

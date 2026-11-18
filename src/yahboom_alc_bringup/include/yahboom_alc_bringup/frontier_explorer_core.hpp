@@ -438,4 +438,17 @@ private:
 bool isLethalCostmapCell(const nav_msgs::msg::OccupancyGrid& costmap,
                          const WorldPoint& xy);
 
+// Dominant direction (world yaw) of the unknown (-1) cells within radius_m of
+// xy that lie OUTSIDE the cameras' view: cells within view_half_angle_rad of
+// robot_yaw are skipped, since unknown inside the current view is occluded or
+// unseeable and turning toward it reveals nothing. Circular mean of the
+// directions to the remaining cells. Returns nullopt when fewer than
+// min_cells qualify or when they surround the robot so evenly that no
+// direction dominates (resultant below min_concentration of the count).
+std::optional<double> unknownBearing(const nav_msgs::msg::OccupancyGrid& map,
+                                     const WorldPoint& xy, double robot_yaw,
+                                     double view_half_angle_rad,
+                                     double radius_m, int min_cells = 20,
+                                     double min_concentration = 0.2);
+
 }  // namespace yahboom_alc_bringup

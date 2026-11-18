@@ -11,6 +11,7 @@
 #include <string>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/planner_event.hpp"
 #include "yahboom_alc_bringup/temporal_signal.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
 
@@ -284,6 +285,22 @@ double applyDriveStallFloor(const double rate_limited_linear_x,
     return drive_intended ? signOf(target_linear_x) * min_speed : 0.0;
 }
 
+bool shouldPublishIdleStop(const double since_last_input_sec,
+                           const double timeout_sec, const double burst_sec) {
+    return timeout_sec > 0.0 && since_last_input_sec > timeout_sec &&
+           since_last_input_sec <= timeout_sec + std::max(0.0, burst_sec);
+}
+
+void BlindReverseWindow::onEvent(const std::string& event_name,
+                                 const double now_sec, const double max_sec) {
+    if (event_name == "observation_turn_started" && max_sec > 0.0) {
+        open_until_sec_ = now_sec + max_sec;
+    }
+    else if (event_name == "observation_turn_finished") {
+        open_until_sec_ = 0.0;
+    }
+}
+
 R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
     : rclcpp::Node("yahboom_r2_cmd_vel_bridge", options),
       config_(loadConfig()) {
@@ -303,6 +320,38 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         config_.safety_stop_topic, rclcpp::QoS{rclcpp::KeepLast(1)},
         [this](const std_msgs::msg::Bool::ConstSharedPtr& message) {
             safety_stop_active_ = message->data;
+        });
+    idle_stop_timer_ = create_wall_timer(100ms, [this]() {
+        if (!last_input_time_ || stopping_) {
+            return;
+        }
+        const double since = (get_clock()->now() - *last_input_time_).seconds();
+        if (!shouldPublishIdleStop(since, config_.input_timeout_sec,
+                                   config_.idle_stop_burst_sec)) {
+            return;
+        }
+        const geometry_msgs::msg::Twist stop;
+        publisher_->publish(stop);
+        last_output_ = stop;
+        has_last_output_ = true;
+        last_output_time_ = get_clock()->now();
+    });
+    planner_event_sub_ = create_subscription<std_msgs::msg::String>(
+        config_.planner_event_topic, 10,
+        [this](const std_msgs::msg::String::ConstSharedPtr& message) {
+            const auto name = parseEventName(message->data);
+            if (!name) {
+                return;
+            }
+            const double now_sec = get_clock()->now().seconds();
+            const bool was_allowed = blind_reverse_window_.allowed(now_sec);
+            blind_reverse_window_.onEvent(
+                *name, now_sec, config_.observation_blind_reverse_max_sec);
+            if (was_allowed != blind_reverse_window_.allowed(now_sec)) {
+                RCLCPP_WARN(get_logger(),
+                            "observation turn: reverse into unknown cells %s",
+                            was_allowed ? "blocked again" : "ALLOWED (blind)");
+            }
         });
     const bool costmap_safety_enabled =
         config_.reverse_safety_enabled ||
@@ -351,6 +400,7 @@ void R2CmdVelBridgeNode::onCmdVel(
     if (!msg || stopping_) {
         return;
     }
+    last_input_time_ = get_clock()->now();
 
     // safety_stop_active_ is the IMU-impact reflex from the collision safety
     // node: halt forward motion immediately (the impact already happened) but
@@ -404,8 +454,8 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
                           config_.reverse_safety_margin_m);
     const auto status = footprintSafetyStatus(
         *costmap, *pose, rearExtension(check_distance),
-        config_.reverse_unknown_is_blocked, config_,
-        &reverse_recent_free_history_, get_clock()->now().seconds());
+        reverseUnknownIsBlocked(), config_, &reverse_recent_free_history_,
+        get_clock()->now().seconds());
     if (status != FootprintSafetyStatus::kSafe) {
         output.linear.x = 0.0;
         output.linear.y = 0.0;
@@ -462,7 +512,7 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
                               config_.reverse_safety_margin_m);
         const auto reverse_status =
             footprintSafetyStatus(*costmap, *pose, rearExtension(reverse_check),
-                                  config_.reverse_unknown_is_blocked, config_,
+                                  reverseUnknownIsBlocked(), config_,
                                   &reverse_recent_free_history_, now_sec);
         if (reverse_status == FootprintSafetyStatus::kSafe) {
             output.linear.x = -output.linear.x;
@@ -513,6 +563,11 @@ bool R2CmdVelBridgeNode::isCostmapFresh() {
             .receive_silence_sec;
     // No observation yet, or the subscription has gone silent: fail closed.
     return silence && *silence <= config_.reverse_costmap_max_age_sec;
+}
+
+bool R2CmdVelBridgeNode::reverseUnknownIsBlocked() {
+    return config_.reverse_unknown_is_blocked &&
+           !blind_reverse_window_.allowed(get_clock()->now().seconds());
 }
 
 void R2CmdVelBridgeNode::publishPlannerEvent(const std::string& event,

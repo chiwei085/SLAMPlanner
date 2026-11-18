@@ -1,5 +1,6 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lifecycle_msgs/srv/get_state.hpp>
 #include <nav2_msgs/action/back_up.hpp>
@@ -474,6 +475,10 @@ public:
             goal_marker_topic_, marker_qos);
         event_pub_ =
             create_publisher<std_msgs::msg::String>(planner_event_topic_, 10);
+        // Collision monitor input, so observation-turn commands keep its
+        // front safety before reaching the bridge.
+        observation_cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(
+            "cmd_vel_smoothed_raw", 10);
         event_sub_ = create_subscription<std_msgs::msg::String>(
             planner_event_topic_, 10,
             [this](const std_msgs::msg::String& msg) { onPlannerEvent(msg); });
@@ -584,6 +589,9 @@ private:
             checkRecoveryStateMachine();
             return;
         }
+        if (observation_turn_active_) {
+            return;  // driven by observation_timer_
+        }
         if (goal_active_) {
             const auto robot_pose = lookupRobotPose();
             if (robot_pose) {
@@ -605,7 +613,160 @@ private:
             return;
         }
         observeHazardTraversal(robot_pose->xy);
-        findAndBeginCandidateRoute(*robot_pose, false);
+        if (!findAndBeginCandidateRoute(*robot_pose, false)) {
+            maybeStartObservationTurn(*robot_pose);
+        }
+    }
+
+    // No frontier is reachable from here, but unknown space may lie beside
+    // or behind the robot (e.g. placed facing furniture: the room is behind
+    // it, and those frontiers are rejected as too near). Turn to look at it
+    // instead of waiting for a map that cannot grow while the robot stands
+    // still. Nav2 cannot plan this turn -- the global costmap only spans the
+    // observed map, and the space behind is off it -- so it runs here as a
+    // multi-point turn: forward with steering toward the turn, reverse with
+    // the opposite steering, alternating, until the heading points at the
+    // unknown. Commands enter the collision monitor (front safety) and the
+    // bridge (rear costmap check). Reversing goes into unseen space and
+    // nothing else detects a rear contact (the IMU gate and stall detector
+    // watch forward motion only), so a segment that stops moving is ended
+    // here and two stuck segments in a row abort the turn.
+    // At most one turn per spot, so a finished exploration does not loop.
+    void maybeStartObservationTurn(const RobotPose& robot_pose) {
+        // Commands sent before the collision monitor is active are dropped;
+        // wait (without spending this spot's one turn) until it is.
+        if (!nav2LifecycleReady()) {
+            return;
+        }
+        if (last_observation_turn_xy_ &&
+            withinDistanceTolerance(robot_pose.xy, *last_observation_turn_xy_,
+                                    kObservationRepeatRadiusM)) {
+            return;
+        }
+        last_observation_turn_xy_ = robot_pose.xy;
+        const auto bearing = unknownBearing(
+            core_.map(), robot_pose.xy, robot_pose.yaw,
+            kObservationViewHalfAngleRad, kObservationScanRadiusM);
+        if (!bearing) {
+            publishPlannerEvent("observation_turn_skipped",
+                                {{"reason", "no_unknown_outside_view"},
+                                 {"robot_xy", pointJson(robot_pose.xy)}});
+            return;
+        }
+        observation_turn_active_ = true;
+        observation_turn_started_sec_ = nowSec();
+        observation_target_yaw_ = *bearing;
+        observation_turn_sign_ =
+            std::remainder(*bearing - robot_pose.yaw, 2.0 * kPi) >= 0.0 ? 1.0
+                                                                        : -1.0;
+        observation_segment_direction_ = 1.0;
+        observation_stuck_segments_ = 0;
+        beginObservationSegment(robot_pose);
+        publishPlannerEvent("observation_turn_started",
+                            {{"robot_xy", pointJson(robot_pose.xy)},
+                             {"robot_yaw", rounded(robot_pose.yaw)},
+                             {"bearing", rounded(*bearing)},
+                             {"turn_sign", observation_turn_sign_}});
+        observation_timer_ =
+            create_wall_timer(std::chrono::milliseconds(100),
+                              [this]() { stepObservationTurn(); });
+    }
+
+    void beginObservationSegment(const RobotPose& pose) {
+        observation_segment_start_xy_ = pose.xy;
+        observation_segment_start_sec_ = nowSec();
+        observation_progress_xy_ = pose.xy;
+        observation_progress_sec_ = observation_segment_start_sec_;
+    }
+
+    void switchObservationSegment(const RobotPose& pose, const bool stuck) {
+        observation_stuck_segments_ =
+            stuck ? observation_stuck_segments_ + 1 : 0;
+        if (observation_stuck_segments_ >= 2) {
+            finishObservationTurn("blocked_both_ways");
+            return;
+        }
+        publishObservationCmd(0.0, 0.0);
+        observation_segment_direction_ = -observation_segment_direction_;
+        beginObservationSegment(pose);
+        publishPlannerEvent(
+            "observation_turn_segment",
+            {{"direction",
+              observation_segment_direction_ > 0.0 ? "forward" : "reverse"},
+             {"after_stuck", stuck},
+             {"robot_yaw", rounded(pose.yaw)}});
+    }
+
+    void stepObservationTurn() {
+        if (!observation_turn_active_) {
+            return;
+        }
+        const double now = nowSec();
+        if (now - observation_turn_started_sec_ > kObservationTurnTimeoutSec) {
+            finishObservationTurn("timeout");
+            return;
+        }
+        const auto pose = lookupRobotPose();
+        if (!pose) {
+            publishObservationCmd(0.0, 0.0);
+            return;
+        }
+        if (headingDelta(pose->yaw, observation_target_yaw_) <
+            kObservationDoneYawRad) {
+            finishObservationTurn("heading_reached");
+            return;
+        }
+        if (!withinDistanceTolerance(pose->xy, observation_progress_xy_,
+                                     kObservationMinProgressM)) {
+            observation_progress_xy_ = pose->xy;
+            observation_progress_sec_ = now;
+        }
+        const bool stuck =
+            now - observation_segment_start_sec_ > kObservationStartGraceSec &&
+            now - observation_progress_sec_ > kObservationNoProgressSec;
+        const bool segment_done = !withinDistanceTolerance(
+            pose->xy, observation_segment_start_xy_, kObservationSegmentM);
+        if (stuck || segment_done) {
+            switchObservationSegment(*pose, stuck);
+            return;
+        }
+        // Steering sign follows the twist's angular sign in the bridge
+        // (steering = gain * angular.z, regardless of travel direction), and
+        // a car yaws the opposite way when reversing on the same steering.
+        // So steer toward the turn going forward and away from it reversing:
+        // both segments then rotate the heading the same way.
+        publishObservationCmd(
+            observation_segment_direction_ * kObservationSpeedMps,
+            observation_segment_direction_ * observation_turn_sign_ *
+                kObservationAngularCmd);
+    }
+
+    void publishObservationCmd(const double linear, const double angular) {
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x = linear;
+        cmd.angular.z = angular;
+        observation_cmd_pub_->publish(cmd);
+    }
+
+    void finishObservationTurn(const std::string& reason) {
+        if (!observation_turn_active_) {
+            return;
+        }
+        observation_turn_active_ = false;
+        if (observation_timer_) {
+            observation_timer_->cancel();
+            observation_timer_.reset();
+        }
+        publishObservationCmd(0.0, 0.0);
+        nlohmann::json fields{
+            {"reason", reason},
+            {"elapsed", rounded(nowSec() - observation_turn_started_sec_)},
+            {"target_yaw", rounded(observation_target_yaw_)}};
+        if (const auto pose = lookupRobotPose()) {
+            fields["robot_xy"] = pointJson(pose->xy);
+            fields["robot_yaw"] = rounded(pose->yaw);
+        }
+        publishPlannerEvent("observation_turn_finished", fields);
     }
 
     bool findAndBeginCandidateRoute(const RobotPose& robot_pose,
@@ -2403,6 +2564,7 @@ private:
         }
         perception_stall_paused_ = true;
         perception_stall_pause_started_sec_ = nowSec();
+        finishObservationTurn("perception_stalled");
         publishPlannerEvent(
             "exploration_paused_perception_stalled",
             {{"source", "reverse_gate"},
@@ -2526,6 +2688,21 @@ private:
     }
 
     void handleStallOrSlipEvent(const std::string& data) {
+        if (observation_turn_active_ && parseEventName(data) &&
+            *parseEventName(data) == "stall_or_slip") {
+            // The stall detector watches forward commands only, and it fires
+            // when the depth camera sees an obstacle ahead: on a forward
+            // segment that just means "this way is blocked" -- turn the
+            // segment around instead of abandoning the turn.
+            const auto pose = lookupRobotPose();
+            if (observation_segment_direction_ > 0.0 && pose) {
+                switchObservationSegment(*pose, /*stuck=*/true);
+            }
+            else {
+                finishObservationTurn("stall_or_slip");
+            }
+            return;
+        }
         if (!goal_active_) {
             return;
         }
@@ -2690,8 +2867,11 @@ private:
     };
 
     void createNav2LifecycleClients() {
-        for (const auto& node_name : {"planner_server", "controller_server",
-                                      "bt_navigator", "behavior_server"}) {
+        // collision_monitor is activated last and every motion command
+        // (Nav2 goals and observation turns alike) passes through it.
+        for (const auto& node_name :
+             {"planner_server", "controller_server", "bt_navigator",
+              "behavior_server", "collision_monitor"}) {
             const std::string node_name_str{node_name};
             nav2_lifecycle_clients_.push_back(LifecycleStateClient{
                 node_name_str,
@@ -2811,6 +2991,36 @@ private:
     TemporalSignalObservation map_temporal_;
     std::string map_topic_;
     std::string global_costmap_topic_;
+    static constexpr double kObservationScanRadiusM = 1.5;
+    static constexpr double kObservationRepeatRadiusM = 0.5;
+    // Roughly the D455/Astra horizontal half-FOV; unknown inside it is
+    // occluded rather than unlooked-at.
+    static constexpr double kObservationViewHalfAngleRad = 50.0 * kPi / 180.0;
+    static constexpr double kObservationDoneYawRad = 25.0 * kPi / 180.0;
+    // Below the bridge's observation_blind_reverse_max_sec (30 s), so the
+    // blind-reverse window always outlives the turn that opened it.
+    static constexpr double kObservationTurnTimeoutSec = 28.0;
+    static constexpr double kObservationSegmentM = 0.35;
+    static constexpr double kObservationSpeedMps = 0.10;
+    // Large enough to saturate the bridge's steering clamp at this speed.
+    static constexpr double kObservationAngularCmd = 1.0;
+    static constexpr double kObservationStartGraceSec = 1.5;
+    static constexpr double kObservationNoProgressSec = 1.0;
+    static constexpr double kObservationMinProgressM = 0.02;
+    bool observation_turn_active_ = false;
+    double observation_turn_started_sec_ = 0.0;
+    double observation_target_yaw_ = 0.0;
+    double observation_turn_sign_ = 1.0;
+    double observation_segment_direction_ = 1.0;
+    int observation_stuck_segments_ = 0;
+    WorldPoint observation_segment_start_xy_{0.0, 0.0};
+    double observation_segment_start_sec_ = 0.0;
+    WorldPoint observation_progress_xy_{0.0, 0.0};
+    double observation_progress_sec_ = 0.0;
+    std::optional<WorldPoint> last_observation_turn_xy_;
+    rclcpp::TimerBase::SharedPtr observation_timer_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr
+        observation_cmd_pub_;
     nav_msgs::msg::OccupancyGrid::ConstSharedPtr global_costmap_;
     std::string robot_frame_;
     std::string global_frame_;

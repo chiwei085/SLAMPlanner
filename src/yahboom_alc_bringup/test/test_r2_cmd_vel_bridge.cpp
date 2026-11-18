@@ -387,4 +387,29 @@ TEST(R2CmdVelBridge, StationaryArcForwardSafetyBlocksOutOfBoundsSweep) {
                                                      defaultConfig()));
 }
 
+TEST(BlindReverseWindow, OpensOnTurnStartAndClosesOnFinishOrTimeout) {
+    yahboom_alc_bringup::BlindReverseWindow window;
+    EXPECT_FALSE(window.allowed(100.0));
+    window.onEvent("observation_turn_started", 100.0, 30.0);
+    EXPECT_TRUE(window.allowed(100.0));
+    EXPECT_TRUE(window.allowed(129.9));
+    EXPECT_FALSE(window.allowed(130.0));  // bounded even if "finished" is lost
+    window.onEvent("observation_turn_started", 200.0, 30.0);
+    window.onEvent("observation_turn_finished", 205.0, 30.0);
+    EXPECT_FALSE(window.allowed(205.0));
+    window.onEvent("reverse_blocked", 300.0, 30.0);
+    EXPECT_FALSE(window.allowed(300.0));
+    window.onEvent("observation_turn_started", 400.0, 0.0);  // disabled
+    EXPECT_FALSE(window.allowed(400.0));
+}
+
+TEST(IdleStop, StreamsZeroOnlyDuringBurstAfterInputSilence) {
+    using yahboom_alc_bringup::shouldPublishIdleStop;
+    EXPECT_FALSE(shouldPublishIdleStop(0.3, 0.5, 1.0));  // input still fresh
+    EXPECT_TRUE(shouldPublishIdleStop(0.6, 0.5, 1.0));
+    EXPECT_TRUE(shouldPublishIdleStop(1.5, 0.5, 1.0));
+    EXPECT_FALSE(shouldPublishIdleStop(1.6, 0.5, 1.0));  // burst done: idle
+    EXPECT_FALSE(shouldPublishIdleStop(5.0, 0.0, 1.0));  // disabled
+}
+
 }  // namespace

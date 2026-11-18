@@ -1585,4 +1585,56 @@ bool isLethalCostmapCell(const nav_msgs::msg::OccupancyGrid& costmap,
     return index < costmap.data.size() && costmap.data[index] >= kLethal;
 }
 
+std::optional<double> unknownBearing(const nav_msgs::msg::OccupancyGrid& map,
+                                     const WorldPoint& xy,
+                                     const double robot_yaw,
+                                     const double view_half_angle_rad,
+                                     const double radius_m, const int min_cells,
+                                     const double min_concentration) {
+    const double resolution = map.info.resolution;
+    if (resolution <= 0.0 || radius_m <= 0.0) {
+        return std::nullopt;
+    }
+    const auto width = static_cast<int>(map.info.width);
+    const auto height = static_cast<int>(map.info.height);
+    const int r = static_cast<int>(std::ceil(radius_m / resolution));
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    int count = 0;
+    // Walk a robot-centred window, not the map: RTAB-Map's /map only spans
+    // what has been observed, so space never seen (e.g. right behind a robot
+    // that has not moved yet) lies outside the grid and counts as unknown.
+    for (int iy = -r; iy <= r; ++iy) {
+        for (int ix = -r; ix <= r; ++ix) {
+            const double dx = ix * resolution;
+            const double dy = iy * resolution;
+            const double d = std::hypot(dx, dy);
+            if (d > radius_m || d < 1e-6 ||
+                std::abs(std::remainder(std::atan2(dy, dx) - robot_yaw,
+                                        2.0 * kPi)) <= view_half_angle_rad) {
+                continue;
+            }
+            const int mx = static_cast<int>(std::floor(
+                (xy.first + dx - map.info.origin.position.x) / resolution));
+            const int my = static_cast<int>(std::floor(
+                (xy.second + dy - map.info.origin.position.y) / resolution));
+            const bool in_bounds =
+                mx >= 0 && my >= 0 && mx < width && my < height &&
+                static_cast<std::size_t>(my) * width + mx < map.data.size();
+            if (in_bounds &&
+                map.data[static_cast<std::size_t>(my) * width + mx] >= 0) {
+                continue;
+            }
+            sum_x += dx / d;
+            sum_y += dy / d;
+            ++count;
+        }
+    }
+    if (count < min_cells ||
+        std::hypot(sum_x, sum_y) < min_concentration * count) {
+        return std::nullopt;
+    }
+    return std::atan2(sum_y, sum_x);
+}
+
 }  // namespace yahboom_alc_bringup

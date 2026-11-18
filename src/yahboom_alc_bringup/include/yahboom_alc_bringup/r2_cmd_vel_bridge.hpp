@@ -63,6 +63,18 @@ struct R2CmdVelBridgeConfig
     // just the rare, high-consequence blind-reverse case that
     // reverse_unknown_is_blocked exists for.
     bool stationary_arc_unknown_is_blocked = false;
+    // While the frontier explorer runs an observation turn (turning to look
+    // at unknown space behind the robot), reverse may enter unknown -- never
+    // known-occupied -- cells. The robot has no rear sensor, so this is an
+    // accepted blind-reverse risk, bounded to this many seconds per turn.
+    // 0 disables it.
+    double observation_blind_reverse_max_sec = 30.0;
+    // The R2 driver latches the last /cmd_vel it received and has no timeout
+    // of its own, so a producer that stops publishing (or a single lost zero)
+    // leaves the wheels running. When no input arrives for this long, publish
+    // centered zero for idle_stop_burst_sec. 0 disables.
+    double input_timeout_sec = 0.5;
+    double idle_stop_burst_sec = 1.0;
     double footprint_front_m = 0.19;
     double footprint_rear_m = 0.19;
     double footprint_half_width_m = 0.115;
@@ -103,6 +115,26 @@ double applyDriveStallFloor(double rate_limited_linear_x,
                             double target_linear_x,
                             const R2CmdVelBridgeConfig& config);
 
+// Tracks the explorer's observation-turn window from planner events:
+// "observation_turn_started" opens it for max_sec, "observation_turn_finished"
+// closes it. The time bound keeps a lost "finished" event from leaving blind
+// reverse enabled.
+// True while the bridge should be streaming idle zero commands: input has
+// been silent for more than timeout_sec, and the zero burst (burst_sec long)
+// that follows has not finished yet.
+bool shouldPublishIdleStop(double since_last_input_sec, double timeout_sec,
+                           double burst_sec);
+
+class BlindReverseWindow
+{
+public:
+    void onEvent(const std::string& event_name, double now_sec, double max_sec);
+    bool allowed(double now_sec) const { return now_sec < open_until_sec_; }
+
+private:
+    double open_until_sec_ = 0.0;
+};
+
 class R2CmdVelBridgeNode : public rclcpp::Node
 {
 public:
@@ -126,6 +158,7 @@ private:
     // header stamp -- the producer's clock domain may not agree with ours,
     // and a stamp-age check would silently inherit that skew.
     bool isCostmapFresh();
+    bool reverseUnknownIsBlocked();
     void publishPlannerEvent(const std::string& event,
                              const std::string& reason);
 
@@ -133,6 +166,10 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_stop_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_event_sub_;
+    BlindReverseWindow blind_reverse_window_;
+    rclcpp::TimerBase::SharedPtr idle_stop_timer_;
+    std::optional<rclcpp::Time> last_input_time_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -211,6 +248,12 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "reverse_recent_free_grace_sec"),
             named(&R2CmdVelBridgeConfig::stationary_arc_unknown_is_blocked,
                   "stationary_arc_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::observation_blind_reverse_max_sec,
+                  "observation_blind_reverse_max_sec"),
+            named(&R2CmdVelBridgeConfig::input_timeout_sec,
+                  "input_timeout_sec"),
+            named(&R2CmdVelBridgeConfig::idle_stop_burst_sec,
+                  "idle_stop_burst_sec"),
             named(&R2CmdVelBridgeConfig::footprint_front_m,
                   "footprint_front_m"),
             named(&R2CmdVelBridgeConfig::footprint_rear_m, "footprint_rear_m"),
