@@ -108,10 +108,13 @@ def rgbd_sync(name, rgb, info, depth, output, max_interval):
 
 
 def astra_nodes(context, mode):
-    astra_share = get_package_share_directory("astra_camera")
     astra = IncludeLaunchDescription(
         XMLLaunchDescriptionSource(
-            os.path.join(astra_share, "launch", "astro_pro_plus.launch.xml")
+            os.path.join(
+                get_package_share_directory("yahboom_alc_bringup"),
+                "launch",
+                "astra_pro_plus_respawn.launch.xml",
+            )
         ),
         condition=IfCondition(LaunchConfiguration("enable_camera")),
         launch_arguments={
