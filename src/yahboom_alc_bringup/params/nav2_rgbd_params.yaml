@@ -169,7 +169,22 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 0.8
         mark_threshold: 0
-        observation_sources: depth_cloud
+        # depth_cloud = high Astra, d455_cloud = low D455 (floor-level).
+        observation_sources: depth_cloud d455_cloud
+        d455_cloud:
+          topic: /realsense/d455/depth/points_voxel_base
+          sensor_frame: d455_depth_optical_frame
+          obstacle_min_range: 0.2
+          obstacle_max_range: 1.5
+          raytrace_min_range: 0.2
+          raytrace_max_range: 2.0
+          min_obstacle_height: 0.01
+          max_obstacle_height: 0.8
+          observation_persistence: 0.4
+          clearing: True
+          marking: True
+          data_type: "PointCloud2"
+          inf_is_valid: True
         depth_cloud:
           topic: /camera/depth/points_voxel_base
           # depth_cloud_preprocessor pre-transforms points into base_footprint
@@ -231,7 +246,20 @@ global_costmap:
         z_voxels: 16
         max_obstacle_height: 0.8
         mark_threshold: 0
-        observation_sources: depth_cloud
+        observation_sources: depth_cloud d455_cloud
+        d455_cloud:
+          topic: /realsense/d455/depth/points_voxel_base
+          sensor_frame: d455_depth_optical_frame
+          obstacle_min_range: 0.2
+          obstacle_max_range: 4.0
+          raytrace_min_range: 0.2
+          raytrace_max_range: 5.0
+          min_obstacle_height: 0.05
+          max_obstacle_height: 0.8
+          observation_persistence: 0.0
+          clearing: True
+          marking: True
+          data_type: "PointCloud2"
         depth_cloud:
           topic: /camera/depth/points_voxel_base
           # See local_costmap voxel_layer comment: without sensor_frame, the
@@ -401,10 +429,16 @@ collision_monitor:
       simulation_time_step: 0.1
       visualize: true
       polygon_pub_topic: "collision_monitor/approach_polygon"
-    observation_sources: ["depth_cloud"]
+    observation_sources: ["depth_cloud", "d455_cloud"]
     depth_cloud:
       type: "pointcloud"
       topic: "/camera/depth/points_voxel_base"
+      min_height: 0.01
+      max_height: 0.8
+      enabled: true
+    d455_cloud:
+      type: "pointcloud"
+      topic: "/realsense/d455/depth/points_voxel_base"
       min_height: 0.01
       max_height: 0.8
       enabled: true

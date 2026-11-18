@@ -6,7 +6,6 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetE
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
-from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -15,11 +14,10 @@ def generate_launch_description():
     share = get_package_share_directory("yahboom_r2_teleop")
     bringup_share = get_package_share_directory("yahboomcar_bringup")
     description_share = get_package_share_directory("yahboomcar_description")
-    camera_share = get_package_share_directory("astra_camera")
+    alc_share = get_package_share_directory("yahboom_alc_bringup")
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     localization = LaunchConfiguration("localization")
-    enable_camera = LaunchConfiguration("enable_camera")
     rviz = LaunchConfiguration("rviz")
     qos = LaunchConfiguration("qos")
     robot_description = ParameterValue(
@@ -30,6 +28,8 @@ def generate_launch_description():
         "frame_id": "base_footprint",
         "use_sim_time": use_sim_time,
         "subscribe_rgbd": True,
+        "rgbd_cameras": 0,  # /rgbd_images from rgbdx_sync (Astra + D455)
+        "odom_sensor_sync": True,
         "subscribe_scan": False,
         "subscribe_imu": True,
         "qos_image": qos,
@@ -51,49 +51,19 @@ def generate_launch_description():
         "Optimizer/GravitySigma": "0.3",
     }
     rtabmap_remappings = [
-        ("rgb/image", "/camera/color/image_raw"),
-        ("rgb/camera_info", "/camera/color/camera_info"),
-        ("depth/image", "/camera/depth/image_raw"),
+        ("rgbd_images", "/rgbd_images"),
         ("odom", "/odom"),
         ("imu", "/imu/data"),
     ]
 
-    camera = IncludeLaunchDescription(
-        XMLLaunchDescriptionSource(
-            os.path.join(camera_share, "launch", "astro_pro_plus.launch.xml")
+    # High Astra + low D455, mount TFs and RGB-D sync -> /rgbd_images.
+    cameras = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(alc_share, "launch", "dual_rgbd_cameras.launch.py")
         ),
-        condition=IfCondition(enable_camera),
         launch_arguments={
-            "camera_name": "camera",
-            "enable_color": "true",
-            "enable_depth": "true",
-            "enable_ir": "false",
-            "enable_point_cloud": "true",
-            "enable_colored_point_cloud": "false",
-            "color_fps": "30",
-            "depth_fps": "30",
-            "ir_fps": "30",
-            "publish_tf": "false",
+            "sync_start_delay_sec": LaunchConfiguration("tf_warmup_delay_sec"),
         }.items(),
-    )
-
-    camera_transforms = [
-        Node(package="tf2_ros", executable="static_transform_publisher",
-             arguments=["--x", "0", "--y", "0", "--z", "0", "--qx", "0", "--qy", "0", "--qz", "0", "--qw", "1", "--frame-id", "camera_link", "--child-frame-id", "camera_depth_frame"]),
-        Node(package="tf2_ros", executable="static_transform_publisher",
-             arguments=["--x", "-0.002165860891342163", "--y", "0.025120487213134767", "--z", "0.00009495562314987182", "--qx", "-0.0008345809765160083", "--qy", "-0.00009292588947573677", "--qz", "-0.0009316844516433775", "--qw", "0.9999992251396179", "--frame-id", "camera_depth_frame", "--child-frame-id", "camera_color_frame"]),
-        Node(package="tf2_ros", executable="static_transform_publisher",
-             arguments=["--x", "0", "--y", "0", "--z", "0", "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5", "--frame-id", "camera_depth_frame", "--child-frame-id", "camera_depth_optical_frame"]),
-        Node(package="tf2_ros", executable="static_transform_publisher",
-             arguments=["--x", "0", "--y", "0", "--z", "0", "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5", "--frame-id", "camera_color_frame", "--child-frame-id", "camera_color_optical_frame"]),
-    ]
-
-    rgbd_sync = Node(
-        package="rtabmap_sync", executable="rgbd_sync", output="screen",
-        parameters=[{"approx_sync": True, "approx_sync_max_interval": 0.05,
-                     "topic_queue_size": 30, "sync_queue_size": 30,
-                     "use_sim_time": use_sim_time, "qos": qos}],
-        remappings=rtabmap_remappings[:3],
     )
     rtabmap_mapping = Node(
         package="rtabmap_slam", executable="rtabmap", output="screen",
@@ -112,6 +82,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("localization", default_value="false"),
         DeclareLaunchArgument("enable_camera", default_value="true"),
+        DeclareLaunchArgument("enable_realsense", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("qos", default_value="2"),
         DeclareLaunchArgument("joy_device_id", default_value="0"),
@@ -130,7 +101,6 @@ def generate_launch_description():
         Node(package="joy", executable="joy_node", output="screen", parameters=[{"device_id": ParameterValue(LaunchConfiguration("joy_device_id"), value_type=int), "deadzone": 0.1, "autorepeat_rate": 30.0}]),
         Node(package="yahboom_r2_teleop", executable="r2_joy_teleop", output="screen", parameters=[{"throttle_axis": ParameterValue(LaunchConfiguration("throttle_axis"), value_type=int), "steering_axis": ParameterValue(LaunchConfiguration("steering_axis"), value_type=int), "enable_button": ParameterValue(LaunchConfiguration("enable_button"), value_type=int)}]),
         Node(package="rviz2", executable="rviz2", condition=IfCondition(rviz), arguments=["-d", LaunchConfiguration("rviz_config")], output="screen"),
-        camera,
-        *camera_transforms,
-        TimerAction(period=LaunchConfiguration("tf_warmup_delay_sec"), actions=[rgbd_sync, rtabmap_mapping, rtabmap_localization]),
+        cameras,
+        TimerAction(period=LaunchConfiguration("tf_warmup_delay_sec"), actions=[rtabmap_mapping, rtabmap_localization]),
     ])

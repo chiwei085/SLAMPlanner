@@ -11,6 +11,7 @@
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>astra_camera</exec_depend>
+  <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>imu_filter_madgwick</exec_depend>
   <exec_depend>joy</exec_depend>
@@ -29,6 +30,7 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>yahboomcar_base_node</exec_depend>
+  <exec_depend>yahboom_alc_bringup</exec_depend>
   <exec_depend>yahboomcar_bringup</exec_depend>
   <exec_depend>yahboomcar_description</exec_depend>
 

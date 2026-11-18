@@ -15,7 +15,7 @@ from launch.actions import (
 from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -299,7 +299,6 @@ def generate_launch_description():
     yahboom_alc_share = get_package_share_directory("yahboom_alc_bringup")
     yahboom_bringup_share = get_package_share_directory("yahboomcar_bringup")
     yahboom_description_share = get_package_share_directory("yahboomcar_description")
-    astra_camera_share = get_package_share_directory("astra_camera")
 
     default_nav2_params = os.path.join(
         yahboom_alc_share, "params", "nav2_rgbd_params.yaml"
@@ -411,80 +410,16 @@ def generate_launch_description():
         arguments=["-d", rviz_config],
     )
 
-    astra_camera = IncludeLaunchDescription(
-        XMLLaunchDescriptionSource(
-            os.path.join(astra_camera_share, "launch", "astro_pro_plus.launch.xml")
+    # High Astra + low D455, their mount TFs and RGB-D sync -> /rgbd_images.
+    # Inherits this file's launch configurations (fps, qos, mount poses).
+    dual_rgbd_cameras = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(yahboom_alc_share, "launch", "dual_rgbd_cameras.launch.py")
         ),
-        condition=IfCondition(enable_camera),
         launch_arguments={
-            "camera_name": "camera",
-            "enable_color": "true",
-            "enable_depth": "true",
-            "color_fps": camera_color_fps,
-            "depth_fps": camera_depth_fps,
-            "ir_fps": camera_ir_fps,
-            # These extrinsics are fixed. Publishing them on /tf from the
-            # camera's streaming thread lets a USB scheduling stall make the
-            # transform expire at an RGB-D timestamp. They are published
-            # below on /tf_static instead.
-            "publish_tf": "false",
-            "enable_ir": "false",
-            "enable_point_cloud": "true",
-            "enable_colored_point_cloud": "false",
+            "sync_start_delay_sec": LaunchConfiguration("tf_warmup_delay_sec"),
         }.items(),
     )
-
-    # Astra Pro Plus factory extrinsics observed from the camera driver. Keep
-    # this immutable chain on /tf_static: camera_link is attached to the R2
-    # URDF, while these links describe fixed depth/color sensor geometry.
-    camera_static_transforms = [
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="camera_link_to_depth_frame",
-            arguments=[
-                "--x", "0", "--y", "0", "--z", "0",
-                "--qx", "0", "--qy", "0", "--qz", "0", "--qw", "1",
-                "--frame-id", "camera_link",
-                "--child-frame-id", "camera_depth_frame",
-            ],
-        ),
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="camera_depth_to_color_frame",
-            arguments=[
-                "--x", "-0.002165860891342163", "--y", "0.025120487213134767",
-                "--z", "0.00009495562314987182",
-                "--qx", "-0.0008345809765160083", "--qy", "-0.00009292588947573677",
-                "--qz", "-0.0009316844516433775", "--qw", "0.9999992251396179",
-                "--frame-id", "camera_depth_frame",
-                "--child-frame-id", "camera_color_frame",
-            ],
-        ),
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="camera_depth_to_optical_frame",
-            arguments=[
-                "--x", "0", "--y", "0", "--z", "0",
-                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
-                "--frame-id", "camera_depth_frame",
-                "--child-frame-id", "camera_depth_optical_frame",
-            ],
-        ),
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="camera_color_to_optical_frame",
-            arguments=[
-                "--x", "0", "--y", "0", "--z", "0",
-                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
-                "--frame-id", "camera_color_frame",
-                "--child-frame-id", "camera_color_optical_frame",
-            ],
-        ),
-    ]
 
     depth_cloud_preprocessor = Node(
         package="yahboom_alc_bringup",
@@ -510,34 +445,25 @@ def generate_launch_description():
         ],
     )
 
-    rgbd_sync = Node(
-        package="rtabmap_sync",
-        executable="rgbd_sync",
+    # Low D455 cloud for the costmaps / collision monitor: the high Astra can
+    # miss floor-level obstacles right in front of the robot.
+    d455_cloud_preprocessor = Node(
+        package="yahboom_alc_bringup",
+        executable="depth_cloud_preprocessor",
+        name="d455_cloud_preprocessor",
         output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_realsense")),
         parameters=[
             {
-                "approx_sync": True,
-                # Astra color/depth frames can arrive more than 10 ms apart on
-                # Jetson, so a 10 ms cap dropped valid RGB-D pairs and caused
-                # RTAB-Map conversion failures. But a fully unbounded interval
-                # (0.0) lets the approximate-time policy pair frames that are
-                # far apart, which trips RTAB-Map's "time difference between rgb
-                # and depth frames is high" warning and feeds it badly registered
-                # pairs. 50 ms (~1.5 frame periods at 30 fps) is generous enough
-                # to keep genuine pairs while rejecting those spurious far
-                # associations; the queue of 30 still supplies a better-aligned
-                # pair when one is dropped.
-                "approx_sync_max_interval": 0.05,
-                "topic_queue_size": 30,
-                "sync_queue_size": 30,
+                "input_topic": "/realsense/d455/depth/color/points",
+                "output_topic": "/realsense/d455/depth/points_voxel_base",
+                "target_frame": "base_footprint",
+                "leaf_size_m": 0.05,
+                "transform_timeout_sec": 0.2,
+                "min_range_m": 0.2,
+                "max_range_m": 6.0,
                 "use_sim_time": use_sim_time,
-                "qos": qos,
             }
-        ],
-        remappings=[
-            ("rgb/image", "/camera/color/image_raw"),
-            ("rgb/camera_info", "/camera/color/camera_info"),
-            ("depth/image", "/camera/depth/image_raw"),
         ],
     )
 
@@ -547,6 +473,11 @@ def generate_launch_description():
         "frame_id": "base_footprint",
         "use_sim_time": use_sim_time,
         "subscribe_rgbd": True,
+        # 0 = one RGBDImages topic (/rgbd_images from rgbdx_sync, 2 cameras).
+        "rgbd_cameras": 0,
+        # Motion-compensate each camera's frame by odom between its stamp and
+        # the node stamp: Astra (30 Hz) and D455 (15 Hz) are not hw-synced.
+        "odom_sensor_sync": True,
         "subscribe_scan": False,
         "use_action_for_goal": True,
         "qos_image": qos,
@@ -579,9 +510,7 @@ def generate_launch_description():
     }
 
     rtabmap_remappings = [
-        ("rgb/image", "/camera/color/image_raw"),
-        ("rgb/camera_info", "/camera/color/camera_info"),
-        ("depth/image", "/camera/depth/image_raw"),
+        ("rgbd_images", "/rgbd_images"),
         ("odom", "/odom"),
         ("imu", "/imu/data"),
     ]
@@ -783,7 +712,8 @@ def generate_launch_description():
                 "driver_cmd_topic": driver_cmd_vel_topic,
                 "wheel_odom_topic": "/odom",
                 "imu_topic": "/imu/data",
-                "depth_image_topic": "/camera/depth/image_raw",
+                # Low D455: the high Astra cannot see the floor right in front.
+                "depth_image_topic": "/realsense/d455/depth/image_rect_raw",
                 "planner_event_topic": "/planner/events",
                 "slam_global_frame": "map",
                 "robot_frame": "base_footprint",
@@ -805,7 +735,19 @@ def generate_launch_description():
                 "zero_burst_rate_hz": 30.0,
                 "retrigger_cooldown_sec": 3.0,
                 "depth_blind_slam_override_m": 0.010,
-                "camera_front_offset_m": 0.10,
+                # Camera-to-bumper distance = footprint front - D455 mount x.
+                # d455_x is declared by dual_rgbd_cameras.launch.py, which is
+                # included before this node.
+                "camera_front_offset_m": ParameterValue(
+                    PythonExpression(
+                        [
+                            str(ROBOT_FOOTPRINT_PARAMS["footprint_front_m"]),
+                            " - ",
+                            LaunchConfiguration("d455_x"),
+                        ]
+                    ),
+                    value_type=float,
+                ),
             }
         ],
     )
@@ -849,7 +791,8 @@ def generate_launch_description():
                             "wheel_odom_delta_threshold_m": 0.05,
                             "slam_delta_max_m": 0.02,
                             "depth_blind_slam_override_m": 0.010,
-                            "camera_front_offset_m": 0.10,
+                            "depth_camera": "d455",
+                            "camera_front_offset_m": "footprint_front_m - d455_x",
                         },
                         "recovery": {
                             "clearance_backup_m": 0.30,
@@ -927,7 +870,15 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_camera",
                 default_value="true",
-                description="Launch the Astra RGB-D camera driver.",
+                description="Launch the high Astra RGB-D camera driver.",
+            ),
+            DeclareLaunchArgument(
+                "enable_realsense",
+                default_value="true",
+                description=(
+                    "Launch the low D455 camera. Mount poses: astra_{x,y,z,"
+                    "roll,pitch,yaw} / d455_{...} (dual_rgbd_cameras.launch.py)."
+                ),
             ),
             DeclareLaunchArgument(
                 "gui",
@@ -1061,16 +1012,14 @@ def generate_launch_description():
             ekf_node,
             rviz_node,
             OpaqueFunction(function=launch_lidar),
-            astra_camera,
-            *camera_static_transforms,
+            dual_rgbd_cameras,
             TimerAction(
                 period=camera_pointcloud_start_delay_sec,
-                actions=[depth_cloud_preprocessor],
+                actions=[depth_cloud_preprocessor, d455_cloud_preprocessor],
             ),
             TimerAction(
                 period=tf_warmup_delay_sec,
                 actions=[
-                    rgbd_sync,
                     rtabmap_mapping,
                     rtabmap_localization,
                     rtabmap_map_tf_relay,
