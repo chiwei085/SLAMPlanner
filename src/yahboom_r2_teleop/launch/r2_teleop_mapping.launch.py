@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -28,7 +28,11 @@ def generate_launch_description():
         "frame_id": "base_footprint",
         "use_sim_time": use_sim_time,
         "subscribe_rgbd": True,
-        "rgbd_cameras": 0,  # /rgbd_images from rgbdx_sync (Astra + D455)
+        # dual: 0 = /rgbd_images (rgbdx_sync); astra: 1 = /astra/rgbd_image.
+        "rgbd_cameras": ParameterValue(
+            PythonExpression(["1 if '", LaunchConfiguration("camera_mode"), "' == 'astra' else 0"]),
+            value_type=int,
+        ),
         "odom_sensor_sync": True,
         "subscribe_scan": False,
         "subscribe_imu": True,
@@ -51,12 +55,13 @@ def generate_launch_description():
         "Optimizer/GravitySigma": "0.3",
     }
     rtabmap_remappings = [
-        ("rgbd_images", "/rgbd_images"),
+        ("rgbd_images", "/rgbd_images"),  # camera_mode:=dual
+        ("rgbd_image", "/astra/rgbd_image"),  # camera_mode:=astra
         ("odom", "/odom"),
         ("imu", "/imu/data"),
     ]
 
-    # High Astra + low D455, mount TFs and RGB-D sync -> /rgbd_images.
+    # camera_mode:=dual (high Astra + low D455) or astra (original low Astra).
     cameras = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(alc_share, "launch", "dual_rgbd_cameras.launch.py")
@@ -82,7 +87,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("localization", default_value="false"),
         DeclareLaunchArgument("enable_camera", default_value="true"),
-        DeclareLaunchArgument("enable_realsense", default_value="true"),
+        DeclareLaunchArgument("camera_mode", default_value="dual", description="dual = high Astra + low D455; astra = original single low Astra."),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("qos", default_value="2"),
         DeclareLaunchArgument("joy_device_id", default_value="0"),

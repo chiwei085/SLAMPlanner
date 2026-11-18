@@ -322,6 +322,7 @@ def generate_launch_description():
     qos = LaunchConfiguration("qos")
     localization = LaunchConfiguration("localization")
     enable_camera = LaunchConfiguration("enable_camera")
+    camera_mode = LaunchConfiguration("camera_mode")
     enable_frontier_explorer = LaunchConfiguration("enable_frontier_explorer")
     rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
@@ -410,7 +411,8 @@ def generate_launch_description():
         arguments=["-d", rviz_config],
     )
 
-    # High Astra + low D455, their mount TFs and RGB-D sync -> /rgbd_images.
+    # camera_mode:=dual -> high Astra + low D455 merged on /rgbd_images;
+    # camera_mode:=astra -> original low Astra only, on /astra/rgbd_image.
     # Inherits this file's launch configurations (fps, qos, mount poses).
     dual_rgbd_cameras = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -452,7 +454,7 @@ def generate_launch_description():
         executable="depth_cloud_preprocessor",
         name="d455_cloud_preprocessor",
         output="screen",
-        condition=IfCondition(LaunchConfiguration("enable_realsense")),
+        condition=IfCondition(PythonExpression(["'", camera_mode, "' == 'dual'"])),
         parameters=[
             {
                 "input_topic": "/realsense/d455/depth/color/points",
@@ -473,8 +475,12 @@ def generate_launch_description():
         "frame_id": "base_footprint",
         "use_sim_time": use_sim_time,
         "subscribe_rgbd": True,
-        # 0 = one RGBDImages topic (/rgbd_images from rgbdx_sync, 2 cameras).
-        "rgbd_cameras": 0,
+        # dual: 0 = one RGBDImages topic (/rgbd_images from rgbdx_sync).
+        # astra: 1 = a single RGBDImage topic (/astra/rgbd_image).
+        "rgbd_cameras": ParameterValue(
+            PythonExpression(["1 if '", camera_mode, "' == 'astra' else 0"]),
+            value_type=int,
+        ),
         # Motion-compensate each camera's frame by odom between its stamp and
         # the node stamp: Astra (30 Hz) and D455 (15 Hz) are not hw-synced.
         "odom_sensor_sync": True,
@@ -510,7 +516,8 @@ def generate_launch_description():
     }
 
     rtabmap_remappings = [
-        ("rgbd_images", "/rgbd_images"),
+        ("rgbd_images", "/rgbd_images"),  # camera_mode:=dual
+        ("rgbd_image", "/astra/rgbd_image"),  # camera_mode:=astra
         ("odom", "/odom"),
         ("imu", "/imu/data"),
     ]
@@ -712,8 +719,15 @@ def generate_launch_description():
                 "driver_cmd_topic": driver_cmd_vel_topic,
                 "wheel_odom_topic": "/odom",
                 "imu_topic": "/imu/data",
-                # Low D455: the high Astra cannot see the floor right in front.
-                "depth_image_topic": "/realsense/d455/depth/image_rect_raw",
+                # dual: low D455 -- the high Astra cannot see the floor right
+                # in front. astra: the original low Astra.
+                "depth_image_topic": PythonExpression(
+                    [
+                        "'/camera/depth/image_raw' if '",
+                        camera_mode,
+                        "' == 'astra' else '/realsense/d455/depth/image_rect_raw'",
+                    ]
+                ),
                 "planner_event_topic": "/planner/events",
                 "slam_global_frame": "map",
                 "robot_frame": "base_footprint",
@@ -735,15 +749,20 @@ def generate_launch_description():
                 "zero_burst_rate_hz": 30.0,
                 "retrigger_cooldown_sec": 3.0,
                 "depth_blind_slam_override_m": 0.010,
-                # Camera-to-bumper distance = footprint front - D455 mount x.
-                # d455_x is declared by dual_rgbd_cameras.launch.py, which is
-                # included before this node.
+                # Camera-to-bumper distance. dual: footprint front - D455
+                # mount x (d455_x is declared by dual_rgbd_cameras.launch.py,
+                # included before this node; empty = its 0.099 default).
+                # astra: the original low-mount value.
                 "camera_front_offset_m": ParameterValue(
                     PythonExpression(
                         [
+                            "0.10 if '",
+                            camera_mode,
+                            "' == 'astra' else ",
                             str(ROBOT_FOOTPRINT_PARAMS["footprint_front_m"]),
-                            " - ",
+                            " - float('",
                             LaunchConfiguration("d455_x"),
+                            "' or '0.099')",
                         ]
                     ),
                     value_type=float,
@@ -791,8 +810,10 @@ def generate_launch_description():
                             "wheel_odom_delta_threshold_m": 0.05,
                             "slam_delta_max_m": 0.02,
                             "depth_blind_slam_override_m": 0.010,
-                            "depth_camera": "d455",
-                            "camera_front_offset_m": "footprint_front_m - d455_x",
+                            "depth_camera": "d455 (camera_mode=dual) / astra",
+                            "camera_front_offset_m": (
+                                "dual: footprint_front_m - d455_x; astra: 0.10"
+                            ),
                         },
                         "recovery": {
                             "clearance_backup_m": 0.30,
@@ -870,14 +891,15 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_camera",
                 default_value="true",
-                description="Launch the high Astra RGB-D camera driver.",
+                description="Launch the Astra RGB-D camera driver.",
             ),
             DeclareLaunchArgument(
-                "enable_realsense",
-                default_value="true",
+                "camera_mode",
+                default_value="dual",
                 description=(
-                    "Launch the low D455 camera. Mount poses: astra_{x,y,z,"
-                    "roll,pitch,yaw} / d455_{...} (dual_rgbd_cameras.launch.py)."
+                    "dual = high Astra + low D455; astra = original single low "
+                    "Astra. Mount poses: astra_{x,y,z,roll,pitch,yaw} / "
+                    "d455_{...} (dual_rgbd_cameras.launch.py)."
                 ),
             ),
             DeclareLaunchArgument(
