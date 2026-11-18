@@ -11,7 +11,15 @@ source ~/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
 source ~/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash
 source ~/SLAMPlanner/install/setup.bash
 ros2 launch yahboom_r2_teleop r2_teleop_mapping.launch.py
+# original single-camera setup
+ros2 launch yahboom_r2_teleop r2_teleop_mapping.launch.py camera_mode:=astra
 ```
+
+Like the exploration launch, this defaults to `camera_mode:=dual` (high Astra +
+low RealSense D455); `camera_mode:=astra` is the original single low Astra.
+Cameras, mount poses (`astra_*` / `d455_*`), and RGB-D sync come from
+`yahboom_alc_bringup/launch/dual_rgbd_cameras.launch.py`. The RViz profile shows
+both cameras' images; the D455 panels stay empty in astra mode.
 
 Press START (Linux joystick button 11) once to enable driving and once again to
 stop/disable. A one-second debounce prevents the controller's Turbo mode from
@@ -41,5 +49,6 @@ Useful overrides:
 
 ```bash
 ros2 launch yahboom_r2_teleop r2_teleop_mapping.launch.py \
-  joy_device_id:=1 throttle_axis:=1 steering_axis:=2 enable_button:=9 rviz:=false
+  joy_device_id:=1 throttle_axis:=1 steering_axis:=2 enable_button:=9 rviz:=false \
+  camera_mode:=astra
 ```

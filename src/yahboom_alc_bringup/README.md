@@ -8,8 +8,15 @@ planner package; this overlay provides the launch wiring and the velocity
 bridge needed by the R2 driver.
 
 `alc_yahboom_r2_exploration.launch.py` explicitly starts the Yahboom R2 base
-bringup, including `Ackman_driver_R2`, and the Astra RGB-D camera before
-launching RTAB-Map, Nav2, ALC-Planner, and the bridge.
+bringup, including `Ackman_driver_R2`, and the RGB-D cameras before launching
+RTAB-Map, Nav2, ALC-Planner, and the bridge.
+
+Cameras come from `dual_rgbd_cameras.launch.py`, also used by
+`yahboom_r2_teleop`. `camera_mode:=dual` (default) runs a high Astra Pro Plus
+plus a low RealSense D455 merged by `rgbdx_sync` into `/rgbd_images`;
+`camera_mode:=astra` runs the original single low Astra on `/astra/rgbd_image`.
+Mount poses are the `astra_*` / `d455_*` launch arguments; see the workspace
+README for the mode table and how the defaults were measured.
 
 The launch disables RTAB-Map's `map -> odom` TF publisher and runs
 `rtabmap_map_tf_relay` as the only `map -> odom` TF publisher. Nav2 is started
@@ -49,7 +56,7 @@ configured cost threshold publishes zero `/cmd_vel` and emits
 `reverse_blocked`. The check covers the full short swept footprint volume
 behind the robot, not only the rear centerline.
 
-Because this profile assumes front RGB-D only, Nav2 `BackUp` recovery is kept
+Because this profile assumes front-facing RGB-D only (one or two cameras), Nav2 `BackUp` recovery is kept
 short and slow. Repeated reverse safety failures mark the current frontier as
 `REVERSE_UNSAFE` and force frontier reselection instead of retrying the same
 viewpoint.
@@ -57,7 +64,9 @@ viewpoint.
 ## Stall Detection
 
 `r2_stall_detector` handles the case where forward commands and wheel odometry
-show progress but independent observations do not. It compares `/alc/nav_cmd_vel`,
+show progress but independent observations do not. Its forward depth check reads
+the D455 depth image in dual mode (the high Astra cannot see the near floor) and
+the Astra depth image in astra mode. It compares `/alc/nav_cmd_vel`,
 wheel `/odom`, the SLAM `map -> base_footprint` TF, and `/imu/data`. When a
 forward command persists, wheel odom advances, but SLAM/IMU motion does not
 match, it publishes a zero command burst and emits `stall_or_slip`.
@@ -93,10 +102,12 @@ colcon build --packages-select alc_planner yahboom_alc_bringup
 source install/setup.bash
 ```
 
-Launch the MVP pipeline:
+Launch the MVP pipeline (dual camera by default):
 
 ```bash
 ros2 launch yahboom_alc_bringup alc_yahboom_r2_exploration.launch.py
+# original single-camera setup
+ros2 launch yahboom_alc_bringup alc_yahboom_r2_exploration.launch.py camera_mode:=astra
 ```
 
 The launch attempts to run `ekf_filter_node` with
@@ -106,8 +117,9 @@ prints a permission warning and continues at normal priority; systems with that
 capability can use `ekf_launch_prefix="chrt -f 80"` for stronger scheduling
 isolation.
 
-Depth cloud load is reduced by publishing a shared downsampled cloud on
-`/camera/depth/points_voxel_base`. Astra FPS defaults stay at 30 because this
+Depth cloud load is reduced by publishing shared downsampled clouds on
+`/camera/depth/points_voxel_base` (Astra) and, in dual mode,
+`/realsense/d455/depth/points_voxel_base` (D455, 640x480@15). Astra FPS defaults stay at 30 because this
 R2 camera rejected 640x480@15 for both depth and UVC color during launch; only
 override `camera_color_fps`, `camera_depth_fps`, or `camera_ir_fps` after
 confirming the mode is supported by the hardware.
