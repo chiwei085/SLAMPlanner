@@ -431,4 +431,11 @@ private:
     std::optional<IntentionState> intention_;
 };
 
+// True when the world point falls on a lethal (100) cell of a 0-100
+// OccupancyGrid costmap. Mirrors Nav2's "Starting point in lethal space"
+// check, which looks at the start cell only (not the whole footprint).
+// Out of bounds or an empty grid is not lethal.
+bool isLethalCostmapCell(const nav_msgs::msg::OccupancyGrid& costmap,
+                         const WorldPoint& xy);
+
 }  // namespace yahboom_alc_bringup

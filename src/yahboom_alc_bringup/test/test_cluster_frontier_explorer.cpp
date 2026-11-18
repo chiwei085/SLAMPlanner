@@ -1342,5 +1342,26 @@ TEST(ClusterFrontierExplorer, IntentionBonusLowersScoreForNearbyCandidate) {
     EXPECT_LT(score_near_intention, score_far_from_intention);
 }
 
+TEST(LethalCostmapCell, DetectsLethalStartCellOnly) {
+    nav_msgs::msg::OccupancyGrid costmap;
+    costmap.info.resolution = 0.05;
+    costmap.info.width = 4;
+    costmap.info.height = 3;
+    costmap.info.origin.position.x = -0.1;
+    costmap.info.origin.position.y = 0.0;
+    costmap.data.assign(12, 0);
+    costmap.data[1 * 4 + 2] =
+        100;  // cell (2, 1) = world [0.0, 0.05) x [0.05, 0.1)
+    costmap.data[1 * 4 + 1] = 99;  // inscribed, not lethal
+
+    EXPECT_TRUE(isLethalCostmapCell(costmap, {0.02, 0.07}));
+    EXPECT_FALSE(isLethalCostmapCell(costmap, {-0.03, 0.07}));
+    EXPECT_FALSE(isLethalCostmapCell(costmap, {0.07, 0.07}));
+    EXPECT_FALSE(isLethalCostmapCell(costmap, {0.5, 0.07}));   // out of bounds
+    EXPECT_FALSE(isLethalCostmapCell(costmap, {-0.2, 0.07}));  // out of bounds
+    EXPECT_FALSE(
+        isLethalCostmapCell(nav_msgs::msg::OccupancyGrid{}, {0.02, 0.07}));
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

@@ -1567,4 +1567,22 @@ FootprintGeometry FrontierExplorerCore::footprintGeometry() {
     return geometry;
 }
 
+bool isLethalCostmapCell(const nav_msgs::msg::OccupancyGrid& costmap,
+                         const WorldPoint& xy) {
+    const double resolution = costmap.info.resolution;
+    if (resolution <= 0.0 || costmap.data.empty()) {
+        return false;
+    }
+    const double mx = (xy.first - costmap.info.origin.position.x) / resolution;
+    const double my = (xy.second - costmap.info.origin.position.y) / resolution;
+    if (mx < 0.0 || my < 0.0 || mx >= costmap.info.width ||
+        my >= costmap.info.height) {
+        return false;
+    }
+    const auto index = static_cast<std::size_t>(my) * costmap.info.width +
+                       static_cast<std::size_t>(mx);
+    constexpr std::int8_t kLethal = 100;
+    return index < costmap.data.size() && costmap.data[index] >= kLethal;
+}
+
 }  // namespace yahboom_alc_bringup

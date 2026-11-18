@@ -43,6 +43,9 @@ struct ClusterExplorerNodeParams
 {
     bool enabled = true;
     std::string map_topic = "/map";
+    // Same costmap Nav2's global planner plans on; used to tell a lethal
+    // start cell (robot-side problem) apart from an unreachable goal.
+    std::string global_costmap_topic = "/global_costmap/costmap";
     std::string robot_frame = "base_footprint";
     std::string global_frame = "map";
     double cycle_period_sec = 3.0;
@@ -81,6 +84,8 @@ struct descriptor<yahboom_alc_bringup::ClusterExplorerNodeParams>
         return make_descriptor(
             named(&ClusterExplorerNodeParams::enabled, "enabled"),
             named(&ClusterExplorerNodeParams::map_topic, "map_topic"),
+            named(&ClusterExplorerNodeParams::global_costmap_topic,
+                  "global_costmap_topic"),
             named(&ClusterExplorerNodeParams::robot_frame, "robot_frame"),
             named(&ClusterExplorerNodeParams::global_frame, "global_frame"),
             named(&ClusterExplorerNodeParams::cycle_period_sec,
@@ -454,6 +459,12 @@ public:
         map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             map_topic_, map_qos,
             [this](const nav_msgs::msg::OccupancyGrid& msg) { onMap(msg); });
+        // Nav2's costmap publisher is reliable + transient_local.
+        global_costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+            global_costmap_topic_, map_qos,
+            [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) {
+                global_costmap_ = std::move(msg);
+            });
 
         rclcpp::QoS marker_qos{rclcpp::KeepLast(1)};
         marker_qos.reliable().transient_local();
@@ -480,6 +491,7 @@ private:
             loadDeclaredParameters<ClusterExplorerNodeParams>(*this);
         enabled_ = node_params.enabled;
         map_topic_ = node_params.map_topic;
+        global_costmap_topic_ = node_params.global_costmap_topic;
         robot_frame_ = node_params.robot_frame;
         global_frame_ = node_params.global_frame;
         cycle_period_sec_ = node_params.cycle_period_sec;
@@ -838,6 +850,9 @@ private:
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
             result.result->path.poses.empty()) {
+            if (handleStartBlockedValidation()) {
+                return;
+            }
             publishPlannerEvent("nav2_validation_failed",
                                 {{"reason", "empty_or_failed_path"},
                                  {"failure_class", "global_path_blocked"},
@@ -863,6 +878,32 @@ private:
         }
     }
 
+    // A path from the robot's own pose fails when the planner's start cell is
+    // lethal, whatever the goal. That is a robot-side state (e.g. a mark under
+    // the chassis the cameras can never clear), so blaming and blacklisting
+    // each goal in turn only empties the frontier list while the robot sits
+    // still. Move the robot instead: start recovery at the backup+rotation
+    // stage (reobserve would only re-validate from the same blocked cell).
+    bool handleStartBlockedValidation() {
+        if (validation_segment_index_ != 0 || !pending_robot_pose_ ||
+            !global_costmap_ ||
+            !isLethalCostmapCell(*global_costmap_, pending_robot_pose_->xy)) {
+            return false;
+        }
+        publishPlannerEvent("nav2_validation_failed",
+                            {{"reason", "start_cell_lethal"},
+                             {"failure_class", "start_blocked"},
+                             {"goal_xy", validationGoalJson()},
+                             {"robot_xy", pointJson(pending_robot_pose_->xy)}});
+        validation_active_ = false;
+        ++validation_generation_;
+        clearGoalMarker();
+        pending_candidates_.clear();
+        pending_robot_pose_.reset();
+        startRecoveryTree("planning_start_blocked", /*skip_reobserve=*/true);
+        return true;
+    }
+
     void checkValidationTimeout() {
         if (!validation_active_ || nav2_validation_timeout_sec_ <= 0.0) {
             return;
@@ -872,6 +913,9 @@ private:
         }
         if (nowSec() - validation_segment_started_sec_ <
             nav2_validation_timeout_sec_) {
+            return;
+        }
+        if (handleStartBlockedValidation()) {
             return;
         }
         publishPlannerEvent("nav2_validation_failed",
@@ -1431,7 +1475,8 @@ private:
         reverse_pulse_escalation_pending_ = false;
     }
 
-    void startRecoveryTree(const std::string& reason) {
+    void startRecoveryTree(const std::string& reason,
+                           const bool skip_reobserve = false) {
         if (recoveryActive() || recovery_escape_active_) {
             return;
         }
@@ -1462,7 +1507,7 @@ private:
                   rounded(recovery_config_.recovery_stagnation_radius_m)},
                  {"goal_xy", activeFinalGoalJson()}});
         }
-        else if (recovery_reobserve_used_) {
+        else if (recovery_reobserve_used_ || skip_reobserve) {
             recovery_.startAtSmallRotation();
         }
         else {
@@ -2765,6 +2810,8 @@ private:
     TemporalSignalState map_temporal_state_;
     TemporalSignalObservation map_temporal_;
     std::string map_topic_;
+    std::string global_costmap_topic_;
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr global_costmap_;
     std::string robot_frame_;
     std::string global_frame_;
     std::string planner_event_topic_;
@@ -2857,6 +2904,8 @@ private:
     rclcpp_action::Client<ComputePathToPose>::SharedPtr compute_path_client_;
     std::vector<LifecycleStateClient> nav2_lifecycle_clients_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr
+        global_costmap_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr
