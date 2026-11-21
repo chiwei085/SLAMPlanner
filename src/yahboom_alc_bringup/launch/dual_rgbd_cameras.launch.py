@@ -43,13 +43,17 @@ POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 # centre height above floor minus base_link's 0.0215. y: the TF root is not
 # the body centre -- Astra depth lens sits 2.5 cm right of its centred RGB
 # lens; d455_link is the left IR lens, half the 95 mm baseline left.
-# Roll measured < 1 deg, left at 0.
+# Roll measured < 1 deg, left at 0 (Astra; D455 see below).
 #
 # astra -- the original low mount: URDF camera_joint pose.
 MOUNT_DEFAULTS = {
     "dual": {
         "astra": ("0.099", "-0.025", "0.870", "0", "0.165", "0"),
-        "d455": ("0.099", "0.0475", "0.1665", "0", "0.239", "0"),
+        # Re-measured 2026-11-21 after the D455 mount was re-tilted: floor
+        # fit in its own depth frame (raw depth + camera_info) gave 0.193 m,
+        # 5.7 deg down, 1.7 deg roll; the old 0.239 put the floor 0.14 m low
+        # at 1 m. Verified: body-frame floor flat within 0.1 deg, |z| < 1 mm.
+        "d455": ("0.099", "0.0475", "0.1712", "-0.030", "0.099", "0"),
     },
     "astra": {
         "astra": ("0.095117", "0", "0.09955", "0", "0.0057171", "0"),

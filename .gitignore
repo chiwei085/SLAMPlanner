@@ -18,3 +18,5 @@ __pycache__/
 # runtime planner diagnostics
 /planner-log/*
 !/planner-log/.gitkeep
+
+/.vscode

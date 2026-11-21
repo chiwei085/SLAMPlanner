@@ -36,41 +36,35 @@ The exploration launch wires Yahboom R2 bringup, RTAB-Map mapping, Nav2,
 ALC-Planner, and the R2 cmd_vel bridge. Both launches start the cameras
 themselves through `yahboom_alc_bringup/launch/dual_rgbd_cameras.launch.py`.
 
-## Camera Modes
+## Cameras
 
-| | `camera_mode:=dual` (default) | `camera_mode:=astra` |
+| Mode | Cameras | RTAB-Map input |
 | --- | --- | --- |
-| Cameras | Astra Pro Plus high (~0.89 m) + RealSense D455 low (~0.19 m) | Astra Pro Plus at the original low URDF mount |
-| RTAB-Map input | `/rgbd_images` (`rgbdx_sync` of `/astra/rgbd_image` + `/d455/rgbd_image`), `rgbd_cameras: 0` | `/astra/rgbd_image`, `rgbd_cameras: 1` |
-| Costmaps / collision monitor | Astra + D455 voxel clouds | Astra voxel cloud |
-| Stall-detector depth reflex | D455 `/realsense/d455/depth/image_rect_raw` | Astra `/camera/depth/image_raw` |
+| `dual` (default) | High Astra Pro Plus (~0.89 m) + low D455 (~0.19 m) | `/rgbd_images` |
+| `astra` | Astra Pro Plus at the original low URDF mount | `/astra/rgbd_image` |
 
-In dual mode the high Astra sees walls and features but no floor closer than
-about 1.7 m; the low D455 covers the floor from about 0.3 m. The views need not
-overlap. RTAB-Map runs with `odom_sensor_sync` to compensate the unsynchronized
-30 Hz Astra / 15 Hz D455 stamps.
+In dual mode, the Astra sees walls and features; the D455 covers the near floor
+(from ~0.3 m, versus ~1.7 m for the high Astra) and supplies the stall-detector
+depth reflex. Both feed the costmaps. Views need not overlap; RTAB-Map uses
+`odom_sensor_sync` to compensate their unsynchronized timestamps.
 
-The D455 needs the RSUSB-backend librealsense build (the stock backend does not
-enumerate it on this Jetson); its directory is the `realsense_lib_dir` launch
-argument, default `~/realsense-check/rsusb-build/Release`. The D455 starts
-`d455_start_delay_sec` (6 s) after the Astra: starting both at once made one
-driver fail to claim its USB interface and segfault. The D455 node also
-respawns if it crashes, since it feeds the costmaps and the depth reflex.
+The D455 uses RealSense ROS **4.58.3** with librealsense **2.58.3**, built with
+`FORCE_RSUSB_BACKEND=ON`: the packaged V4L2 backend could not enumerate it on
+this Jetson. See [RealSense D455 setup](src/yahboom_alc_bringup/README.md#realsense-d455-setup-rsusb)
+for the verified versions, SDK build, runtime library selection, and checks.
 
-### Camera mount poses
+Mount overrides are `astra_{x,y,z,roll,pitch,yaw}` and
+`d455_{x,y,z,roll,pitch,yaw}`, relative to `base_link` (metres/radians, positive
+pitch looks down). Empty values use the selected mode's defaults in
+[dual_rgbd_cameras.launch.py](src/yahboom_alc_bringup/launch/dual_rgbd_cameras.launch.py).
+Measured dual-mode pitches: Astra 0.165 rad, D455 0.239 rad.
 
-Each camera's pose relative to `base_link` is a launch argument:
-`astra_{x,y,z,roll,pitch,yaw}` and `d455_{x,y,z,roll,pitch,yaw}` (metres,
-radians, pitch positive = looking down). Leave them empty to use the defaults
-for the selected mode (`--show-args` lists both). The dual-mode defaults were
-measured on 2026-11-18: Astra pitch 0.165 rad (9.5 deg), D455 pitch 0.239 rad
-(13.7 deg).
+After re-mounting, measure height and pitch with a floor-plane fit in each
+camera's depth frame; avoid estimates by eye or the uncalibrated D455 IMU.
+Incorrect pitch can turn the floor into phantom obstacles above
+`Grid/MaxGroundHeight` (0.08 m); incorrect position can double walls.
 
-After re-mounting a camera, measure pitch and height from a floor-plane fit in
-the camera's own depth frame, not by eye or from the D455 IMU (uncalibrated; it
-read 7.6 deg against a true 13.7 deg). A pitch error makes the floor rise with
-distance until it crosses RTAB-Map `Grid/MaxGroundHeight` (0.08 m) and shows up
-as phantom obstacles; a position error shows up as doubled walls.
+## Integration
 
 Nav2 is launched as the navigation stack only. AMCL and Nav2 map_server are not
 started; RTAB-Map is the sole `map -> odom` TF authority, and Nav2 consumes the
@@ -91,12 +85,11 @@ runs a three-stage reflex on those clouds — a time-to-collision `approach` zon
 camera's RangeMin so the robot halts just before an obstacle enters the near
 blind zone (see `params/nav2_rgbd_params.yaml`).
 
-`r2_collision_safety_gate` is **not** in the cmd_vel path. It only watches the
-IMU for a forward-deceleration impact — the one hazard the depth/costmap layers
-cannot see (sub-RangeMin near field, pure rotation) — and on impact it raises
-`/collision_safety_stop_active` (the bridge halts forward motion while keeping
-reverse for recovery) and emits a `stall_or_slip` event for the recovery state
-machine. The stall detector remains the wheel/SLAM motion-fault fallback.
+A robot blocked by something the cameras cannot see is caught by
+`r2_stall_detector`, which compares the motion the executed command should
+produce with the motion SLAM observes. There is no IMU impact reflex: at R2
+speeds a real contact decelerates less than normal driving vibration, so a
+single-sample IMU threshold cannot tell the two apart.
 
 Before enabling higher speeds, measure the camera's useful return band at
 0.30 m, 0.45 m, and 0.55 m with targets at several heights. Use those results

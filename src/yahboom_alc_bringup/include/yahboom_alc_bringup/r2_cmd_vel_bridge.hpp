@@ -4,11 +4,12 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rik_sd/struct_descriptor.hpp>
-#include <std_msgs/msg/bool.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <optional>
@@ -40,7 +41,6 @@ struct R2CmdVelBridgeConfig
     double max_steering_rate = 0.80;
     double assumed_command_period = 0.10;
     bool arc_turn_when_stationary = true;
-    std::string safety_stop_topic = "/collision_safety_stop_active";
     bool stationary_arc_requires_forward_clearance = true;
     double stationary_arc_check_distance_m = 0.12;
     bool reverse_safety_enabled = true;
@@ -75,6 +75,12 @@ struct R2CmdVelBridgeConfig
     // centered zero for idle_stop_burst_sec. 0 disables.
     double input_timeout_sec = 0.5;
     double idle_stop_burst_sec = 1.0;
+    // Raw chassis IMU. When its content stops changing for
+    // feedback_frozen_timeout_sec, every motion command is replaced by zero:
+    // the robot cannot sense its own motion, so no recovery can be judged.
+    // Empty disables.
+    std::string feedback_imu_topic;
+    double feedback_frozen_timeout_sec = 0.5;
     double footprint_front_m = 0.19;
     double footprint_rear_m = 0.19;
     double footprint_half_width_m = 0.115;
@@ -135,6 +141,22 @@ private:
     double open_until_sec_ = 0.0;
 };
 
+// A live MEMS IMU never repeats a sample exactly (0 of 300 consecutive
+// stationary pairs on the R2). After the Yahboom driver's serial reader dies
+// it keeps republishing its last cached sample at the normal rate, so arrival
+// rate cannot reveal it; content can. Frozen until the first sample arrives.
+class FeedbackFreezeWatch
+{
+public:
+    using Sample = std::array<double, 6>;
+    void observe(const Sample& sample, double now_sec);
+    bool frozen(double now_sec, double timeout_sec) const;
+
+private:
+    std::optional<Sample> last_;
+    std::optional<double> last_change_sec_;
+};
+
 class R2CmdVelBridgeNode : public rclcpp::Node
 {
 public:
@@ -165,8 +187,10 @@ private:
     R2CmdVelBridgeConfig config_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_stop_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_event_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr feedback_imu_sub_;
+    FeedbackFreezeWatch feedback_watch_;
+    bool feedback_frozen_ = false;
     BlindReverseWindow blind_reverse_window_;
     rclcpp::TimerBase::SharedPtr idle_stop_timer_;
     std::optional<rclcpp::Time> last_input_time_;
@@ -182,7 +206,6 @@ private:
     rclcpp::Time last_output_time_;
     std::atomic<bool> stopping_{false};
     bool has_last_output_ = false;
-    bool safety_stop_active_ = false;
 };
 
 }  // namespace yahboom_alc_bringup
@@ -221,8 +244,6 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "assumed_command_period"),
             named(&R2CmdVelBridgeConfig::arc_turn_when_stationary,
                   "arc_turn_when_stationary"),
-            named(&R2CmdVelBridgeConfig::safety_stop_topic,
-                  "safety_stop_topic"),
             named(&R2CmdVelBridgeConfig::
                       stationary_arc_requires_forward_clearance,
                   "stationary_arc_requires_forward_clearance"),
@@ -254,6 +275,10 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "input_timeout_sec"),
             named(&R2CmdVelBridgeConfig::idle_stop_burst_sec,
                   "idle_stop_burst_sec"),
+            named(&R2CmdVelBridgeConfig::feedback_imu_topic,
+                  "feedback_imu_topic"),
+            named(&R2CmdVelBridgeConfig::feedback_frozen_timeout_sec,
+                  "feedback_frozen_timeout_sec"),
             named(&R2CmdVelBridgeConfig::footprint_front_m,
                   "footprint_front_m"),
             named(&R2CmdVelBridgeConfig::footprint_rear_m, "footprint_rear_m"),

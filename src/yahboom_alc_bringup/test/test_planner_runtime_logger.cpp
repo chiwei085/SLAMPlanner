@@ -23,22 +23,31 @@ nav_msgs::msg::OccupancyGrid buildGrid() {
     return grid;
 }
 
-TEST(PlannerRuntimeLogger, LogWriterCreatesJsonlAndWritesEvent) {
+TEST(PlannerRuntimeLogger, LogWriterAppendsCompleteJsonRecordsOnSeparateLines) {
     const auto dir =
         std::filesystem::temp_directory_path() / "planner_runtime_logger_test";
     std::filesystem::remove_all(dir);
     PlannerLogWriter writer(dir, "run_20260607_103000.jsonl");
-    writer.write(
-        {{"type", "planner_event"}, {"payload", {{"event", "goal_sent"}}}});
+    const nlohmann::json event = {
+        {"type", "planner_event"},
+        {"payload",
+         {{"event", "goal_sent"}, {"reason", "line 1\n\"line 2\""}}}};
+    writer.write(event);
     writer.close();
+    const nlohmann::json next_event = {{"type", "run_end"}};
+    PlannerLogWriter reopened(dir, "run_20260607_103000.jsonl");
+    reopened.write(next_event);
+    reopened.close();
 
     const auto path = dir / "run_20260607_103000.jsonl";
     ASSERT_TRUE(std::filesystem::exists(path));
     std::ifstream file(path);
     std::string line;
-    std::getline(file, line);
-    EXPECT_NE(line.find("\"type\":\"planner_event\""), std::string::npos);
-    EXPECT_NE(line.find("\"goal_sent\""), std::string::npos);
+    ASSERT_TRUE(std::getline(file, line));
+    EXPECT_EQ(nlohmann::json::parse(line).dump(), event.dump());
+    ASSERT_TRUE(std::getline(file, line));
+    EXPECT_EQ(nlohmann::json::parse(line).dump(), next_event.dump());
+    EXPECT_FALSE(std::getline(file, line));
     std::filesystem::remove_all(dir);
 }
 
@@ -83,33 +92,18 @@ TEST(PlannerRuntimeLogger, RunStartRecordsAllObservedTopics) {
               "\"/navigate_to_pose/_action/status\"");
 }
 
-TEST(PlannerRuntimeLogger,
-     SourcesReportUnseenInputsWithoutChangingNullPayloads) {
+TEST(PlannerRuntimeLogger, SourcesReportUnseenInputs) {
     const auto sources = sourcesJson({}, {}, {}, {}, {});
-    const nlohmann::json snapshot = {
-        {"type", "snapshot"},
-        {"map", nullptr},
-        {"commands",
-         {{"nav", {{"twist", nullptr}, {"receive_silence_sec", nullptr}}},
-          {"driver", {{"twist", nullptr}, {"receive_silence_sec", nullptr}}}}},
-        {"sources", sources}};
+    const nlohmann::json expected_health = {{"seen", false},
+                                            {"message_count", 0},
+                                            {"receive_silence_sec", nullptr}};
 
-    EXPECT_EQ(snapshot[std::string("map")].dump(), "null");
-    EXPECT_EQ(snapshot[std::string("commands")][std::string("nav")]
-                      [std::string("twist")]
-                          .dump(),
-              "null");
-    EXPECT_EQ(snapshot[std::string("sources")][std::string("map")]
-                      [std::string("seen")]
-                          .dump(),
-              "false");
-    EXPECT_EQ(snapshot[std::string("sources")][std::string("map")]
-                      [std::string("message_count")],
-              0);
-    EXPECT_EQ(snapshot[std::string("sources")][std::string("nav_cmd")]
-                      [std::string("receive_silence_sec")]
-                          .dump(),
-              "null");
+    for (const auto* name :
+         {"event", "map", "nav_cmd", "driver_cmd", "navigate_status"}) {
+        SCOPED_TRACE(name);
+        ASSERT_TRUE(sources.contains(name));
+        EXPECT_EQ(sources[name].dump(), expected_health.dump());
+    }
 }
 
 TEST(PlannerRuntimeLogger, SourcesReportReceivedMapAndTwistInputs) {

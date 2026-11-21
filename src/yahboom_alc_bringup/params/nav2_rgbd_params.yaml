@@ -318,7 +318,11 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
-      tolerance: 0.5
+      # Path end may fall this far short of the goal, and the goal checker
+      # then accepts xy_goal_tolerance (0.35) around that end. Keep the sum at
+      # the explorer's nav2_success_xy_tolerance_m (0.55), or Nav2 reports
+      # success for an unreachable goal 0.55-0.85 m away.
+      tolerance: 0.2
       allow_unknown: true
       downsample_costmap: false
       downsampling_factor: 1
@@ -412,7 +416,7 @@ collision_monitor:
     #                  is matched to the camera's RangeMin so the robot is
     #                  already stopped by the time the obstacle enters the
     #                  near blind zone (sub-0.25 m / pure-rotation gaps are
-    #                  covered by IMU impact recovery, not this monitor).
+    #                  covered by the stall detector, not this monitor).
     polygons: ["StopPolygon", "SlowdownZone", "ApproachZone"]
     StopPolygon:
       type: "polygon"

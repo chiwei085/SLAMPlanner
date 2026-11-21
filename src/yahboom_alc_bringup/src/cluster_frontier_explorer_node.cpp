@@ -229,7 +229,6 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "allow_unreachable_goal"),
             named(&FrontierConfig::nav2_validation_required_for_final_goal,
                   "nav2_validation_required_for_final_goal"),
-            named(&FrontierConfig::approach_offset_m, "approach_offset_m"),
             named(&FrontierConfig::goal_update_distance,
                   "goal_update_distance"),
             named(&FrontierConfig::goal_publish_period, "goal_publish_period"),
@@ -624,14 +623,13 @@ private:
     // instead of waiting for a map that cannot grow while the robot stands
     // still. Nav2 cannot plan this turn -- the global costmap only spans the
     // observed map, and the space behind is off it -- so it runs here as a
-    // multi-point turn: forward with steering toward the turn, reverse with
-    // the opposite steering, alternating, until the heading points at the
-    // unknown. Commands enter the collision monitor (front safety) and the
-    // bridge (rear costmap check). Reversing goes into unseen space and
-    // nothing else detects a rear contact (the IMU gate and stall detector
-    // watch forward motion only), so a segment that stops moving is ended
-    // here and two stuck segments in a row abort the turn.
-    // At most one turn per spot, so a finished exploration does not loop.
+    // multi-point turn: forward and reverse segments alternating, until the
+    // heading points at the unknown. Commands enter the collision monitor
+    // (front safety) and the bridge (rear costmap check). Reversing goes into
+    // unseen space and nothing else detects a rear contact (the IMU gate and
+    // stall detector watch forward motion only), so a segment that stops moving
+    // is ended here and two stuck segments in a row abort the turn. At most one
+    // turn per spot, so a finished exploration does not loop.
     void maybeStartObservationTurn(const RobotPose& robot_pose) {
         // Commands sent before the collision monitor is active are dropped;
         // wait (without spending this spot's one turn) until it is.
@@ -730,15 +728,11 @@ private:
             switchObservationSegment(*pose, stuck);
             return;
         }
-        // Steering sign follows the twist's angular sign in the bridge
-        // (steering = gain * angular.z, regardless of travel direction), and
-        // a car yaws the opposite way when reversing on the same steering.
-        // So steer toward the turn going forward and away from it reversing:
-        // both segments then rotate the heading the same way.
+        // angular.z is a yaw rate: the bridge flips the wheel angle when
+        // reversing, so the same sign rotates the heading in both segments.
         publishObservationCmd(
             observation_segment_direction_ * kObservationSpeedMps,
-            observation_segment_direction_ * observation_turn_sign_ *
-                kObservationAngularCmd);
+            observation_turn_sign_ * kObservationAngularCmd);
     }
 
     void publishObservationCmd(const double linear, const double angular) {
@@ -842,14 +836,11 @@ private:
         for (const auto& subgoal : subgoals) {
             route.push_back({subgoal.goal_xy, subgoal.goal_yaw, false});
         }
-        if (final_candidate.soft_reachable) {
-            route.push_back({final_candidate.approach_xy,
-                             final_candidate.approach_yaw, true});
-        }
-        else {
-            route.push_back(
-                {final_candidate.goal_xy, final_candidate.goal_yaw, true});
-        }
+        // Always send the pose the candidate checks ran on: Nav2 validation and
+        // the failure record are keyed to goal_xy, so a substitute pose would
+        // be tested unchecked and its failure charged to a pose never planned.
+        route.push_back(
+            {final_candidate.goal_xy, final_candidate.goal_yaw, true});
         return route;
     }
 
@@ -2354,10 +2345,14 @@ private:
         recordGoalFailure(*active_final_goal_, failure_class);
     }
 
+    // A hazard region marks a place where motion was measured to fall short.
+    // kRecoveryFailed measures nothing: a physical cause was already recorded
+    // as kStallOrSlip/kLocalHazard, and a map-derived one (e.g. reverse
+    // refused near a mapped obstacle) is already in the map. Recording it at
+    // the robot's own pose excluded every nearby goal and stranded the robot.
     static bool isPhysicalFailure(const FailureClass failure_class) {
         return failure_class == FailureClass::kStallOrSlip ||
-               failure_class == FailureClass::kLocalHazard ||
-               failure_class == FailureClass::kRecoveryFailed;
+               failure_class == FailureClass::kLocalHazard;
     }
 
     void recordPhysicalHazard(const FailureClass failure_class) {
@@ -2405,12 +2400,16 @@ private:
                              {"reason", reason}});
     }
 
+    // A failed segment proves only that its own waypoint was unreachable from
+    // the previous one, so the failure is charged to that waypoint. Charging
+    // the final goal blacklisted goals Nav2 was never asked to reach.
     void recordValidationFailure(const FailureClass failure_class) {
         if (!nav2_validation_blacklist_enabled_ ||
-            !validation_final_candidate_) {
+            validation_segment_index_ >= validation_route_.size()) {
             return;
         }
-        recordGoalFailure(validation_final_candidate_->goal_xy, failure_class);
+        recordGoalFailure(validation_route_[validation_segment_index_].xy,
+                          failure_class);
     }
 
     void recordGoalFailure(const WorldPoint& goal_xy,
@@ -2462,8 +2461,7 @@ private:
              {"wall_clearance", rounded(candidate.wall_clearance)},
              {"heading_delta", rounded(candidate.heading_delta)},
              {"reachable", candidate.reachable},
-             {"soft_reachable", candidate.soft_reachable},
-             {"approach_goal_xy", pointJson(candidate.approach_xy)}});
+             {"soft_reachable", candidate.soft_reachable}});
     }
 
     void publishNoCandidateEvent(const FrontierCounts& counts,
@@ -2666,7 +2664,10 @@ private:
             return;
         }
         ++consecutive_reverse_blocked_;
-        if (consecutive_reverse_blocked_ >= kReverseBlockedBacktraceThreshold) {
+        // == not >=: the bridge streams one event per blocked command (20 Hz),
+        // and during a forward escape startRecoveryTree() is a no-op, so >=
+        // re-marked the frontier unsafe on every event (144/min on the car).
+        if (consecutive_reverse_blocked_ == kReverseBlockedBacktraceThreshold) {
             // Rear is confirmed blocked by costmap for several ticks in a
             // row.  Route into the recovery tree instead of blacklisting
             // immediately: reobserve + small-rotation gives the depth camera

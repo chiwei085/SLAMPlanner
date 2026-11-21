@@ -41,6 +41,8 @@ def generate_launch_description():
         "wait_for_transform": 1.0,
         "publish_tf": True,
         "Reg/Strategy": "0",
+        # Multi-camera PnP needs OpenGV (not in this RTAB-Map build): dual uses 3D-3D.
+        "Vis/EstimationType": PythonExpression(["'1' if '", LaunchConfiguration("camera_mode"), "' == 'astra' else '0'"]),
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",
         "RGBD/NeighborLinkRefining": "True",

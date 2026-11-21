@@ -90,6 +90,116 @@ ALC state machine should not remain stuck. If loop-closure attempts are often
 reported as failed, provide a tuned Nav2 YAML through the launch
 `nav2_params_file` argument.
 
+## RealSense D455 setup (RSUSB)
+
+The packaged librealsense V4L2 backend reported `No RealSense devices were
+found!` on this Jetson. Rebuilding **the same SDK version** with the RSUSB
+backend and loading that library into the packaged ROS driver enabled the
+D455. Reducing FPS alone did not fix discovery. RSUSB uses libusb rather than
+the kernel V4L2 capture backend.
+
+Verified on 2026-11-18 from the installed packages, SDK CMake cache, and
+successful driver/RGB-D check logs in `~/realsense-check/`:
+
+| Component | Verified configuration |
+| --- | --- |
+| Host | Ubuntu 22.04.5, aarch64; Jetson Linux L4T 36.4.3; kernel `5.15.148-tegra` |
+| ROS | Humble |
+| ROS driver | `realsense2_camera` **4.58.3** (`ros-humble-realsense2-camera` package `4.58.3-1jammy.20260804.190440`) |
+| Driver messages | `ros-humble-realsense2-camera-msgs` package `4.58.3-1jammy.20260720.173829` |
+| Packaged SDK | `ros-humble-librealsense2` **2.58.3** (package `2.58.3-1jammy.20260720.173911`); retained as the ROS dependency |
+| Runtime SDK | librealsense source tag **`v2.58.3`**, shared library built with **`FORCE_RSUSB_BACKEND=ON`** |
+| Camera | D455, firmware **5.16.0.1**, USB **3.2** as reported by the driver |
+
+### Build the replacement SDK
+
+Keep the ROS driver and SDK versions above together when reproducing this
+setup. On a fresh host, install the matching ROS packages and the SDK build
+prerequisites (`git`, `curl`, `build-essential`, `cmake`, `pkg-config`, `libusb-1.0-0-dev`,
+`libudev-dev`, `libssl-dev`), then build the SDK separately from this workspace:
+
+```bash
+mkdir -p ~/realsense-check
+cd ~/realsense-check
+git clone --branch v2.58.3 --depth 1 https://github.com/realsenseai/librealsense.git librealsense-src
+cmake -S librealsense-src -B rsusb-build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DFORCE_RSUSB_BACKEND=ON -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_WITH_NEON=ON -DBUILD_WITH_CUDA=OFF -DHWM_OVER_XU=ON \
+  -DBUILD_EXAMPLES=OFF -DBUILD_GRAPHICAL_EXAMPLES=OFF \
+  -DBUILD_GLSL_EXTENSIONS=OFF -DBUILD_TOOLS=OFF \
+  -DBUILD_UNIT_TESTS=OFF -DBUILD_PYTHON_BINDINGS=OFF \
+  -DBUILD_WITH_DDS=OFF -DCHECK_FOR_UPDATES=OFF
+cmake --build rsusb-build -j2
+sudo install -m 644 librealsense-src/config/99-realsense-libusb.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Reconnect the camera after installing the USB rules. The resulting
+`rsusb-build/Release/` must contain `librealsense2.so.2.58.3` and its
+`librealsense2.so.2.58` / `librealsense2.so` symlinks. The launch loads this
+build directly; no system-wide SDK install or ROS driver rebuild is needed.
+
+The recorded local source has one build-dependency workaround:
+`CMake/external_json.cmake` skips its downloader, and nlohmann/json **3.12.0**'s
+single header is supplied at
+`rsusb-build/third-party/json/include/nlohmann/json.hpp`. A clean upstream
+checkout uses its own downloader; if that fails, reproduce this workaround
+before configuring. From `~/realsense-check`, the equivalent steps are:
+
+```bash
+mkdir -p rsusb-build/third-party/json/include/nlohmann
+curl -fL https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp \
+  -o rsusb-build/third-party/json/include/nlohmann/json.hpp
+printf '%s\n' 'message(STATUS "Using separately downloaded nlohmann/json v3.12.0 single header")' \
+  > librealsense-src/CMake/external_json.cmake
+```
+
+Then rerun the CMake configure/build commands above. This dependency-download
+workaround does not select the camera backend.
+
+### Runtime configuration and verification
+
+`dual_rgbd_cameras.launch.py` prepends `realsense_lib_dir` (default
+`~/realsense-check/rsusb-build/Release`) to the D455 process's `LD_LIBRARY_PATH`.
+A non-default SDK location can be passed to either exploration or teleop launch
+as `realsense_lib_dir:=/absolute/path/to/Release`.
+
+The D455 configuration in that launch uses color and depth **640x480 at 15 Hz**,
+`align_depth.enable=true`, `pointcloud__neon_.enable=true`,
+`pointcloud__neon_.stream_filter=0`, and `publish_tf=true`; infrared, gyro, and
+accel streams are disabled. Keep `d455_start_delay_sec=6.0` so Astra opens its
+USB streams first. Simultaneous startup caused USB interface-claim failures
+and crashes; the D455 node also respawns after 3 s if it exits.
+
+Check library resolution without opening the camera:
+
+```bash
+source /opt/ros/humble/setup.bash
+LD_LIBRARY_PATH="$HOME/realsense-check/rsusb-build/Release:${LD_LIBRARY_PATH:-}" \
+  ldd /opt/ros/humble/lib/librealsense2_camera.so | grep 'librealsense2.so'
+```
+
+The resolved path must point into `rsusb-build/Release/`, rather than
+`/opt/ros/humble/lib/aarch64-linux-gnu/`. Driver startup should report
+`RealSense ROS v4.58.3`, `Built with LibRealSense v2.58.3`, and
+`Running with LibRealSense v2.58.3`. **The version log alone cannot distinguish
+the two backends**, because both SDK builds have the same version.
+
+After starting the normal launch, check that all three image streams arrive:
+
+```bash
+ros2 topic hz /realsense/d455/color/image_raw
+ros2 topic hz /realsense/d455/depth/image_rect_raw
+ros2 topic hz /realsense/d455/aligned_depth_to_color/image_raw
+```
+
+Run each check separately. The original successful check received about
+14.3–14.5 FPS on all three streams with nonzero depth values (`result.json`).
+RSUSB still logged occasional libusb control-transfer warnings, so device
+discovery alone is insufficient: confirm continuing RGB-D delivery.
+
 ## Run
 
 Build this overlay together with the ALC planner:

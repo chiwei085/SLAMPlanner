@@ -134,6 +134,15 @@ FootprintSafetyStatus footprintSafetyStatus(
             if (body_x < -rear || body_x > front) {
                 continue;
             }
+            // Only the strip the motion will enter matters. Cells under the
+            // body are where the robot already is: counting them let an
+            // inflated obstacle overlapping the body (a chair right in front,
+            // inside the cameras' minimum range) veto backing away from it,
+            // and the robot sat boxed in for 82 s on the real car.
+            if (body_x >= -(rear - extensions.rear_m) &&
+                body_x <= front - extensions.front_m) {
+                continue;
+            }
             if (std::abs(body_y) > half_width) {
                 continue;
             }
@@ -250,8 +259,10 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
 
     double steering = 0.0;
     if (curvature_limited_angular != 0.0) {
+        // angular.z is a yaw rate; a car reversing on the same wheel angle
+        // yaws the other way, so the wheel angle follows angular / linear.
         const double requested_steering =
-            curvature_limited_angular * config.steering_gain;
+            curvature_limited_angular * signOf(linear_x) * config.steering_gain;
         double steering_limit = std::abs(config.max_steering);
         if (config.max_steering_angle_rad > 0.0) {
             steering_limit = std::min(steering_limit,
@@ -301,6 +312,18 @@ void BlindReverseWindow::onEvent(const std::string& event_name,
     }
 }
 
+void FeedbackFreezeWatch::observe(const Sample& sample, const double now_sec) {
+    if (!last_ || *last_ != sample) {
+        last_ = sample;
+        last_change_sec_ = now_sec;
+    }
+}
+
+bool FeedbackFreezeWatch::frozen(const double now_sec,
+                                 const double timeout_sec) const {
+    return !last_change_sec_ || now_sec - *last_change_sec_ > timeout_sec;
+}
+
 R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
     : rclcpp::Node("yahboom_r2_cmd_vel_bridge", options),
       config_(loadConfig()) {
@@ -315,11 +338,6 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         config_.input_topic, input_qos,
         [this](const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
             onCmdVel(msg);
-        });
-    safety_stop_sub_ = create_subscription<std_msgs::msg::Bool>(
-        config_.safety_stop_topic, rclcpp::QoS{rclcpp::KeepLast(1)},
-        [this](const std_msgs::msg::Bool::ConstSharedPtr& message) {
-            safety_stop_active_ = message->data;
         });
     idle_stop_timer_ = create_wall_timer(100ms, [this]() {
         if (!last_input_time_ || stopping_) {
@@ -353,6 +371,17 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
                             was_allowed ? "blocked again" : "ALLOWED (blind)");
             }
         });
+    if (!config_.feedback_imu_topic.empty()) {
+        feedback_imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+            config_.feedback_imu_topic, rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::Imu::ConstSharedPtr& m) {
+                feedback_watch_.observe(
+                    {m->linear_acceleration.x, m->linear_acceleration.y,
+                     m->linear_acceleration.z, m->angular_velocity.x,
+                     m->angular_velocity.y, m->angular_velocity.z},
+                    get_clock()->now().seconds());
+            });
+    }
     const bool costmap_safety_enabled =
         config_.reverse_safety_enabled ||
         config_.stationary_arc_requires_forward_clearance;
@@ -402,25 +431,40 @@ void R2CmdVelBridgeNode::onCmdVel(
     }
     last_input_time_ = get_clock()->now();
 
-    // safety_stop_active_ is the IMU-impact reflex from the collision safety
-    // node: halt forward motion immediately (the impact already happened) but
-    // keep reverse available so recovery can back away from whatever was hit.
-    geometry_msgs::msg::Twist command = *msg;
-    if (safety_stop_active_ && command.linear.x > 0.0) {
-        command.linear.x = 0.0;
+    if (feedback_imu_sub_) {
+        const bool frozen = feedback_watch_.frozen(
+            last_input_time_->seconds(), config_.feedback_frozen_timeout_sec);
+        if (frozen != feedback_frozen_) {
+            feedback_frozen_ = frozen;
+            publishPlannerEvent(frozen ? "chassis_feedback_frozen"
+                                       : "chassis_feedback_recovered",
+                                "imu_raw_content");
+            RCLCPP_ERROR_EXPRESSION(
+                get_logger(), frozen,
+                "chassis IMU frozen: blocking all motion (driver serial "
+                "reader dead or port shared?)");
+        }
+        if (frozen) {
+            const geometry_msgs::msg::Twist stop;
+            publisher_->publish(stop);
+            last_output_ = stop;
+            has_last_output_ = true;
+            last_output_time_ = *last_input_time_;
+            return;
+        }
     }
 
+    const geometry_msgs::msg::Twist& command = *msg;
     const double requested_linear =
         applyDeadband(command.linear.x, config_.linear_deadband);
     const double requested_angular =
         applyDeadband(command.angular.z, config_.angular_deadband);
-    const bool stationary_arc_command =
-        requested_linear == 0.0 && requested_angular != 0.0 &&
-        config_.arc_turn_when_stationary && !safety_stop_active_;
+    const bool stationary_arc_command = requested_linear == 0.0 &&
+                                        requested_angular != 0.0 &&
+                                        config_.arc_turn_when_stationary;
 
-    publisher_->publish(
-        limitRate(convertNavTwistToR2(command, config_, !safety_stop_active_),
-                  stationary_arc_command));
+    publisher_->publish(limitRate(convertNavTwistToR2(command, config_),
+                                  stationary_arc_command));
 }
 
 geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(

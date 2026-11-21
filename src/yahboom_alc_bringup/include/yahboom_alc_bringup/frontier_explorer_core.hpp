@@ -26,7 +26,6 @@ struct FrontierConfig
     double frontier_size_weight = 0.02;
     double unreachable_goal_penalty = 3.0;
     double soft_unreachable_penalty = 1.5;
-    double approach_offset_m = 0.4;
     double goal_update_distance = 0.5;
     double goal_publish_period = 3.0;
     double footprint_front_m = 0.19;
@@ -217,8 +216,6 @@ struct FrontierCandidate
     bool is_coverage = false;
     bool reachable = false;
     bool soft_reachable = false;
-    WorldPoint approach_xy;
-    double approach_yaw = 0.0;
     double unknown_overlap_ratio = 0.0;
     double wall_clearance = 0.0;
     double heading_delta = 0.0;
@@ -390,8 +387,6 @@ public:
     WorldPoint mapToWorldUnchecked(int mx, int my) const;
     std::optional<Cell> worldToMap(double wx, double wy) const;
     FootprintGeometry footprintGeometry();
-    WorldPoint approachPointForPath(const std::vector<Cell>& path,
-                                    const WorldPoint& goal_xy) const;
 
 private:
     std::vector<Cell> reconstructPath(const std::vector<int>& parent,

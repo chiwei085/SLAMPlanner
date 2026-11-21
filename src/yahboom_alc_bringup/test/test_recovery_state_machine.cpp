@@ -55,16 +55,12 @@ TEST(RecoveryStateMachine, RearLatchRequiresTimeAndForwardDisplacement) {
     EXPECT_FALSE(recovery.noteForwardDisplacement(0.01, 24.9));
     EXPECT_TRUE(recovery.noteForwardDisplacement(0.01, 25.0));
     EXPECT_FALSE(recovery.rearBlockedLatchActive());
-}
 
-TEST(RecoveryStateMachine, RearLatchCanSkipReversePulseDecision) {
-    RecoveryStateMachine recovery(testConfig());
-
-    recovery.latchRearBlocked(1.0);
-    recovery.advanceToReversePulse();
-
-    EXPECT_EQ(recovery.stage(), RecoveryStage::kReversePulse);
+    recovery.latchRearBlocked(30.0);
+    EXPECT_FALSE(recovery.noteForwardDisplacement(0.24, 45.0));
     EXPECT_TRUE(recovery.rearBlockedLatchActive());
+    EXPECT_TRUE(recovery.noteForwardDisplacement(0.02, 45.1));
+    EXPECT_FALSE(recovery.rearBlockedLatchActive());
 }
 
 TEST(RecoveryStateMachine, ResetClearsRearBlockedLatch) {

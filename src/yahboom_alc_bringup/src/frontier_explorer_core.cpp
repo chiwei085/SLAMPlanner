@@ -403,8 +403,6 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
         candidate.visible_unknown = visible_unknown;
         candidate.reachable = reachable;
         candidate.soft_reachable = soft_reachable;
-        candidate.approach_xy = approachPointForPath(*path, goal_xy);
-        candidate.approach_yaw = yawBetween(robot_xy, candidate.approach_xy);
         candidate.unknown_overlap_ratio = unknown_ratio;
         candidate.wall_clearance = obstacle.wall_clearance;
         candidate.heading_delta = heading_delta;
@@ -1520,30 +1518,6 @@ std::optional<Cell> FrontierExplorerCore::worldToMap(const double wx,
         return std::nullopt;
     }
     return Cell{mx, my};
-}
-
-WorldPoint FrontierExplorerCore::approachPointForPath(
-    const std::vector<Cell>& path, const WorldPoint& goal_xy) const {
-    if (path.empty() || config_.approach_offset_m <= 0.0) {
-        return goal_xy;
-    }
-
-    double remaining = config_.approach_offset_m;
-    WorldPoint previous = goal_xy;
-    for (std::size_t i = path.size(); i-- > 0;) {
-        const auto current = mapToWorldUnchecked(path[i].first, path[i].second);
-        const double segment = std::hypot(previous.first - current.first,
-                                          previous.second - current.second);
-        if (segment >= remaining && segment > 1e-9) {
-            const double ratio = remaining / segment;
-            return {
-                previous.first + (current.first - previous.first) * ratio,
-                previous.second + (current.second - previous.second) * ratio};
-        }
-        remaining -= segment;
-        previous = current;
-    }
-    return mapToWorldUnchecked(path.front().first, path.front().second);
 }
 
 FootprintGeometry FrontierExplorerCore::footprintGeometry() {

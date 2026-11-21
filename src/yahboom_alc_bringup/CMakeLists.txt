@@ -44,7 +44,6 @@ add_library(yahboom_alc_bringup_lib
   src/frontier_explorer_core.cpp
   src/planner_event.cpp
   src/planner_runtime_logger.cpp
-  src/r2_collision_safety_core.cpp
   src/r2_cmd_vel_bridge.cpp
   src/r2_stall_detector_core.cpp
   src/recent_free_costmap_history.cpp
@@ -189,20 +188,6 @@ ament_target_dependencies(rtabmap_map_tf_relay
   tf2_ros
 )
 
-add_executable(r2_collision_safety_gate
-  src/r2_collision_safety.cpp
-)
-target_link_libraries(r2_collision_safety_gate
-  yahboom_alc_bringup_lib
-)
-ament_target_dependencies(r2_collision_safety_gate
-  geometry_msgs
-  rclcpp
-  sensor_msgs
-  std_msgs
-  tf2
-  tf2_ros
-)
 target_link_libraries(r2_stall_detector
   yahboom_alc_bringup_lib
 )
@@ -226,7 +211,6 @@ install(
     r2_safe_driver
     r2_safety_stop
     r2_stall_detector
-    r2_collision_safety_gate
     r2_planner_server
     rtabmap_map_tf_relay
     yahboom_r2_cmd_vel_bridge
@@ -304,15 +288,6 @@ if(BUILD_TESTING)
     test/test_r2_stall_detector.cpp
   )
 
-  ament_add_gtest(test_r2_collision_safety
-    test/test_r2_collision_safety.cpp
-  )
-  target_link_libraries(test_r2_collision_safety
-    yahboom_alc_bringup_lib
-  )
-  ament_target_dependencies(test_r2_collision_safety
-    geometry_msgs
-  )
   target_link_libraries(test_r2_stall_detector
     yahboom_alc_bringup_lib
   )
@@ -322,14 +297,6 @@ if(BUILD_TESTING)
     rclcpp
     sensor_msgs
   )
-
-  ament_add_gtest(test_rtabmap_map_tf_relay
-    test/test_rtabmap_map_tf_relay.cpp
-  )
-  ament_target_dependencies(test_rtabmap_map_tf_relay
-    tf2
-  )
-
 endif()
 
 ament_package()

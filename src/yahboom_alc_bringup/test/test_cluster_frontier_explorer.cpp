@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -388,22 +389,6 @@ TEST(ClusterFrontierExplorer, CoverageRevisitFiresOnlyWhenEnabled) {
     EXPECT_GT(with.counts.coverage_candidates, 0);
 }
 
-TEST(ClusterFrontierExplorer, ApproachPoseStaysBeforeFrontierGoal) {
-    auto grid = buildGrid(20, 10, 0.1);
-    auto core = makeCore(grid);
-    auto config = core.config();
-    config.approach_offset_m = 0.4;
-    core.setConfig(config);
-    const std::vector<Cell> path{{2, 5}, {10, 5}};
-    const auto goal_xy = core.mapToWorld(10, 5);
-
-    const auto approach = core.approachPointForPath(path, goal_xy);
-
-    EXPECT_LT(approach.first, goal_xy.first);
-    EXPECT_NEAR(goal_xy.first - approach.first, 0.4, 1e-6);
-    EXPECT_NEAR(approach.second, goal_xy.second, 1e-6);
-}
-
 TEST(ClusterFrontierExplorer, FailureWeightAcceleratesBlacklist) {
     auto grid = buildGrid(20, 10, 0.1);
     auto core = makeCore(grid);
@@ -570,11 +555,15 @@ TEST(ClusterFrontierExplorer, GridPathDoesNotTraverseUnknownCells) {
 }
 
 TEST(ClusterFrontierExplorer, SweptFootprintRejectsPathThatClipsWall) {
-    auto grid = buildGrid(12, 12, 0.05);
-    setCell(grid, 6, 6, 100);
+    auto grid = buildGrid(30, 20, 0.05);
     auto core = makeCore(grid);
+    const std::vector<Cell> path{{6, 10}, {22, 10}};
+    ASSERT_TRUE(core.sweptPathUnknownRatio(path));
 
-    EXPECT_FALSE(core.sweptPathUnknownRatio({{2, 6}, {9, 6}}));
+    // The obstacle lies between the endpoint footprints, inside the swept path.
+    setCell(grid, 14, 10, 100);
+    core.setMap(grid);
+    EXPECT_FALSE(core.sweptPathUnknownRatio(path));
 }
 
 TEST(ClusterFrontierExplorer, FailedGoalBlacklistPreventsReselection) {
@@ -692,7 +681,10 @@ TEST(ClusterFrontierExplorer, ShouldPublishGoalHonorsDistanceAndPeriod) {
     EXPECT_TRUE(core.shouldPublishGoal(goal, 0.0));
     core.noteGoalPublished(goal, 0.0, 0.0);
     EXPECT_FALSE(core.shouldPublishGoal(goal, 1.0));
-    EXPECT_TRUE(core.shouldPublishGoal(goal, 4.0));
+    EXPECT_FALSE(core.shouldPublishGoal({goal.first + 0.49, goal.second}, 1.0));
+    EXPECT_TRUE(core.shouldPublishGoal({goal.first + 0.51, goal.second}, 1.0));
+    EXPECT_FALSE(core.shouldPublishGoal(goal, 2.99));
+    EXPECT_TRUE(core.shouldPublishGoal(goal, 3.0));
 }
 
 TEST(ClusterFrontierExplorer, NoCandidateCountsRemainCompact) {
@@ -769,11 +761,9 @@ TEST(ClusterFrontierExplorer, NewUnknownRatioThresholdFindsCandidates) {
 
     const auto result = core.findCandidates(core.mapToWorld(8, 10), 0.0);
 
-    EXPECT_FALSE(result.candidates.empty());
+    ASSERT_FALSE(result.candidates.empty());
     EXPECT_GT(result.counts.clusters, 0);
-    if (!result.candidates.empty()) {
-        EXPECT_GE(result.candidates.front().path_length, 0.45);
-    }
+    EXPECT_GE(result.candidates.front().path_length, 0.45);
 }
 
 TEST(ClusterFrontierExplorer, ProjectsPointOntoBfsPolylineInWorldMeters) {
@@ -943,14 +933,32 @@ TEST(ClusterFrontierExplorer, RelaxationDisabledKeepsStrictThreshold) {
 
 TEST(ClusterFrontierExplorer, StrictSuccessResetsRelaxation) {
     auto core = makeRelaxableCore(10.0);
-    auto config = core.config();
-    config.min_frontier_size = 4;
-    core.setConfig(config);
     const auto robot_xy = core.mapToWorld(2, 5);
+    ASSERT_TRUE(core.findCandidates(robot_xy, 100.0).candidates.empty());
+    const auto relaxed = core.findCandidates(robot_xy, 110.0);
+    ASSERT_TRUE(relaxed.relaxed);
+    ASSERT_FALSE(relaxed.candidates.empty());
 
-    const auto strict = core.findCandidates(robot_xy, 100.0, 0.0);
+    // A longer frontier passes the strict cluster-size limit without resetting
+    // config.
+    auto grid = buildGrid(20, 70, 0.1);
+    for (int y = 0; y < 70; ++y) {
+        for (int x = 12; x < 20; ++x) {
+            setCell(grid, x, y, -1);
+        }
+    }
+    core.setMap(grid);
+    const auto strict = core.findCandidates(robot_xy, 111.0);
     EXPECT_FALSE(strict.relaxed);
-    EXPECT_FALSE(strict.candidates.empty());
+    ASSERT_FALSE(strict.candidates.empty());
+
+    core.setMap(buildHalfUnknownGrid());
+    const auto waiting = core.findCandidates(robot_xy, 112.0);
+    EXPECT_TRUE(waiting.candidates.empty());
+    EXPECT_FALSE(waiting.relaxed);
+    const auto relaxed_again = core.findCandidates(robot_xy, 121.0);
+    EXPECT_TRUE(relaxed_again.relaxed);
+    EXPECT_FALSE(relaxed_again.candidates.empty());
 }
 
 TEST(ClusterFrontierExplorer, ClearestEscapeDirectionAvoidsBlockedForwardRay) {
@@ -1113,10 +1121,7 @@ TEST(ClusterFrontierExplorer, AlignmentGraceExpiresAfterMaxGrace) {
 // ---------------------------------------------------------------------------
 
 TEST(ClusterFrontierExplorer, CoverageBlendAddsToMainPool) {
-    // A map where all frontier cells have been cleared (all known-free) but a
-    // large unvisited region exists. With coverage_blend_weight > 0 the
-    // coverage candidate should enter the main pool even when frontier
-    // candidates also exist.
+    // Frontier and coverage candidates must coexist when blending is enabled.
     auto grid = buildGrid(40, 20, 0.1);
     // Mark a frontier cluster at column 10 (x=10, y=5..14)
     for (int y = 5; y < 15; ++y) {
@@ -1142,7 +1147,9 @@ TEST(ClusterFrontierExplorer, CoverageBlendAddsToMainPool) {
 
     // With blend enabled we should get BOTH frontier and coverage candidates
     EXPECT_GT(result.counts.coverage_candidates, 0);
-    EXPECT_FALSE(result.candidates.empty());
+    ASSERT_FALSE(result.candidates.empty());
+    EXPECT_TRUE(std::any_of(result.candidates.begin(), result.candidates.end(),
+                            [](const auto& c) { return !c.is_coverage; }));
     const bool has_coverage =
         std::any_of(result.candidates.begin(), result.candidates.end(),
                     [](const auto& c) { return c.is_coverage; });
@@ -1172,48 +1179,49 @@ TEST(ClusterFrontierExplorer, CoverageBlendZeroKeepsFallbackBehavior) {
 
     // With blend disabled, coverage candidates must not appear alongside
     // frontier candidates.
+    ASSERT_FALSE(result.candidates.empty());
     const bool has_coverage =
         std::any_of(result.candidates.begin(), result.candidates.end(),
                     [](const auto& c) { return c.is_coverage; });
     EXPECT_FALSE(has_coverage);
 }
 
-TEST(ClusterFrontierExplorer, CoverageBlendScoreBoostWins) {
-    // Verify the blend bonus is correctly subtracted from the score.
+TEST(ClusterFrontierExplorer, CoverageBlendWeightLowersCoverageScoresOnly) {
     auto grid = buildGrid(40, 20, 0.1);
-    // Single frontier cell far away
     setCell(grid, 30, 10, -1);
-    FrontierExplorerCore core = makeCore(grid);
+    auto core = makeCore(grid);
     auto config = core.config();
     config.min_frontier_size = 1;
     config.coverage_revisit_enabled = true;
-    config.coverage_blend_weight = 0.0;
+    config.coverage_blend_weight = 1.0;
     config.coverage_proximity_m = 0.3;
     config.coverage_sample_spacing_m = 2.0;
     config.coverage_max_targets = 3;
     config.max_frontier_distance = 10.0;
     core.setConfig(config);
+    const auto robot_xy = core.mapToWorld(2, 10);
+    const auto before = core.findCandidates(robot_xy, 0.0);
+    ASSERT_TRUE(std::any_of(before.candidates.begin(), before.candidates.end(),
+                            [](const auto& c) { return c.is_coverage; }));
+    ASSERT_TRUE(std::any_of(before.candidates.begin(), before.candidates.end(),
+                            [](const auto& c) { return !c.is_coverage; }));
 
-    const WorldPoint robot_xy = core.mapToWorldUnchecked(2, 10);
-    core.noteRobotVisited(robot_xy);
-
-    // Without blend: only frontier candidate
-    auto result_no_blend = core.findCandidates(robot_xy, 0.0, std::nullopt);
-    const bool has_coverage_no_blend = std::any_of(
-        result_no_blend.candidates.begin(), result_no_blend.candidates.end(),
-        [](const auto& c) { return c.is_coverage; });
-    EXPECT_FALSE(has_coverage_no_blend);
-
-    // With blend enabled
     config.coverage_blend_weight = 3.0;
     core.setConfig(config);
-    // Re-register visit so isUnderObserved still finds unvisited cells
-    core.noteRobotVisited(robot_xy);
-    auto result_blend = core.findCandidates(robot_xy, 1.0, std::nullopt);
-    const bool has_coverage_blend = std::any_of(
-        result_blend.candidates.begin(), result_blend.candidates.end(),
-        [](const auto& c) { return c.is_coverage; });
-    EXPECT_TRUE(has_coverage_blend);
+    const auto after = core.findCandidates(robot_xy, 1.0);
+    ASSERT_EQ(after.candidates.size(), before.candidates.size());
+    for (const auto& candidate : before.candidates) {
+        const auto match =
+            std::find_if(after.candidates.begin(), after.candidates.end(),
+                         [&](const auto& c) {
+                             return c.goal_cell == candidate.goal_cell &&
+                                    c.is_coverage == candidate.is_coverage;
+                         });
+        ASSERT_NE(match, after.candidates.end());
+        EXPECT_NEAR(match->score,
+                    candidate.score - (candidate.is_coverage ? 2.0 : 0.0),
+                    1e-9);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,8 +1240,8 @@ TEST(ClusterFrontierExplorer, IntentionSetOnFarGoal) {
     EXPECT_FALSE(core.intention().has_value());
     core.noteGoalPublished({1.5, 1.5}, 0.0, 0.0,
                            2.0);  // path_length=2.0 > threshold
-    EXPECT_TRUE(core.intention().has_value());
-    EXPECT_DOUBLE_EQ(core.intention()->goal_xy.first, 1.5);
+    ASSERT_TRUE(core.intention().has_value());
+    EXPECT_EQ(core.intention()->goal_xy, (WorldPoint{1.5, 1.5}));
 }
 
 TEST(ClusterFrontierExplorer, IntentionNotSetOnNearGoal) {
@@ -1322,24 +1330,28 @@ TEST(ClusterFrontierExplorer, IntentionBonusLowersScoreForNearbyCandidate) {
     core.noteGoalPublished(intention_xy, 0.0, 0.0, 5.0);
     ASSERT_TRUE(core.intention().has_value());
 
-    auto result = core.findCandidates(robot_xy, 1.0, std::nullopt);
-    ASSERT_GE(result.candidates.size(), 2u);
+    const auto with_bonus = core.findCandidates(robot_xy, 1.0);
+    ASSERT_GE(with_bonus.candidates.size(), 2u);
+    config.intention_continuation_bonus = 0.0;
+    core.setConfig(config);
+    const auto without_bonus = core.findCandidates(robot_xy, 1.0);
+    ASSERT_EQ(with_bonus.candidates.size(), without_bonus.candidates.size());
 
-    // Find scores for cluster A and cluster B candidates
-    double score_near_intention = std::numeric_limits<double>::infinity();
-    double score_far_from_intention = std::numeric_limits<double>::infinity();
-    for (const auto& c : result.candidates) {
-        const double dx = c.goal_xy.first - intention_xy.first;
-        const double dy = c.goal_xy.second - intention_xy.second;
-        if (std::hypot(dx, dy) < 2.0) {
-            score_near_intention = std::min(score_near_intention, c.score);
-        }
-        else {
-            score_far_from_intention =
-                std::min(score_far_from_intention, c.score);
-        }
+    int near_count = 0;
+    int far_count = 0;
+    for (const auto& candidate : with_bonus.candidates) {
+        const auto match = std::find_if(
+            without_bonus.candidates.begin(), without_bonus.candidates.end(),
+            [&](const auto& c) { return c.goal_cell == candidate.goal_cell; });
+        ASSERT_NE(match, without_bonus.candidates.end());
+        const bool near =
+            std::hypot(candidate.goal_xy.first - intention_xy.first,
+                       candidate.goal_xy.second - intention_xy.second) <= 3.0;
+        near ? ++near_count : ++far_count;
+        EXPECT_NEAR(match->score - candidate.score, near ? 5.0 : 0.0, 1e-9);
     }
-    EXPECT_LT(score_near_intention, score_far_from_intention);
+    EXPECT_GT(near_count, 0);
+    EXPECT_GT(far_count, 0);
 }
 
 TEST(LethalCostmapCell, DetectsLethalStartCellOnly) {

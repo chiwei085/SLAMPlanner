@@ -197,7 +197,9 @@ TEST(R2CmdVelBridge, StationarySpinStaysZeroForwardWhenDisabled) {
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
 }
 
-TEST(R2CmdVelBridge, ReverseCommandClampsSteeringToTurningRadius) {
+TEST(R2CmdVelBridge, ReverseCommandFlipsSteeringAndClampsToTurningRadius) {
+    // Reversing, a negative yaw rate needs the wheels turned left (positive),
+    // as measured on the real car.
     Twist input;
     input.linear.x = -0.10;
     input.angular.z = -1.0;
@@ -205,7 +207,7 @@ TEST(R2CmdVelBridge, ReverseCommandClampsSteeringToTurningRadius) {
     const Twist output = convertNavTwistToR2(input, defaultConfig());
 
     EXPECT_NEAR(output.linear.x, -0.10, kTolerance);
-    EXPECT_NEAR(output.linear.y, -0.25, kTolerance);
+    EXPECT_NEAR(output.linear.y, 0.25, kTolerance);
 }
 
 TEST(R2CmdVelBridge, ForwardCommandClampsSteeringToTurningRadius) {
@@ -303,6 +305,21 @@ TEST(R2CmdVelBridge,
     // The grace window (100.0 + 2.0s) has fully elapsed by now_sec=103.0.
     EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, config, &history,
                                         /*now_sec=*/103.0));
+}
+
+// run_20261118_204106: face to face with a chair, its inflation reached
+// back over the robot's own body while the strip behind was free.
+TEST(R2CmdVelBridge, ReverseSafetyIgnoresCostUnderTheBody) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, 0.10, 0.10, 100);
+    setWorldCell(costmap, -0.10, 0.10, 99);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+    // The same body cells must not block the forward arc either; only the
+    // front strip does.
+    EXPECT_TRUE(isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05,
+                                                    defaultConfig()));
 }
 
 TEST(R2CmdVelBridge, ReverseSafetyBlocksSweptRearCorner) {
@@ -413,3 +430,25 @@ TEST(IdleStop, StreamsZeroOnlyDuringBurstAfterInputSilence) {
 }
 
 }  // namespace
+
+TEST(R2CmdVelBridge, FeedbackWatchFrozenBeforeFirstSample) {
+    const yahboom_alc_bringup::FeedbackFreezeWatch watch;
+    EXPECT_TRUE(watch.frozen(10.0, 0.5));
+}
+
+TEST(R2CmdVelBridge, FeedbackWatchFreezesOnRepeatedContentAtNormalRate) {
+    yahboom_alc_bringup::FeedbackFreezeWatch watch;
+    const yahboom_alc_bringup::FeedbackFreezeWatch::Sample cached{
+        0.1, 0.0, -9.8, 0.0, 0.0, 0.01};
+    // Messages keep arriving every 0.1 s, but the content never changes.
+    for (int i = 0; i <= 10; ++i) {
+        watch.observe(cached, 10.0 + 0.1 * i);
+    }
+    EXPECT_FALSE(watch.frozen(10.4, 0.5));
+    EXPECT_TRUE(watch.frozen(11.0, 0.5));
+
+    auto live = cached;
+    live[2] = -9.81;
+    watch.observe(live, 11.1);
+    EXPECT_FALSE(watch.frozen(11.2, 0.5));
+}

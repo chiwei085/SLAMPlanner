@@ -157,7 +157,6 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "soft_unreachable_penalty": 1.5,
                     "allow_unreachable_goal": False,
                     "nav2_validation_required_for_final_goal": True,
-                    "approach_offset_m": 0.4,
                     "goal_update_distance": 0.5,
                     "goal_publish_period": 3.0,
                     **ROBOT_FOOTPRINT_PARAMS,
@@ -495,6 +494,13 @@ def generate_launch_description():
         # CoreWrapper::mapToOdomMutex_ contention under Jetson load.
         "publish_tf": False,
         "Reg/Strategy": "0",
+        # Multi-camera PnP (1, the default) needs RTAB-Map built with OpenGV;
+        # this build is not, so in dual mode every visual registration failed
+        # (113 errors in 194 s, 0 refined links, 0 loop closures: map == odom).
+        # 3D-3D works for multi-camera; single-camera astra keeps PnP.
+        "Vis/EstimationType": PythonExpression(
+            ["'1' if '", camera_mode, "' == 'astra' else '0'"]
+        ),
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",
         "RGBD/NeighborLinkRefining": "True",
@@ -624,7 +630,8 @@ def generate_launch_description():
                 "planner_event_topic": "/planner/events",
                 "min_linear_speed": 0.08,
                 "enforce_min_linear_speed": True,
-                "safety_stop_topic": "/collision_safety_stop_active",
+                "feedback_imu_topic": "/imu/data_raw",
+                "feedback_frozen_timeout_sec": 0.5,
                 "max_linear_speed": 0.11,
                 "steering_gain": 1.25,
                 "max_steering": 1.25,
@@ -682,32 +689,6 @@ def generate_launch_description():
         ],
     )
 
-    # IMU-impact reflex only. Smooth depth braking is now handled by the Nav2
-    # collision monitor (slowdown + approach polygons in nav2_rgbd_params.yaml);
-    # this node watches the IMU and raises /collision_safety_stop_active + a
-    # stall_or_slip event when it detects a forward impact. It is no longer in
-    # the cmd_vel path, so the bridge reads /alc/nav_cmd_vel directly.
-    r2_collision_safety_gate = Node(
-        package="yahboom_alc_bringup",
-        executable="r2_collision_safety_gate",
-        name="r2_collision_safety_gate",
-        output="screen",
-        parameters=[
-            {
-                "input_topic": nav_cmd_vel_topic,
-                "imu_topic": "/imu/data",
-                "planner_event_topic": "/planner/events",
-                "safety_stop_topic": "/collision_safety_stop_active",
-                "command_vx_threshold_mps": 0.05,
-                "imu_stale_timeout_sec": 0.5,
-                "imu_baseline_samples": 20,
-                "imu_impact_decel_threshold_mps2": 3.0,
-                "impact_stop_hold_sec": 0.5,
-                "impact_cooldown_sec": 3.0,
-            }
-        ],
-    )
-
     r2_stall_detector = Node(
         package="yahboom_alc_bringup",
         executable="r2_stall_detector",
@@ -715,58 +696,25 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "nav_cmd_topic": nav_cmd_vel_topic,
+                # Commanded forward (driver output) but the EKF odom did not
+                # move: no camera input, see r2_stall_detector.hpp.
                 "driver_cmd_topic": driver_cmd_vel_topic,
-                "wheel_odom_topic": "/odom",
+                "odom_topic": "/odom",
                 "imu_topic": "/imu/data",
-                # dual: low D455 -- the high Astra cannot see the floor right
-                # in front. astra: the original low Astra.
-                "depth_image_topic": PythonExpression(
-                    [
-                        "'/camera/depth/image_raw' if '",
-                        camera_mode,
-                        "' == 'astra' else '/realsense/d455/depth/image_rect_raw'",
-                    ]
-                ),
                 "planner_event_topic": "/planner/events",
-                "slam_global_frame": "map",
-                "robot_frame": "base_footprint",
-                "forward_command_min_duration_sec": 0.5,
-                "forward_no_motion_check_sec": 0.8,
-                "command_vx_threshold_mps": 0.08,
-                "wheel_odom_delta_threshold_m": 0.05,
-                "slam_delta_max_m": 0.02,
+                "command_vx_threshold_mps": 0.05,
+                # Judge a stall only after the driver commands add up to 6 cm
+                # (3x the ~2 cm pose noise); moving < 30% of that is stuck.
+                # From rest the chassis itself takes up to ~1.45 s to move
+                # 1 cm (20 bridge-less free-floor starts, 2026-11-21), so the
+                # first 1.5 s of commands are not counted.
+                "min_expected_motion_m": 0.06,
+                "stuck_motion_ratio": 0.3,
+                "start_response_delay_sec": 1.5,
                 "imu_yaw_rate_threshold_radps": 0.08,
-                "depth_obstacle_enabled": True,
-                "depth_roi_center_width_ratio": 0.20,
-                "depth_roi_center_height_ratio": 0.50,
-                "depth_min_valid_m": 0.20,
-                "depth_forward_obstacle_range_m": 0.60,
-                "depth_min_obstacle_pixels": 5,
-                "depth_stale_timeout_sec": 0.5,
                 "stale_observation_timeout_sec": 0.5,
                 "zero_burst_duration_sec": 0.5,
-                "zero_burst_rate_hz": 30.0,
                 "retrigger_cooldown_sec": 3.0,
-                "depth_blind_slam_override_m": 0.010,
-                # Camera-to-bumper distance. dual: footprint front - D455
-                # mount x (d455_x is declared by dual_rgbd_cameras.launch.py,
-                # included before this node; empty = its 0.099 default).
-                # astra: the original low-mount value.
-                "camera_front_offset_m": ParameterValue(
-                    PythonExpression(
-                        [
-                            "0.10 if '",
-                            camera_mode,
-                            "' == 'astra' else ",
-                            str(ROBOT_FOOTPRINT_PARAMS["footprint_front_m"]),
-                            " - float('",
-                            LaunchConfiguration("d455_x"),
-                            "' or '0.099')",
-                        ]
-                    ),
-                    value_type=float,
-                ),
             }
         ],
     )
@@ -805,15 +753,11 @@ def generate_launch_description():
                         },
                         "stall_detector": {
                             "enabled": True,
-                            "forward_command_min_duration_sec": 0.5,
-                            "command_vx_threshold_mps": 0.08,
-                            "wheel_odom_delta_threshold_m": 0.05,
-                            "slam_delta_max_m": 0.02,
-                            "depth_blind_slam_override_m": 0.010,
-                            "depth_camera": "d455 (camera_mode=dual) / astra",
-                            "camera_front_offset_m": (
-                                "dual: footprint_front_m - d455_x; astra: 0.10"
-                            ),
+                            "input": "driver cmd vs EKF odom + gyro, no camera",
+                            "command_vx_threshold_mps": 0.05,
+                            "min_expected_motion_m": 0.06,
+                            "stuck_motion_ratio": 0.3,
+                            "start_response_delay_sec": 1.5,
                         },
                         "recovery": {
                             "clearance_backup_m": 0.30,
@@ -1048,7 +992,6 @@ def generate_launch_description():
                 ],
             ),
             TimerAction(period=nav2_start_delay_sec, actions=[nav2]),
-            r2_collision_safety_gate,
             r2_bridge,
             r2_stall_detector,
             r2_safety_stop,
