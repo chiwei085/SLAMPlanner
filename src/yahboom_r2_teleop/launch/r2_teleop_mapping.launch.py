@@ -1,13 +1,17 @@
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable, TimerAction
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PythonExpression
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+sys.path.insert(0, os.path.join(get_package_share_directory("yahboom_alc_bringup"), "launch"))
+import rtabmap_common  # noqa: E402  (shared with autonomous exploration)
 
 
 def generate_launch_description():
@@ -24,44 +28,13 @@ def generate_launch_description():
         Command(["xacro ", LaunchConfiguration("model")]), value_type=str
     )
 
-    common_rtabmap_parameters = {
-        "frame_id": "base_footprint",
-        "use_sim_time": use_sim_time,
-        "subscribe_rgbd": True,
-        # dual: 0 = /rgbd_images (rgbdx_sync); astra: 1 = /astra/rgbd_image.
-        "rgbd_cameras": ParameterValue(
-            PythonExpression(["1 if '", LaunchConfiguration("camera_mode"), "' == 'astra' else 0"]),
-            value_type=int,
+    # Same RTAB-Map + EKF setup as autonomous exploration (rtabmap_common).
+    rtabmap_mapping, rtabmap_localization = rtabmap_common.rtabmap_nodes(
+        rtabmap_common.rtabmap_parameters(
+            LaunchConfiguration("camera_mode"), qos, use_sim_time, publish_tf=True
         ),
-        "odom_sensor_sync": True,
-        "subscribe_scan": False,
-        "subscribe_imu": True,
-        "qos_image": qos,
-        "qos_imu": qos,
-        "wait_for_transform": 1.0,
-        "publish_tf": True,
-        "Reg/Strategy": "0",
-        # Multi-camera PnP needs OpenGV (not in this RTAB-Map build): dual uses 3D-3D.
-        "Vis/EstimationType": PythonExpression(["'1' if '", LaunchConfiguration("camera_mode"), "' == 'astra' else '0'"]),
-        "Reg/Force3DoF": "true",
-        "RGBD/CreateOccupancyGrid": "true",
-        "RGBD/NeighborLinkRefining": "True",
-        "Grid/3D": "false",
-        "Grid/NormalsSegmentation": "false",
-        "Grid/RayTracing": "true",
-        "Grid/RangeMin": "0.25",
-        "Grid/RangeMax": "5.0",
-        "Grid/MaxGroundHeight": "0.08",
-        "Grid/MaxObstacleHeight": "1.2",
-        "Grid/FootprintRadius": "0.25",
-        "Optimizer/GravitySigma": "0.3",
-    }
-    rtabmap_remappings = [
-        ("rgbd_images", "/rgbd_images"),  # camera_mode:=dual
-        ("rgbd_image", "/astra/rgbd_image"),  # camera_mode:=astra
-        ("odom", "/odom"),
-        ("imu", "/imu/data"),
-    ]
+        localization,
+    )
 
     # camera_mode:=dual (high Astra + low D455) or astra (original low Astra).
     cameras = IncludeLaunchDescription(
@@ -71,17 +44,6 @@ def generate_launch_description():
         launch_arguments={
             "sync_start_delay_sec": LaunchConfiguration("tf_warmup_delay_sec"),
         }.items(),
-    )
-    rtabmap_mapping = Node(
-        package="rtabmap_slam", executable="rtabmap", output="screen",
-        condition=UnlessCondition(localization), parameters=[common_rtabmap_parameters],
-        remappings=rtabmap_remappings, arguments=["-d"],
-    )
-    rtabmap_localization = Node(
-        package="rtabmap_slam", executable="rtabmap", output="screen",
-        condition=IfCondition(localization),
-        parameters=[common_rtabmap_parameters, {"Mem/IncrementalMemory": "False", "Mem/InitWMWithAllNodes": "True"}],
-        remappings=rtabmap_remappings,
     )
 
     return LaunchDescription([
@@ -104,7 +66,7 @@ def generate_launch_description():
         Node(package="yahboomcar_bringup", executable="Ackman_driver_R2", output="screen"),
         Node(package="yahboomcar_base_node", executable="base_node_R2", output="screen", parameters=[{"pub_odom_tf": False, "linear_scale_x": 1.0, "linear_scale_y": 1.0}]),
         Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node", output="screen", parameters=[os.path.join(bringup_share, "param", "imu_filter_param.yaml")]),
-        Node(package="robot_localization", executable="ekf_node", name="ekf_filter_node", output="screen", parameters=[os.path.join(share, "params", "ekf_r2.yaml")], remappings=[("/odometry/filtered", "/odom")]),
+        Node(package="robot_localization", executable="ekf_node", name="ekf_filter_node", output="screen", prefix=rtabmap_common.EKF_LAUNCH_PREFIX, parameters=[rtabmap_common.ekf_params_file()], remappings=[("/odometry/filtered", "/odom")]),
         Node(package="joy", executable="joy_node", output="screen", parameters=[{"device_id": ParameterValue(LaunchConfiguration("joy_device_id"), value_type=int), "deadzone": 0.1, "autorepeat_rate": 30.0}]),
         Node(package="yahboom_r2_teleop", executable="r2_joy_teleop", output="screen", parameters=[{"throttle_axis": ParameterValue(LaunchConfiguration("throttle_axis"), value_type=int), "steering_axis": ParameterValue(LaunchConfiguration("steering_axis"), value_type=int), "enable_button": ParameterValue(LaunchConfiguration("enable_button"), value_type=int)}]),
         Node(package="rviz2", executable="rviz2", condition=IfCondition(rviz), arguments=["-d", LaunchConfiguration("rviz_config")], output="screen"),

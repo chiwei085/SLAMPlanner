@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -19,6 +20,9 @@ from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rtabmap_common  # noqa: E402  (sibling module, see its docstring)
 
 # Single source for the R2 chassis footprint used by both the frontier
 # explorer and the cmd_vel bridge. Keep in sync with the footprint string in
@@ -395,9 +399,7 @@ def generate_launch_description():
         name="ekf_filter_node",
         output="screen",
         prefix=ekf_launch_prefix,
-        parameters=[
-            os.path.join(yahboom_alc_share, "params", "ekf_r2.yaml")
-        ],
+        parameters=[rtabmap_common.ekf_params_file()],
         remappings=[("/odometry/filtered", "/odom")],
     )
 
@@ -470,87 +472,12 @@ def generate_launch_description():
 
     tf_warmup_delay_sec = LaunchConfiguration("tf_warmup_delay_sec")
 
-    rtabmap_parameters = {
-        "frame_id": "base_footprint",
-        "use_sim_time": use_sim_time,
-        "subscribe_rgbd": True,
-        # dual: 0 = one RGBDImages topic (/rgbd_images from rgbdx_sync).
-        # astra: 1 = a single RGBDImage topic (/astra/rgbd_image).
-        "rgbd_cameras": ParameterValue(
-            PythonExpression(["1 if '", camera_mode, "' == 'astra' else 0"]),
-            value_type=int,
+    # Shared with teleop mapping so both modes build maps the same way.
+    rtabmap_mapping, rtabmap_localization = rtabmap_common.rtabmap_nodes(
+        rtabmap_common.rtabmap_parameters(
+            camera_mode, qos, use_sim_time, publish_tf=False
         ),
-        # Motion-compensate each camera's frame by odom between its stamp and
-        # the node stamp: Astra (30 Hz) and D455 (15 Hz) are not hw-synced.
-        "odom_sensor_sync": True,
-        "subscribe_scan": False,
-        "use_action_for_goal": True,
-        "qos_image": qos,
-        "qos_imu": qos,
-        "wait_for_transform": 1.0,
-        # publish_tf is disabled: rtabmap_map_tf_relay handles map→odom TF at 50 Hz
-        # using localization_pose (published from RTAB-Map's SLAM callback, outside
-        # the graph-optimization mutex). This breaks the 1–2 s TF stall caused by
-        # CoreWrapper::mapToOdomMutex_ contention under Jetson load.
-        "publish_tf": False,
-        "Reg/Strategy": "0",
-        # Multi-camera PnP (1, the default) needs RTAB-Map built with OpenGV;
-        # this build is not, so in dual mode every visual registration failed
-        # (113 errors in 194 s, 0 refined links, 0 loop closures: map == odom).
-        # 3D-3D works for multi-camera; single-camera astra keeps PnP.
-        "Vis/EstimationType": PythonExpression(
-            ["'1' if '", camera_mode, "' == 'astra' else '0'"]
-        ),
-        "Reg/Force3DoF": "true",
-        "RGBD/CreateOccupancyGrid": "true",
-        "RGBD/NeighborLinkRefining": "True",
-        "Grid/3D": "false",
-        "Grid/NormalsSegmentation": "false",
-        "Grid/RayTracing": "true",
-        "Grid/RangeMin": "0.25",
-        "Grid/RangeMax": "5.0",
-        "Grid/MaxGroundHeight": "0.08",
-        "Grid/MaxObstacleHeight": "1.2",
-        # Robot footprint radius used to force-clear cells the robot physically
-        # occupies. Any pose-graph node whose footprint overlaps a cell marks it
-        # as free unconditionally — the strongest possible clearing evidence since
-        # it requires no sensor. Diagonal half-size of R2 body (0.19 front +
-        # 0.115 half-width ≈ 0.22 m diagonal) plus a small margin.
-        "Grid/FootprintRadius": "0.25",
-        "subscribe_imu": True,
-        "Optimizer/GravitySigma": "0.3",
-    }
-
-    rtabmap_remappings = [
-        ("rgbd_images", "/rgbd_images"),  # camera_mode:=dual
-        ("rgbd_image", "/astra/rgbd_image"),  # camera_mode:=astra
-        ("odom", "/odom"),
-        ("imu", "/imu/data"),
-    ]
-
-    rtabmap_mapping = Node(
-        condition=UnlessCondition(localization),
-        package="rtabmap_slam",
-        executable="rtabmap",
-        output="screen",
-        parameters=[rtabmap_parameters],
-        remappings=rtabmap_remappings,
-        arguments=["-d"],
-    )
-
-    rtabmap_localization = Node(
-        condition=IfCondition(localization),
-        package="rtabmap_slam",
-        executable="rtabmap",
-        output="screen",
-        parameters=[
-            rtabmap_parameters,
-            {
-                "Mem/IncrementalMemory": "False",
-                "Mem/InitWMWithAllNodes": "True",
-            },
-        ],
-        remappings=rtabmap_remappings,
+        localization,
     )
 
     # Publishes map→odom TF at 50 Hz, decoupled from RTAB-Map's graph-optimization
@@ -939,7 +866,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "ekf_launch_prefix",
-                default_value="nice -n -10",
+                default_value=rtabmap_common.EKF_LAUNCH_PREFIX,
                 description=(
                     "Prefix for ekf_filter_node scheduling priority. Systems "
                     "with CAP_SYS_NICE may override with 'chrt -f 80'."
