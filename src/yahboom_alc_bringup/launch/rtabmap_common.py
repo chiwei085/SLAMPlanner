@@ -52,8 +52,10 @@ def rtabmap_parameters(camera_mode, qos, use_sim_time, publish_tf):
         # this build is not, so in dual mode every visual registration failed
         # (113 errors in 194 s, 0 refined links, 0 loop closures: map == odom).
         # 3D-3D works for multi-camera; single-camera astra keeps PnP.
-        "Vis/EstimationType": PythonExpression(
-            ["'1' if '", camera_mode, "' == 'astra' else '0'"]
+        # str: launch YAML-parses "0" to int, and rtabmap aborts on non-string params.
+        "Vis/EstimationType": ParameterValue(
+            PythonExpression(["'1' if '", camera_mode, "' == 'astra' else '0'"]),
+            value_type=str,
         ),
         "Reg/Force3DoF": "true",
         "RGBD/CreateOccupancyGrid": "true",

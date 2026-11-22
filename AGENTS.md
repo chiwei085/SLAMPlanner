@@ -21,15 +21,24 @@ Run from the repo root in a shell that has sourced
 find src -name '*.cpp' -o -name '*.hpp' | grep -v include/rik_sd | xargs clang-format -i
 
 # Build (slow on the Jetson; never run two colcon builds in this workspace at once)
-colcon build --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop --cmake-args -GNinja
+colcon build --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop
 
-# Test (test-result exits nonzero on failures)
+# Test: explicitly build test binaries first; daily builds disable them.
+colcon build --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop \
+  --cmake-args -GNinja -DBUILD_TESTING=ON \
+  -DCMAKE_JOB_POOLS=compile=2 -DCMAKE_JOB_POOL_COMPILE=compile
+source install/setup.bash
+# test-result exits nonzero on failures
 colcon test --packages-select alc_planner yahboom_alc_bringup yahboom_r2_teleop
 colcon test-result --verbose
 
 # Launch files: parse only, does not start the robot
 ros2 launch <package> <file> --show-args
 ```
+
+`colcon_defaults.yaml` applies from the repo root: Ninja, sequential packages,
+two concurrent C++ compilations, and `BUILD_TESTING=OFF`. Explicit
+`--cmake-args` replace that list; preserve the compile pool when overriding it.
 
 | Changed | Run |
 | --- | --- |
@@ -87,9 +96,9 @@ over adding a guard. In the report, say what the evidence does not prove.
   get the `/map` from before an event. Check obstacles against the RGB image
   and depth of the nearest keyframes. Keyframes are sparse: state how many
   seconds lie between the keyframe and the event.
-- To ask what the explorer would have chosen, compile
-  `frontier_explorer_core.cpp` directly into a probe (the unity library pulls
-  in rclcpp). Load the map from that moment, then compare candidate counts
+- To ask what the explorer would have chosen, compile the frontier core
+  (`frontier_search.cpp`, `grid_planning.cpp`, `exploration_memory.cpp`)
+  directly into a probe (the unity library pulls in rclcpp). Load the map from that moment, then compare candidate counts
   with and without one specific state, such as a blacklist entry or a hazard
   region.
 - A validation failure is a fact only about the exact request: start, goal

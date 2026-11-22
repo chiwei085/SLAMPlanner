@@ -15,21 +15,30 @@ ekf_filter_node:
         base_link_frame: base_footprint
         world_frame: odom
 
+        # Each state comes from the sensor that actually measures it.
+        # /odom_raw (base_node_R2) integrates yaw from the *commanded* steering
+        # angle (the R2 servo has no position feedback; vel_raw.linear.y echoes
+        # the command), so its x/y/yaw and vyaw are dead reckoning on an open-loop
+        # model. Fusing them as absolute measurements pinned the heading to that
+        # model: on 2026-11-22 the EKF ignored a 90 deg hand rotation and the
+        # heading was ~100 deg off by 236 s. Only the encoder speed vx is used,
+        # plus vy = 0 (no lateral slip for an Ackermann car).
         odom0: /odom_raw
-        odom0_config: [true,  true,  false,
-                       false, false, true,
+        odom0_config: [false, false, false,
+                       false, false, false,
                        true,  true,  false,
-                       false, false, true,
+                       false, false, false,
                        false, false, false]
         odom0_queue_size: 10
         odom0_differential: false
         odom0_relative: false
-        odom0_pose_rejection_threshold: 20.0
-        odom0_twist_rejection_threshold: 1.542
 
-        # Use only angular velocity z from IMU (direct gyro), not the Madgwick
-        # orientation yaw — without a magnetometer, that yaw is just integrated
-        # gyro anyway and double-counts with vyaw.
+        # The gyro is the only yaw-rate source (bias measured 0.035 deg/s at
+        # standstill). Not the Madgwick orientation: without a magnetometer
+        # its yaw is integrated gyro anyway, and it drifted 81 deg in 62 s
+        # standing still. No Mahalanobis gate: with a single source there is
+        # nothing to compare against, and the driver's zero covariance
+        # (floored to 1e-9) lets the gate reject real turns.
         imu0: /imu/data
         imu0_config: [false, false, false,
                       false, false, false,
@@ -40,7 +49,6 @@ ekf_filter_node:
         imu0_differential: false
         imu0_relative: false
         imu0_remove_gravitational_acceleration: true
-        imu0_twist_rejection_threshold: 1.542
 
         process_noise_covariance: [0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
                                    0.0,   0.05,  0.0,   0.0,   0.0,   0.0,   0.0,    0.0,    0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,

@@ -21,6 +21,11 @@
 namespace yahboom_alc_bringup
 {
 
+// Highest OccupancyGrid cost a cell under the swept footprint may have. Only
+// lethal (100) means the body overlaps an obstacle; inscribed (99) is defined
+// for the robot *center* and would count the half width a second time.
+constexpr int kFootprintFreeCostMax = 99;
+
 struct R2CmdVelBridgeConfig
 {
     std::string input_topic = "/alc/nav_cmd_vel";
@@ -29,16 +34,17 @@ struct R2CmdVelBridgeConfig
     double min_linear_speed = 0.05;
     bool enforce_min_linear_speed = true;
     double max_linear_speed = 0.26;
-    double steering_gain = 1.25;
-    double max_steering = 1.25;
-    double wheelbase_m = 0.16;
+    // Yahboom R2 CAD/URDF: rear axle x=-0.11607, steer joints x=0.11922.
+    double wheelbase_m = 0.2353;
     double min_turning_radius_m = 0.50;
     double max_curvature = 2.0;
-    double max_steering_angle_rad = 1.25;
+    // URDF steer-joint limit; the firmware accepts up to 45 degrees.
+    double max_steering_angle_rad = 0.6;
     double linear_deadband = 0.001;
     double angular_deadband = 0.001;
     double max_linear_accel = 0.20;
-    double max_steering_rate = 0.80;
+    // Wheel-angle slew limit, rad/s.
+    double max_steering_rate = 1.0;
     double assumed_command_period = 0.10;
     bool arc_turn_when_stationary = true;
     bool stationary_arc_requires_forward_clearance = true;
@@ -49,7 +55,6 @@ struct R2CmdVelBridgeConfig
     double reverse_costmap_max_age_sec = 1.0;
     double reverse_check_distance_m = 0.12;
     double reverse_safety_margin_m = 0.0;
-    int reverse_allowed_cost_max = 98;
     bool reverse_unknown_is_blocked = true;
     // A cell that flips to unknown (falls out of the rolling costmap's
     // observation window) but was seen clearly free within this many
@@ -106,6 +111,10 @@ bool isStationaryArcForwardSafeInCostmap(
     const RecentFreeCostmapHistory* recent_free_history = nullptr,
     double now_sec = 0.0);
 
+// The R2 firmware takes the front wheel angle in degrees / 1000 on
+// cmd_vel.linear.y (Rosmaster_Lib set_car_motion: R2 v_y in [-0.045, 0.045]).
+double wheelAngleToFirmwareSteering(double wheel_angle_rad);
+
 geometry_msgs::msg::Twist convertNavTwistToR2(
     const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config,
     bool allow_stationary_arc = true);
@@ -127,9 +136,12 @@ double applyDriveStallFloor(double rate_limited_linear_x,
 // reverse enabled.
 // True while the bridge should be streaming idle zero commands: input has
 // been silent for more than timeout_sec, and the zero burst (burst_sec long)
-// that follows has not finished yet.
-bool shouldPublishIdleStop(double since_last_input_sec, double timeout_sec,
-                           double burst_sec);
+// has not finished yet. The burst is timed from the first tick that sees the
+// silence, not from the last input, so a late timer still sends the zeros.
+// burst_end_sec holds that deadline; reset it whenever input arrives.
+bool shouldPublishIdleStop(double now_sec, double last_input_sec,
+                           double timeout_sec, double burst_sec,
+                           std::optional<double>& burst_end_sec);
 
 class BlindReverseWindow
 {
@@ -194,6 +206,7 @@ private:
     BlindReverseWindow blind_reverse_window_;
     rclcpp::TimerBase::SharedPtr idle_stop_timer_;
     std::optional<rclcpp::Time> last_input_time_;
+    std::optional<double> idle_stop_burst_end_sec_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -227,8 +240,6 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
             named(&R2CmdVelBridgeConfig::enforce_min_linear_speed,
                   "enforce_min_linear_speed"),
             named(&R2CmdVelBridgeConfig::max_linear_speed, "max_linear_speed"),
-            named(&R2CmdVelBridgeConfig::steering_gain, "steering_gain"),
-            named(&R2CmdVelBridgeConfig::max_steering, "max_steering"),
             named(&R2CmdVelBridgeConfig::wheelbase_m, "wheelbase_m"),
             named(&R2CmdVelBridgeConfig::min_turning_radius_m,
                   "min_turning_radius_m"),
@@ -261,8 +272,6 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
                   "reverse_check_distance_m"),
             named(&R2CmdVelBridgeConfig::reverse_safety_margin_m,
                   "reverse_safety_margin_m"),
-            named(&R2CmdVelBridgeConfig::reverse_allowed_cost_max,
-                  "reverse_allowed_cost_max"),
             named(&R2CmdVelBridgeConfig::reverse_unknown_is_blocked,
                   "reverse_unknown_is_blocked"),
             named(&R2CmdVelBridgeConfig::reverse_recent_free_grace_sec,

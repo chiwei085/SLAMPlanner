@@ -15,7 +15,6 @@ import rtabmap_common  # noqa: E402  (shared with autonomous exploration)
 
 
 def generate_launch_description():
-    share = get_package_share_directory("yahboom_r2_teleop")
     bringup_share = get_package_share_directory("yahboomcar_bringup")
     description_share = get_package_share_directory("yahboomcar_description")
     alc_share = get_package_share_directory("yahboom_alc_bringup")
@@ -60,7 +59,8 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_button", default_value="11"),
         DeclareLaunchArgument("tf_warmup_delay_sec", default_value="3.0"),
         DeclareLaunchArgument("model", default_value=os.path.join(description_share, "urdf", "yahboomcar_R2.urdf.xacro")),
-        DeclareLaunchArgument("rviz_config", default_value=os.path.join(share, "rviz", "r2_teleop_mapping.rviz")),
+        # Same RViz profile as autonomous exploration; Nav2/frontier displays stay empty here.
+        DeclareLaunchArgument("rviz_config", default_value=os.path.join(alc_share, "rviz", "alc_r2_exploration.rviz")),
         Node(package="joint_state_publisher", executable="joint_state_publisher"),
         Node(package="robot_state_publisher", executable="robot_state_publisher", parameters=[{"robot_description": robot_description}]),
         Node(package="yahboomcar_bringup", executable="Ackman_driver_R2", output="screen"),

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <string>
 
 #include "yahboom_alc_bringup/parameter_loader.hpp"
@@ -45,12 +46,11 @@ bool worldToMap(const nav_msgs::msg::OccupancyGrid& costmap, const double wx,
 }
 
 bool isFreeCostmapCell(const int value, const bool unknown_is_blocked,
-                       const bool recently_free,
-                       const R2CmdVelBridgeConfig& config) {
+                       const bool recently_free) {
     if (value < 0) {
         return !unknown_is_blocked || recently_free;
     }
-    return value <= config.reverse_allowed_cost_max;
+    return value <= kFootprintFreeCostMax;
 }
 
 enum class FootprintSafetyStatus : std::uint8_t
@@ -165,7 +165,7 @@ FootprintSafetyStatus footprintSafetyStatus(
                     config.reverse_recent_free_grace_sec);
             }
             if (!isFreeCostmapCell(costmap.data[index], unknown_is_blocked,
-                                   recently_free, config)) {
+                                   recently_free)) {
                 return FootprintSafetyStatus::kBlocked;
             }
         }
@@ -229,6 +229,10 @@ bool isStationaryArcForwardSafeInCostmap(
                                  now_sec) == FootprintSafetyStatus::kSafe;
 }
 
+double wheelAngleToFirmwareSteering(const double wheel_angle_rad) {
+    return wheel_angle_rad * 180.0 / std::numbers::pi / 1000.0;
+}
+
 geometry_msgs::msg::Twist convertNavTwistToR2(
     const geometry_msgs::msg::Twist& input, const R2CmdVelBridgeConfig& config,
     const bool allow_stationary_arc) {
@@ -259,17 +263,16 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
 
     double steering = 0.0;
     if (curvature_limited_angular != 0.0) {
-        // angular.z is a yaw rate; a car reversing on the same wheel angle
-        // yaws the other way, so the wheel angle follows angular / linear.
-        const double requested_steering =
-            curvature_limited_angular * signOf(linear_x) * config.steering_gain;
-        double steering_limit = std::abs(config.max_steering);
-        if (config.max_steering_angle_rad > 0.0) {
-            steering_limit = std::min(steering_limit,
-                                      std::abs(config.max_steering_angle_rad));
-        }
+        // Bicycle model: tan(delta) = L * curvature. angular / linear carries
+        // the sign flip of reversing (same wheel angle, opposite yaw).
+        const double curvature = curvature_limited_angular / linear_x;
+        const double max_angle = std::abs(config.max_steering_angle_rad);
+        const double wheel_angle = std::clamp(
+            std::atan(config.wheelbase_m * curvature), -max_angle, max_angle);
+        // The firmware truncates to whole degrees; round instead.
         steering =
-            std::clamp(requested_steering, -steering_limit, steering_limit);
+            std::round(wheelAngleToFirmwareSteering(wheel_angle) * 1000.0) /
+            1000.0;
     }
 
     output.linear.x = linear_x;
@@ -296,10 +299,16 @@ double applyDriveStallFloor(const double rate_limited_linear_x,
     return drive_intended ? signOf(target_linear_x) * min_speed : 0.0;
 }
 
-bool shouldPublishIdleStop(const double since_last_input_sec,
-                           const double timeout_sec, const double burst_sec) {
-    return timeout_sec > 0.0 && since_last_input_sec > timeout_sec &&
-           since_last_input_sec <= timeout_sec + std::max(0.0, burst_sec);
+bool shouldPublishIdleStop(const double now_sec, const double last_input_sec,
+                           const double timeout_sec, const double burst_sec,
+                           std::optional<double>& burst_end_sec) {
+    if (timeout_sec <= 0.0 || now_sec - last_input_sec <= timeout_sec) {
+        return false;
+    }
+    if (!burst_end_sec) {
+        burst_end_sec = now_sec + std::max(0.0, burst_sec);
+    }
+    return now_sec <= *burst_end_sec;
 }
 
 void BlindReverseWindow::onEvent(const std::string& event_name,
@@ -343,9 +352,10 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         if (!last_input_time_ || stopping_) {
             return;
         }
-        const double since = (get_clock()->now() - *last_input_time_).seconds();
-        if (!shouldPublishIdleStop(since, config_.input_timeout_sec,
-                                   config_.idle_stop_burst_sec)) {
+        if (!shouldPublishIdleStop(
+                get_clock()->now().seconds(), last_input_time_->seconds(),
+                config_.input_timeout_sec, config_.idle_stop_burst_sec,
+                idle_stop_burst_end_sec_)) {
             return;
         }
         const geometry_msgs::msg::Twist stop;
@@ -394,26 +404,33 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
         costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
             config_.reverse_costmap_topic, costmap_qos,
             [this](const nav_msgs::msg::OccupancyGrid::ConstSharedPtr& msg) {
-                latest_costmap_ = msg;
                 const double now_sec = get_clock()->now().seconds();
+                // A malformed grid is dropped before it can count as fresh.
+                if (!reverse_recent_free_history_.observe(
+                        *msg, now_sec, kFootprintFreeCostMax)) {
+                    RCLCPP_WARN_THROTTLE(
+                        get_logger(), *get_clock(), 5000,
+                        "Dropping malformed costmap: %ux%u with %zu cells",
+                        msg->info.width, msg->info.height, msg->data.size());
+                    return;
+                }
+                latest_costmap_ = msg;
                 costmap_temporal_ = observeTemporalSignal(
                     rclcpp::Time(msg->header.stamp).seconds(), now_sec,
                     costmap_temporal_state_);
-                reverse_recent_free_history_.observe(
-                    *msg, now_sec, config_.reverse_allowed_cost_max);
             });
     }
 
     RCLCPP_INFO(
         get_logger(),
         "Yahboom R2 cmd_vel bridge: %s -> %s, min_linear=%.3f, "
-        "max_linear=%.3f, steering_gain=%.3f, max_steering=%.3f, "
+        "max_linear=%.3f, wheelbase=%.4f, max_steering_angle=%.3f rad, "
         "max_linear_accel=%.3f, max_steering_rate=%.3f, "
         "reverse_safety=%s, stationary_arc_forward_clearance=%s, "
         "shared_costmap=%s",
         config_.input_topic.c_str(), config_.output_topic.c_str(),
-        config_.min_linear_speed, config_.max_linear_speed,
-        config_.steering_gain, config_.max_steering, config_.max_linear_accel,
+        config_.min_linear_speed, config_.max_linear_speed, config_.wheelbase_m,
+        config_.max_steering_angle_rad, config_.max_linear_accel,
         config_.max_steering_rate,
         config_.reverse_safety_enabled ? "true" : "false",
         config_.stationary_arc_requires_forward_clearance ? "true" : "false",
@@ -430,6 +447,7 @@ void R2CmdVelBridgeNode::onCmdVel(
         return;
     }
     last_input_time_ = get_clock()->now();
+    idle_stop_burst_end_sec_.reset();
 
     if (feedback_imu_sub_) {
         const bool frozen = feedback_watch_.frozen(
@@ -657,7 +675,8 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
 
     geometry_msgs::msg::Twist output = target;
     const double max_linear_delta = std::abs(config_.max_linear_accel) * dt;
-    const double max_steering_delta = std::abs(config_.max_steering_rate) * dt;
+    const double max_steering_delta =
+        wheelAngleToFirmwareSteering(std::abs(config_.max_steering_rate) * dt);
 
     output.linear.x =
         std::clamp(target.linear.x, last_output_.linear.x - max_linear_delta,

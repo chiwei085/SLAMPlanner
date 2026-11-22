@@ -17,6 +17,10 @@ using WorldPoint = std::pair<double, double>;
 struct FrontierConfig
 {
     double min_frontier_distance = 0.45;
+    // Ackermann minimum turning radius. A goal inside either turning circle
+    // (centers 0, +-R in the robot frame) cannot be reached driving forward;
+    // it needs a reverse cusp. 0 disables the check.
+    double min_turning_radius_m = 0.0;
     double max_frontier_distance = 2.5;
     double frontier_goal_search_radius = 0.6;
     double robot_start_search_radius = 2.0;
@@ -58,6 +62,14 @@ struct FrontierConfig
     double viewpoint_information_weight = 0.0;
     double viewpoint_range_m = 3.0;
     double viewpoint_half_fov_rad = 0.5;
+    // Straight view tail (straight_tail.hpp; ViewApproach planner). When > 0,
+    // a frontier goal's yaw is the direction, among those whose straight tail
+    // of this length ending at the goal passes the goal footprint rule, that
+    // sees the most unknown from the earliest stop on the tail
+    // (view_stop_offset_m before the goal = the goal checker xy tolerance).
+    // Must equal the ViewApproach tail_length. 0 keeps the grid-path yaw.
+    double view_tail_length_m = 0.0;
+    double view_stop_offset_m = 0.0;
     // Coverage revisit (Stage 3). With a long Grid/RangeMax the map gets
     // painted from far away, so distant rooms become "known" (non-frontier)
     // before the robot ever drives near them and exploration loses interest.
@@ -143,6 +155,7 @@ struct FrontierCounts
     int rejected_blacklist = 0;
     int rejected_hazard = 0;
     int rejected_too_near = 0;
+    int rejected_turning_circle = 0;
     int rejected_too_far = 0;
     int rejected_no_path = 0;
     int rejected_footprint = 0;
@@ -213,6 +226,9 @@ struct FrontierCandidate
     double path_length = 0.0;
     int information = 0;
     int visible_unknown = 0;
+    // Unknown cells the view tail is chosen to observe (world coordinates,
+    // so they survive map resizing); empty without a view tail.
+    std::vector<WorldPoint> view_cells;
     bool is_coverage = false;
     bool reachable = false;
     bool soft_reachable = false;
@@ -220,6 +236,13 @@ struct FrontierCandidate
     double wall_clearance = 0.0;
     double heading_delta = 0.0;
     double score = 0.0;
+};
+
+struct ViewTail
+{
+    double yaw = 0.0;
+    FootprintCheck goal_footprint;
+    std::vector<WorldPoint> cells;
 };
 
 struct PathProjection
@@ -260,7 +283,9 @@ public:
 
     void setConfig(const FrontierConfig& config);
     const FrontierConfig& config() const { return config_; }
-    void setMap(const nav_msgs::msg::OccupancyGrid& map);
+    // Returns false and keeps the previous map when this one is malformed
+    // (data length not width * height, or non-positive resolution).
+    bool setMap(const nav_msgs::msg::OccupancyGrid& map);
     const nav_msgs::msg::OccupancyGrid& map() const { return map_; }
 
     CandidateResult findCandidates(
@@ -297,13 +322,22 @@ public:
     bool isUnderObserved(const WorldPoint& xy) const;
     // Subsampled known-free, reachable-clearance cells the robot has never
     // approached, nearest to robot_xy first, capped to coverage_max_targets.
-    std::vector<Cell> findCoverageSeeds(const WorldPoint& robot_xy, int width,
+    std::vector<Cell> findCoverageSeeds(const WorldPoint& robot_xy,
+                                        double max_distance, int width,
                                         int height) const;
     // Counts unique unknown cells visible from `from` within a forward camera
     // ray-fan (viewpoint_range_m, +/-viewpoint_half_fov_rad around `yaw`),
     // stopping each ray at the first occupied cell. Used for Stage 2 viewpoint
     // scoring; see viewpoint_information_weight.
     int countVisibleUnknown(const Cell& from, double yaw) const;
+    std::vector<int> visibleUnknownIndices(const Cell& from, double yaw) const;
+    std::optional<ViewTail> bestViewTail(const WorldPoint& goal_xy);
+    // How many of `cells` are no longer unknown in the current map.
+    int countObserved(const std::vector<WorldPoint>& cells) const;
+    // Camera field of view is a sensor property, read from camera_info.
+    void setViewHalfFov(double half_fov_rad) {
+        config_.viewpoint_half_fov_rad = half_fov_rad;
+    }
     bool shouldPublishGoal(const WorldPoint& goal_xy, double now_sec) const;
     // path_length is used to decide whether to commit a strategic intention
     // when intention_distance_threshold_m > 0.
@@ -392,21 +426,45 @@ private:
     std::vector<Cell> reconstructPath(const std::vector<int>& parent,
                                       int start_index, int goal_index,
                                       int width) const;
+    // Built once per search: frontier and coverage candidates plan on the
+    // same map, pose and clearance settings.
+    struct SearchGrid
+    {
+        int width = 0;
+        int height = 0;
+        std::vector<std::uint8_t> blocked;
+        std::vector<std::uint8_t> strict_blocked;
+        Cell start_cell;
+    };
+    // The only two settings relaxed search widens.
+    struct SearchLimits
+    {
+        int min_frontier_size = 0;
+        double max_frontier_distance = 0.0;
+    };
+
+    std::optional<SearchGrid> prepareSearchGrid(
+        const WorldPoint& robot_xy) const;
+    SearchLimits strictLimits() const;
+    SearchLimits relaxedLimits() const;
     CandidateResult findCandidatesOnce(const WorldPoint& robot_xy,
-                                       double now_sec,
+                                       const std::optional<SearchGrid>& grid,
+                                       const SearchLimits& limits,
                                        std::optional<double> robot_yaw);
     // Fills `result` with coverage-revisit candidates when coverage is enabled
     // and frontier search produced none. No-op otherwise, so it can never alter
     // an active-exploration result.
     void appendCoverageCandidates(CandidateResult& result,
                                   const WorldPoint& robot_xy,
+                                  const std::optional<SearchGrid>& grid,
+                                  const SearchLimits& limits,
                                   std::optional<double> robot_yaw);
     std::optional<FrontierCandidate> makeCandidateImpl(
         const std::vector<Cell>& cluster, const Cell& start_cell,
         const WorldPoint& robot_xy, const std::vector<std::uint8_t>& blocked,
         const std::vector<std::uint8_t>& strict_blocked, int width, int height,
-        FrontierCounts& counts, std::optional<double> robot_yaw = std::nullopt);
-    FrontierConfig relaxedConfig() const;
+        double max_frontier_distance, FrontierCounts& counts,
+        std::optional<double> robot_yaw = std::nullopt);
 
     FrontierConfig config_;
     nav_msgs::msg::OccupancyGrid map_;
@@ -432,6 +490,15 @@ private:
 // Out of bounds or an empty grid is not lethal.
 bool isLethalCostmapCell(const nav_msgs::msg::OccupancyGrid& costmap,
                          const WorldPoint& xy);
+
+// True when a pose is unplannable as a goal on a 0-100 OccupancyGrid costmap,
+// the way SmacPlannerHybrid's footprint collision check judges it: the center
+// cell is inscribed (>= 99), or a cell whose center lies inside the footprint
+// rectangle at yaw is lethal (100). Out of bounds or an empty grid is not
+// blocked.
+bool isFootprintBlockedInCostmap(const nav_msgs::msg::OccupancyGrid& costmap,
+                                 const FootprintGeometry& footprint,
+                                 const WorldPoint& xy, double yaw);
 
 // Dominant direction (world yaw) of the unknown (-1) cells within radius_m of
 // xy that lie OUTSIDE the cameras' view: cells within view_half_angle_rad of

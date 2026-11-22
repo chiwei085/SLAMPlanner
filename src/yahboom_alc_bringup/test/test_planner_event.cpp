@@ -72,5 +72,35 @@ TEST(PlannerEvent, MalformedNumberPayloadIsIgnored) {
               CoordinationAction::kNone);
 }
 
+TEST(PlannerEvent, ReverseBlockedSeparatesBlindFromBlocked) {
+    const auto stale = parsePlannerEvent(
+        R"({"event":"reverse_blocked","reason":"stale_costmap"})");
+    EXPECT_EQ(stale.observation, PlannerObservation::kReverseUnverified);
+    EXPECT_EQ(stale.reason, "stale_costmap");
+    EXPECT_EQ(parsePlannerEvent(
+                  R"({"event":"reverse_blocked","reason":"tf_unavailable"})")
+                  .observation,
+              PlannerObservation::kReverseUnverified);
+    EXPECT_EQ(parsePlannerEvent(
+                  R"({"event":"reverse_blocked","reason":"rear_blocked"})")
+                  .observation,
+              PlannerObservation::kReverseBlocked);
+    EXPECT_EQ(parsePlannerEvent(R"({"event":"reverse_blocked"})").observation,
+              PlannerObservation::kReverseBlocked);
+}
+
+TEST(PlannerEvent, ParsesStallAndAlcObservations) {
+    EXPECT_EQ(parsePlannerEvent(R"({"event":"stall_or_slip"})").observation,
+              PlannerObservation::kForwardStall);
+    EXPECT_EQ(parsePlannerEvent(R"({"event":"alc_started"})").observation,
+              PlannerObservation::kAlcStarted);
+    EXPECT_EQ(parsePlannerEvent(R"({"event":"alc_finished"})").observation,
+              PlannerObservation::kAlcFinished);
+    EXPECT_EQ(parsePlannerEvent(R"({"event":"goal_sent"})").observation,
+              PlannerObservation::kNone);
+    EXPECT_EQ(parsePlannerEvent("not json").observation,
+              PlannerObservation::kNone);
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

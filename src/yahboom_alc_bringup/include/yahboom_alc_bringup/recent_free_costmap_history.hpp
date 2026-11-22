@@ -23,10 +23,11 @@ class RecentFreeCostmapHistory
 {
 public:
     // Scans every free cell in costmap and records now_sec against it.
-    // free_cost_max mirrors R2CmdVelBridgeConfig::reverse_allowed_cost_max: a
-    // cell counts as free when 0 <= value <= free_cost_max. No-ops on an
-    // empty or malformed grid.
-    void observe(const nav_msgs::msg::OccupancyGrid& costmap, double now_sec,
+    // free_cost_max mirrors kFootprintFreeCostMax: a
+    // cell counts as free when 0 <= value <= free_cost_max. Returns false and
+    // records nothing for an empty or malformed grid (data length not
+    // width * height, or non-positive resolution).
+    bool observe(const nav_msgs::msg::OccupancyGrid& costmap, double now_sec,
                  int free_cost_max);
 
     // True when the world cell at (world_x, world_y) was last observed free

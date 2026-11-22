@@ -65,7 +65,7 @@ NAV2_RUNTIME_METADATA = {
     "recovery_stagnation_escalation_trees": 3,
     "bridge_reverse": {
         "enabled": True,
-        "allowed_cost_max": 98,
+        "footprint_free_cost_max": 99,
         "unknown_is_blocked": True,
         "check_distance_m": 0.12,
         "safety_margin_m": 0.0,
@@ -150,6 +150,9 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "path_clearance_cells": 2,
                     "exploratory_path_clearance_cells": 1,
                     "min_frontier_distance": 0.45,
+                    # Same radius as Smac minimum_turning_radius and the
+                    # bridge: goals inside a turning circle need a reverse cusp.
+                    "min_turning_radius_m": 0.50,
                     "max_frontier_distance": 5.5,
                     "frontier_goal_search_radius": 0.6,
                     "robot_start_search_radius": 2.0,
@@ -187,7 +190,23 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     # depth camera (HFOV ~58 deg -> half ~0.5 rad).
                     "viewpoint_information_weight": 0.1,
                     "viewpoint_range_m": 3.0,
+                    # Replaced at startup by atan(w / 2 fx) from the Astra
+                    # depth camera_info (the narrower camera, so the view
+                    # holds for both).
                     "viewpoint_half_fov_rad": 0.5,
+                    "view_camera_info_topic": "/camera/depth/camera_info",
+                    # Frontier goals are approached along a straight tail
+                    # (ViewApproach planner, navigate_to_view_rgbd.xml). The
+                    # length must equal ViewApproach tail_length; the stop
+                    # offset is the goal checker xy_goal_tolerance.
+                    "view_tail_length_m": 1.40,
+                    "view_stop_offset_m": 0.35,
+                    "nav2_view_behavior_tree": os.path.join(
+                        get_package_share_directory("yahboom_alc_bringup"),
+                        "behavior_trees",
+                        "navigate_to_view_rgbd.xml",
+                    ),
+                    "nav2_view_planner_id": "ViewApproach",
                     # Stage 3 coverage revisit. With RangeMax 5.0 the map is
                     # painted from far away, so distant rooms become known before
                     # the robot drives near them and exploration stops caring.
@@ -560,12 +579,12 @@ def generate_launch_description():
                 "feedback_imu_topic": "/imu/data_raw",
                 "feedback_frozen_timeout_sec": 0.5,
                 "max_linear_speed": 0.11,
-                "steering_gain": 1.25,
-                "max_steering": 1.25,
-                "wheelbase_m": 0.16,
+                # linear.y is the front wheel angle in degrees / 1000 (R2
+                # firmware); the bridge converts curvature with these.
+                "wheelbase_m": 0.2353,
                 "min_turning_radius_m": 0.50,
                 "max_curvature": 2.0,
-                "max_steering_angle_rad": 1.25,
+                "max_steering_angle_rad": 0.6,
                 "linear_deadband": 0.001,
                 "angular_deadband": 0.005,
                 "max_linear_accel": 0.12,
@@ -580,13 +599,6 @@ def generate_launch_description():
                 "reverse_costmap_max_age_sec": 1.0,
                 "reverse_check_distance_m": 0.12,
                 "reverse_safety_margin_m": 0.0,
-                # /local_costmap/costmap is an OccupancyGrid (0-100 scale:
-                # inflated gradient <=98, inscribed=99, lethal=100), so 98
-                # blocks only inscribed/lethal/unknown. The weighted inflation
-                # gradient (radius 0.45) maps to <=98 and does NOT block
-                # reversing -- do not "compensate" this threshold for
-                # inflation changes; it is not on the 0-254 raw cost scale.
-                "reverse_allowed_cost_max": 98,
                 # Was False (8d610ce, "suppress zombie frontier zones") to
                 # stop unknown cells near frontiers from blocking recovery
                 # backups entirely. That traded blocked-recovery stalls for
@@ -669,7 +681,7 @@ def generate_launch_description():
                         **NAV2_RUNTIME_METADATA,
                         "bridge": {
                             "reverse_safety_enabled": True,
-                            "reverse_allowed_cost_max": 98,
+                            "footprint_free_cost_max": 99,
                             "reverse_check_distance_m": 0.12,
                             "reverse_safety_margin_m": 0.0,
                             "reverse_unknown_is_blocked": True,

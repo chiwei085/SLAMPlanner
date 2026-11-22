@@ -1,7 +1,7 @@
 # Yahboom R2 Teleop Mapping
 
 Joystick-only chassis control with the same RGB-D RTAB-Map mapping pipeline and
-an RViz profile derived from `yahboom_alc_bringup`. This package does not start
+the RViz profile of `yahboom_alc_bringup` (`alc_r2_exploration.rviz`). This package does not start
 Nav2, ALC-Planner, frontier exploration, costmaps, or autonomous safety/recovery
 nodes.
 
@@ -35,8 +35,10 @@ controls the R2 front steering command, matching Yahboom's supplied
 control is disabled or joystick messages have stopped for 0.5 seconds.
 
 Drive limits match `yahboom_alc_bringup`: 0.08 m/s motor breakaway floor,
-0.11 m/s maximum speed, 0.12 m/s² acceleration, 1.25 maximum steering command,
-and 1.0 steering-command unit/s slew rate.
+0.11 m/s maximum speed, 0.12 m/s² acceleration, 0.6 rad maximum front wheel
+angle, and 1.0 rad/s steering slew rate. The R2 firmware reads `linear.y` as
+the wheel angle in degrees / 1000 (±0.045 is its ±45° limit), so the node
+converts the angle before publishing.
 
 Before launching ROS, open `web/gamepad_mapping.html` in Chrome/Chromium and
 press any controller button. It uses the browser Gamepad API directly and needs

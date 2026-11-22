@@ -1,0 +1,400 @@
+// Sequence tests for the explorer node's asynchronous action handling. The
+// node runs unchanged against fake Nav2 action servers; the tests drive it
+// only through ROS interfaces (TF, /map, action results, /planner/events).
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <gtest/gtest.h>
+#include <tf2_ros/transform_broadcaster.h>
+
+#include <chrono>
+#include <functional>
+#include <thread>
+
+#include "explorer/cluster_frontier_explorer_node.hpp"
+
+namespace yahboom_alc_bringup
+{
+namespace
+{
+
+using namespace std::chrono_literals;
+
+template <typename ActionT>
+struct FakeActionServer
+{
+    using Handle = rclcpp_action::ServerGoalHandle<ActionT>;
+
+    FakeActionServer(const rclcpp::Node::SharedPtr& node,
+                     const std::string& name) {
+        server = rclcpp_action::create_server<ActionT>(
+            node, name,
+            [](const rclcpp_action::GoalUUID&,
+               std::shared_ptr<const typename ActionT::Goal>) {
+                return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+            },
+            [this](const std::shared_ptr<Handle>& handle) {
+                cancel_requested.push_back(handle);
+                return rclcpp_action::CancelResponse::ACCEPT;
+            },
+            [this](const std::shared_ptr<Handle>& handle) {
+                goals.push_back(handle);
+            });
+    }
+
+    bool cancelRequested(const std::size_t i) const {
+        return std::find(cancel_requested.begin(), cancel_requested.end(),
+                         goals.at(i)) != cancel_requested.end();
+    }
+    void succeed(const std::size_t i) {
+        goals.at(i)->succeed(std::make_shared<typename ActionT::Result>());
+    }
+    void abort(const std::size_t i) {
+        goals.at(i)->abort(std::make_shared<typename ActionT::Result>());
+    }
+
+    typename rclcpp_action::Server<ActionT>::SharedPtr server;
+    std::vector<std::shared_ptr<Handle>> goals;
+    std::vector<std::shared_ptr<Handle>> cancel_requested;
+};
+
+std::string field(const nlohmann::json& event, const char* key) {
+    return event.contains(key) ? event[key].get<std::string>() : "";
+}
+
+nav_msgs::msg::OccupancyGrid makeMap(const bool with_frontier) {
+    nav_msgs::msg::OccupancyGrid grid;
+    grid.header.frame_id = "map";
+    grid.info.width = 40;
+    grid.info.height = 20;
+    grid.info.resolution = 0.1F;
+    grid.info.origin.orientation.w = 1.0;
+    grid.data.assign(40U * 20U, 0);
+    if (with_frontier) {
+        for (int y = 0; y < 20; ++y) {
+            for (int x = 25; x < 40; ++x) {
+                grid.data[static_cast<std::size_t>(y * 40 + x)] = -1;
+            }
+        }
+    }
+    return grid;
+}
+
+class ExplorerSequenceTest : public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
+    static void TearDownTestSuite() { rclcpp::shutdown(); }
+
+    void SetUp() override {
+        fake_ = std::make_shared<rclcpp::Node>("explorer_test_fake_nav2");
+        nav_ = std::make_unique<
+            FakeActionServer<nav2_msgs::action::NavigateToPose>>(
+            fake_, "/navigate_to_pose");
+        spin_ = std::make_unique<FakeActionServer<nav2_msgs::action::Spin>>(
+            fake_, "/spin");
+        backup_ = std::make_unique<FakeActionServer<nav2_msgs::action::BackUp>>(
+            fake_, "/backup");
+        for (const char* name :
+             {"planner_server", "controller_server", "bt_navigator",
+              "behavior_server", "collision_monitor"}) {
+            lifecycle_services_.push_back(
+                fake_->create_service<lifecycle_msgs::srv::GetState>(
+                    std::string("/") + name + "/get_state",
+                    [](const std::shared_ptr<
+                           lifecycle_msgs::srv::GetState::Request>,
+                       std::shared_ptr<lifecycle_msgs::srv::GetState::Response>
+                           response) {
+                        response->current_state.id =
+                            lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+                    }));
+        }
+        rclcpp::QoS map_qos{rclcpp::KeepLast(1)};
+        map_qos.reliable().transient_local();
+        map_pub_ = fake_->create_publisher<nav_msgs::msg::OccupancyGrid>(
+            "/map", map_qos);
+        event_pub_ = fake_->create_publisher<std_msgs::msg::String>(
+            "/planner/events", 10);
+        event_sub_ = fake_->create_subscription<std_msgs::msg::String>(
+            "/planner/events", 100, [this](const std_msgs::msg::String& msg) {
+                events_.push_back(nlohmann::json::parse(msg.data));
+            });
+        tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*fake_);
+        map_ = makeMap(true);
+    }
+
+    void startExplorer(const std::vector<rclcpp::Parameter>& extra = {}) {
+        std::vector<rclcpp::Parameter> params{
+            {"cycle_period_sec", 0.1},
+            {"nav2_validation_enabled", false},
+            {"recovery_reobserve_cycles", 1},
+            {"min_clearance_cells", 0},
+            {"path_clearance_cells", 0},
+            {"goal_publish_period", 0.0},
+            {"backtrace_cancel_timeout_sec", 0.2},
+            {"backtrace_backup_stall_check_sec", 0.0},
+        };
+        params.insert(params.end(), extra.begin(), extra.end());
+        rclcpp::NodeOptions options;
+        options.parameter_overrides(params);
+        explorer_ = std::make_shared<ClusterFrontierExplorerNode>(options);
+        executor_.add_node(fake_);
+        executor_.add_node(explorer_);
+    }
+
+    void TearDown() override {
+        if (explorer_) {
+            executor_.remove_node(explorer_);
+        }
+        executor_.remove_node(fake_);
+    }
+
+    void publishWorld() {
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = fake_->now();
+        tf.header.frame_id = "map";
+        tf.child_frame_id = "base_footprint";
+        tf.transform.translation.x = robot_x_;
+        tf.transform.translation.y = 1.0;
+        tf.transform.rotation.z = std::sin(robot_yaw_ / 2.0);
+        tf.transform.rotation.w = std::cos(robot_yaw_ / 2.0);
+        tf_->sendTransform(tf);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_map_pub_ > 300ms) {
+            map_.header.stamp = fake_->now();
+            map_pub_->publish(map_);
+            last_map_pub_ = now;
+        }
+    }
+
+    bool spinUntil(const std::function<bool()>& done,
+                   const std::chrono::milliseconds timeout = 8000ms) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            publishWorld();
+            executor_.spin_some(10ms);
+            if (done()) {
+                return true;
+            }
+            std::this_thread::sleep_for(10ms);
+        }
+        return false;
+    }
+
+    void spinFor(const std::chrono::milliseconds duration) {
+        spinUntil([] { return false; }, duration);
+    }
+
+    void inject(const nlohmann::json& event) {
+        std_msgs::msg::String msg;
+        msg.data = event.dump();
+        event_pub_->publish(msg);
+    }
+
+    std::size_t countEvents(const std::string& name,
+                            const std::size_t since = 0) const {
+        std::size_t count = 0;
+        for (std::size_t i = since; i < events_.size(); ++i) {
+            if (field(events_[i], "event") == name) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    std::string eventLog() const {
+        std::string log;
+        for (const auto& event : events_) {
+            log += event.dump() + "\n";
+        }
+        return log;
+    }
+
+    std::optional<nlohmann::json> lastEvent(const std::string& name) const {
+        for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
+            if (field(*it, "event") == name) {
+                return *it;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool waitForEvent(const std::string& name, const std::size_t since = 0) {
+        return spinUntil([&] { return countEvents(name, since) > 0; });
+    }
+
+    // Active route to a frontier, then a stall that the reobserve stage can
+    // not resolve (no frontier left), so recovery reaches the clearance
+    // backup that precedes the first recovery spin.
+    void driveToClearanceBackup() {
+        startExplorer();
+        ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }))
+            << "no frontier goal was sent";
+        map_ = makeMap(false);
+        last_map_pub_ = {};
+        spinFor(500ms);
+        inject({{"event", "stall_or_slip"}});
+        ASSERT_TRUE(waitForEvent("recovery_tree_started"));
+        ASSERT_TRUE(spinUntil([&] { return backup_->goals.size() == 1; }))
+            << "clearance backup was not sent";
+        ASSERT_TRUE(waitForEvent("recovery_clearance_backup_started"));
+    }
+
+    rclcpp::executors::SingleThreadedExecutor executor_;
+    rclcpp::Node::SharedPtr fake_;
+    std::shared_ptr<ClusterFrontierExplorerNode> explorer_;
+    std::unique_ptr<FakeActionServer<nav2_msgs::action::NavigateToPose>> nav_;
+    std::unique_ptr<FakeActionServer<nav2_msgs::action::Spin>> spin_;
+    std::unique_ptr<FakeActionServer<nav2_msgs::action::BackUp>> backup_;
+    std::vector<rclcpp::ServiceBase::SharedPtr> lifecycle_services_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr event_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr event_sub_;
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_;
+    nav_msgs::msg::OccupancyGrid map_;
+    std::chrono::steady_clock::time_point last_map_pub_{};
+    double robot_x_ = 0.5;
+    double robot_yaw_ = 0.0;
+    std::vector<nlohmann::json> events_;
+};
+
+// A stale nav result, arriving after recovery cancelled its goal, is ignored.
+TEST_F(ExplorerSequenceTest, LateNavResultAfterRecoveryIsIgnored) {
+    driveToClearanceBackup();
+    EXPECT_TRUE(nav_->cancelRequested(0));
+    const auto mark = events_.size();
+    nav_->abort(0);
+    spinFor(500ms);
+    EXPECT_EQ(countEvents("goal_result", mark), 0U);
+    EXPECT_EQ(countEvents("recovery_tree_started", mark), 0U);
+}
+
+// reverse_blocked during the optional clearance backup skips it and spins;
+// the cancelled backup's late result must not start a second spin.
+TEST_F(ExplorerSequenceTest, ClearanceBackupBlockedSkipsToSpinAndIgnoresLate) {
+    driveToClearanceBackup();
+    inject({{"event", "reverse_blocked"}, {"reason", "rear_blocked"}});
+    ASSERT_TRUE(waitForEvent("recovery_clearance_backup_skipped"));
+    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 1; }));
+    EXPECT_TRUE(backup_->cancelRequested(0));
+    EXPECT_EQ(countEvents("backtrace_recovery_failed"), 0U);
+
+    const auto mark = events_.size();
+    backup_->succeed(0);
+    spinFor(500ms);
+    EXPECT_EQ(countEvents("recovery_clearance_backup_finished", mark), 0U);
+    EXPECT_EQ(spin_->goals.size(), 1U);
+
+    spin_->succeed(0);
+    ASSERT_TRUE(spinUntil([&] {
+        const auto e = lastEvent("recovery_stage_finished");
+        return e && field(*e, "reason") == "spin_completed";
+    }));
+}
+
+// Pausing for ALC while a recovery spin runs cancels it; its late result
+// does not advance recovery.
+TEST_F(ExplorerSequenceTest, PauseDuringSpinCancelsAndIgnoresLateResult) {
+    driveToClearanceBackup();
+    backup_->succeed(0);
+    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 1; }));
+    inject({{"event", "alc_started"}});
+    ASSERT_TRUE(waitForEvent("frontier_paused_for_alc"));
+    ASSERT_TRUE(spinUntil([&] { return spin_->cancelRequested(0); }));
+
+    const auto mark = events_.size();
+    spin_->succeed(0);
+    spinFor(500ms);
+    EXPECT_EQ(countEvents("recovery_stage_finished", mark), 0U);
+    EXPECT_EQ(countEvents("recovery_stage_started", mark), 0U);
+}
+
+// The same reverse_blocked verdict fails a backtrace backup (it is the
+// recovery's own reverse motion) instead of skipping it.
+TEST_F(ExplorerSequenceTest, BacktraceBackupBlockedFailsTheBacktrace) {
+    startExplorer({{"recovery_stagnation_escalation_trees", 1}});
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
+    robot_x_ = 0.8;  // a breadcrumb trail to back along
+    spinFor(500ms);
+    inject({{"event", "stall_or_slip"}});
+    ASSERT_TRUE(waitForEvent("recovery_stagnation_escalation"));
+    ASSERT_TRUE(spinUntil([&] { return backup_->goals.size() == 1; }))
+        << "backtrace backup was not sent";
+    ASSERT_TRUE(waitForEvent("backtrace_recovery_segment"));
+
+    inject({{"event", "reverse_blocked"}, {"reason", "rear_blocked"}});
+    ASSERT_TRUE(waitForEvent("backtrace_recovery_failed"));
+    EXPECT_EQ(field(*lastEvent("backtrace_recovery_failed"), "reason"),
+              "REVERSE_UNSAFE");
+    EXPECT_EQ(countEvents("recovery_clearance_backup_skipped"), 0U);
+    ASSERT_TRUE(spinUntil([&] { return backup_->cancelRequested(0); }));
+
+    const auto mark = events_.size();
+    backup_->succeed(0);
+    spinFor(500ms);
+    EXPECT_EQ(countEvents("backtrace_recovery_segment", mark), 0U);
+}
+
+// Nav2 SUCCEEDED far from the goal is resent twice, then recovery starts;
+// the streak resets so the next route gets its own resends.
+TEST_F(ExplorerSequenceTest, SpuriousSuccessResendsThenRecoversAndResets) {
+    startExplorer();
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
+    nav_->succeed(0);
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 2; }));
+    nav_->succeed(1);
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 3; }));
+    EXPECT_TRUE(spinUntil(
+        [&] { return countEvents("nav2_spurious_success_resend") == 2U; }));
+    nav_->succeed(2);
+    ASSERT_TRUE(spinUntil([&] {
+        const auto e = lastEvent("recovery_tree_started");
+        return e && field(*e, "reason") == "nav2_success_pose_mismatch";
+    }));
+    // Reobserve still sees the frontier, so a fresh route starts.
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 4; }));
+    const auto mark = events_.size();
+    nav_->succeed(3);
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 5; }));
+    ASSERT_TRUE(waitForEvent("nav2_spurious_success_resend", mark));
+    spinFor(300ms);
+    EXPECT_EQ(countEvents("nav2_spurious_success_resend", mark), 1U);
+    const auto resend = lastEvent("nav2_spurious_success_resend");
+    EXPECT_EQ(static_cast<double>((*resend)["resend_streak"]), 1.0);
+}
+
+// An alignment spin still running when a stall starts recovery is cancelled;
+// its late result must not be taken for the recovery's own spin.
+TEST_F(ExplorerSequenceTest, AlignmentSpinResultIsNotTakenForRecoverySpin) {
+    robot_yaw_ = std::numbers::pi;  // facing away from the route
+    startExplorer({{"alignment_spin_enabled", true},
+                   {"stuck_progress_timeout_sec", 0.5}});
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
+    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 1; }))
+        << "alignment spin was not sent\n"
+        << eventLog();
+    ASSERT_TRUE(waitForEvent("alignment_spin_recovery"));
+
+    map_ = makeMap(false);
+    last_map_pub_ = {};
+    spinFor(500ms);
+    inject({{"event", "stall_or_slip"}});
+    ASSERT_TRUE(waitForEvent("recovery_tree_started"));
+    ASSERT_TRUE(spinUntil([&] { return backup_->goals.size() == 1; }));
+    backup_->succeed(0);
+    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 2; }))
+        << "recovery spin was not sent";
+
+    const auto mark = events_.size();
+    spin_->succeed(0);  // the alignment spin, late
+    spinFor(500ms);
+    EXPECT_EQ(countEvents("recovery_stage_finished", mark), 0U);
+    EXPECT_EQ(countEvents("alignment_spin_recovery_finished", mark), 0U);
+
+    spin_->succeed(1);
+    ASSERT_TRUE(spinUntil([&] {
+        const auto e = lastEvent("recovery_stage_finished");
+        return e && field(*e, "reason") == "spin_completed";
+    }));
+}
+
+}  // namespace
+}  // namespace yahboom_alc_bringup

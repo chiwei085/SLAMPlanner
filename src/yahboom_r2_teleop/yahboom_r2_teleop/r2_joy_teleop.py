@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Translate the Yahboom R2 gamepad layout into the chassis Twist protocol."""
 
+import math
 import time
 
 from geometry_msgs.msg import Twist
@@ -8,6 +9,12 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool
+
+
+def wheel_angle_to_firmware_steering(wheel_angle_rad):
+    """R2 firmware: front wheel angle in whole degrees / 1000 on linear.y
+    (Rosmaster_Lib set_car_motion, R2 v_y in [-0.045, 0.045])."""
+    return round(math.degrees(wheel_angle_rad)) / 1000.0
 
 
 class R2JoyTeleop(Node):
@@ -26,9 +33,10 @@ class R2JoyTeleop(Node):
         # Match alc_yahboom_r2_exploration.launch.py bridge tuning.
         self.declare_parameter("min_linear_speed", 0.08)
         self.declare_parameter("max_linear_speed", 0.11)
-        self.declare_parameter("max_steering", 1.25)
+        # Front wheel angle limit (R2 URDF steer joint), rad.
+        self.declare_parameter("max_steering_angle_rad", 0.6)
         self.declare_parameter("max_linear_accel", 0.12)
-        self.declare_parameter("max_steering_rate", 1.0)
+        self.declare_parameter("max_steering_rate", 1.0)  # rad/s
         self.declare_parameter("deadzone", 0.20)
         self.declare_parameter("command_timeout_sec", 0.50)
         self.declare_parameter("publish_rate_hz", 30.0)
@@ -40,7 +48,7 @@ class R2JoyTeleop(Node):
         self._enable_debounce = self.get_parameter("enable_debounce_sec").value
         self._min_speed = self.get_parameter("min_linear_speed").value
         self._max_speed = self.get_parameter("max_linear_speed").value
-        self._max_steering = self.get_parameter("max_steering").value
+        self._max_steering = self.get_parameter("max_steering_angle_rad").value
         self._max_linear_accel = self.get_parameter("max_linear_accel").value
         self._max_steering_rate = self.get_parameter("max_steering_rate").value
         self._deadzone = self.get_parameter("deadzone").value
@@ -120,7 +128,8 @@ class R2JoyTeleop(Node):
             self._target = Twist()
             return
 
-        # Yahboom's R2 driver uses linear.y as an Ackermann steering command.
+        # linear.y holds the wheel angle in rad here; _publish_command converts
+        # it to the firmware's degrees / 1000.
         throttle = self._axis(message, self._throttle_axis)
         self._target.linear.x = throttle * self._max_speed
         if throttle != 0.0 and abs(self._target.linear.x) < self._min_speed:
@@ -181,7 +190,10 @@ class R2JoyTeleop(Node):
                 self._output.linear.x = (
                     self._min_speed if self._target.linear.x > 0.0 else -self._min_speed
                 )
-        self._publisher.publish(self._output)
+        command = Twist()
+        command.linear.x = self._output.linear.x
+        command.linear.y = wheel_angle_to_firmware_steering(self._output.linear.y)
+        self._publisher.publish(command)
 
     def stop(self):
         if not rclpy.ok():

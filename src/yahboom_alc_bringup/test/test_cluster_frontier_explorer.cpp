@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <optional>
 #include <stdexcept>
 
@@ -389,6 +390,50 @@ TEST(ClusterFrontierExplorer, CoverageRevisitFiresOnlyWhenEnabled) {
     EXPECT_GT(with.counts.coverage_candidates, 0);
 }
 
+TEST(ClusterFrontierExplorer, MalformedMapIsRejectedAndPreviousMapKept) {
+    auto grid = buildGrid(30, 12, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.coverage_revisit_enabled = true;
+    core.setConfig(config);
+    const auto robot = core.mapToWorld(2, 5);
+    const auto before = core.findCandidates(robot, 0.0).candidates.size();
+    ASSERT_GT(before, 0u);
+
+    auto truncated = grid;
+    truncated.data.resize(truncated.data.size() / 2);
+    EXPECT_FALSE(core.setMap(truncated));
+    auto no_resolution = grid;
+    no_resolution.info.resolution = 0.0F;
+    EXPECT_FALSE(core.setMap(no_resolution));
+    EXPECT_EQ(core.findCandidates(robot, 1.0).candidates.size(), before);
+}
+
+TEST(ClusterFrontierExplorer, BlacklistExpiresWhenOnlyCoverageRemains) {
+    // No frontier cluster exists, so only coverage revisits can be chosen;
+    // their blacklist entries must still expire on schedule.
+    auto grid = buildGrid(30, 12, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.coverage_revisit_enabled = true;
+    core.setConfig(config);
+    const auto robot = core.mapToWorld(2, 5);
+
+    const auto fresh = core.findCandidates(robot, 0.0);
+    ASSERT_FALSE(fresh.candidates.empty());
+    for (const auto& candidate : fresh.candidates) {
+        for (int i = 0; i < config.failed_goal_max_retries; ++i) {
+            core.blacklistGoal(candidate.goal_xy, 0.0);
+        }
+    }
+    EXPECT_LT(core.findCandidates(robot, 1.0).candidates.size(),
+              fresh.candidates.size());
+
+    const double expired = config.failed_goal_blacklist_sec + 1.0;
+    EXPECT_EQ(core.findCandidates(robot, expired).candidates.size(),
+              fresh.candidates.size());
+}
+
 TEST(ClusterFrontierExplorer, FailureWeightAcceleratesBlacklist) {
     auto grid = buildGrid(20, 10, 0.1);
     auto core = makeCore(grid);
@@ -671,6 +716,39 @@ TEST(ClusterFrontierExplorer, CandidateRejectionCountsIncludeFilters) {
     EXPECT_GE(counts.rejected_blacklist, 1);
     EXPECT_GE(counts.rejected_too_near, 1);
     EXPECT_GE(counts.rejected_too_far, 1);
+}
+
+// realcar_20261122_111558: goals 0.5 m beside the robot with goal_yaw +-90 deg
+// cannot be reached driving forward with a 0.5 m turning radius; Smac planned
+// reverse cusps (the V-shaped back-and-forth) and the frontier stayed unseen.
+TEST(ClusterFrontierExplorer, RejectsGoalsInsideTurningCircles) {
+    auto grid = buildGrid(40, 40, 0.1);
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.min_turning_radius_m = 0.5;
+    core.setConfig(config);
+
+    const Cell start{20, 20};
+    const auto robot_xy = core.mapToWorld(start.first, start.second);
+    const std::vector<std::uint8_t> blocked(grid.data.size(), false);
+    const double robot_yaw = 0.0;
+
+    FrontierCounts counts;
+    EXPECT_FALSE(core.makeCandidate({{20, 25}}, start, robot_xy, blocked, 40,
+                                    40, counts, robot_yaw));  // 0.5 m left
+    EXPECT_FALSE(core.makeCandidate({{20, 15}}, start, robot_xy, blocked, 40,
+                                    40, counts, robot_yaw));  // 0.5 m right
+    EXPECT_GE(counts.rejected_turning_circle, 2);
+
+    FrontierCounts ahead_counts;
+    EXPECT_TRUE(core.makeCandidate({{27, 20}}, start, robot_xy, blocked, 40, 40,
+                                   ahead_counts, robot_yaw));  // 0.7 m ahead
+    EXPECT_EQ(ahead_counts.rejected_turning_circle, 0);
+
+    // Without a heading the turning circles are undefined: no rejection.
+    FrontierCounts no_yaw_counts;
+    EXPECT_TRUE(core.makeCandidate({{20, 25}}, start, robot_xy, blocked, 40, 40,
+                                   no_yaw_counts));
 }
 
 TEST(ClusterFrontierExplorer, ShouldPublishGoalHonorsDistanceAndPeriod) {
@@ -1033,7 +1111,7 @@ TEST(ClusterFrontierExplorer, PathTargetYawUsesNearestPathSegment) {
     ASSERT_TRUE(first_segment);
     ASSERT_TRUE(second_segment);
     EXPECT_NEAR(requireValue(first_segment), 0.0, 1e-6);
-    EXPECT_NEAR(requireValue(second_segment), M_PI_2, 1e-6);
+    EXPECT_NEAR(requireValue(second_segment), (std::numbers::pi / 2.0), 1e-6);
 }
 
 TEST(ClusterFrontierExplorer, AlignmentGraceFallsBackToActiveGoalYaw) {
@@ -1046,7 +1124,7 @@ TEST(ClusterFrontierExplorer, AlignmentGraceFallsBackToActiveGoalYaw) {
                                                     {}, goal_xy, 1.0);
 
     EXPECT_FALSE(status.active);
-    EXPECT_NEAR(status.target_yaw, M_PI_2, 1e-6);
+    EXPECT_NEAR(status.target_yaw, (std::numbers::pi / 2.0), 1e-6);
     EXPECT_GT(status.heading_error,
               core.config().alignment_heading_threshold_rad);
 }
@@ -1063,8 +1141,8 @@ TEST(ClusterFrontierExplorer, AlignmentGraceActivatesWhenYawConverges) {
     const auto goal_xy = core.mapToWorld(12, 5);
     const std::vector<Cell> path{{5, 5}, {12, 5}};
 
-    const auto status =
-        core.evaluateAlignmentGrace(robot_xy, 1.40, M_PI_2, path, goal_xy, 9.0);
+    const auto status = core.evaluateAlignmentGrace(
+        robot_xy, 1.40, (std::numbers::pi / 2.0), path, goal_xy, 9.0);
 
     EXPECT_TRUE(status.active);
     EXPECT_NEAR(status.target_yaw, 0.0, 1e-6);
@@ -1108,8 +1186,8 @@ TEST(ClusterFrontierExplorer, AlignmentGraceExpiresAfterMaxGrace) {
     const auto goal_xy = core.mapToWorld(12, 5);
     const std::vector<Cell> path{{5, 5}, {12, 5}};
 
-    const auto status = core.evaluateAlignmentGrace(robot_xy, 1.40, M_PI_2,
-                                                    path, goal_xy, 12.0);
+    const auto status = core.evaluateAlignmentGrace(
+        robot_xy, 1.40, (std::numbers::pi / 2.0), path, goal_xy, 12.0);
 
     EXPECT_FALSE(status.active);
     EXPECT_GT(status.heading_error_delta,
@@ -1375,6 +1453,46 @@ TEST(LethalCostmapCell, DetectsLethalStartCellOnly) {
         isLethalCostmapCell(nav_msgs::msg::OccupancyGrid{}, {0.02, 0.07}));
 }
 
+TEST(FootprintBlockedInCostmap, MirrorsSmacGoalFootprintCheck) {
+    // 1 m x 1 m at 0.05 m, origin (0, 0); pose at the center of cell (10, 10).
+    nav_msgs::msg::OccupancyGrid costmap;
+    costmap.info.resolution = 0.05;
+    costmap.info.width = 20;
+    costmap.info.height = 20;
+    costmap.data.assign(400, 0);
+    const auto set = [&](int x, int y, int8_t v) {
+        costmap.data[static_cast<std::size_t>(y) * 20 + x] = v;
+    };
+    FootprintGeometry footprint;  // 0.42 x 0.27 m, like the padded R2
+    footprint.front = 0.21;
+    footprint.rear = 0.21;
+    footprint.half_width = 0.135;
+    const WorldPoint pose{0.525, 0.525};
+
+    EXPECT_FALSE(isFootprintBlockedInCostmap(costmap, footprint, pose, 0.0));
+
+    // Lethal cell 0.15 m ahead (cell 13, center x 0.675): inside the long
+    // axis at yaw 0, outside the half width at yaw pi/2.
+    set(13, 10, 100);
+    EXPECT_TRUE(isFootprintBlockedInCostmap(costmap, footprint, pose, 0.0));
+    EXPECT_FALSE(isFootprintBlockedInCostmap(costmap, footprint, pose,
+                                             std::numbers::pi / 2.0));
+
+    // Inscribed (99) under the footprint but off-center is not a collision.
+    set(13, 10, 99);
+    EXPECT_FALSE(isFootprintBlockedInCostmap(costmap, footprint, pose, 0.0));
+    // Inscribed at the center cell is.
+    set(10, 10, 99);
+    EXPECT_TRUE(isFootprintBlockedInCostmap(costmap, footprint, pose, 0.0));
+    set(10, 10, 0);
+
+    // Out of bounds and an empty grid are not blocked.
+    EXPECT_FALSE(
+        isFootprintBlockedInCostmap(costmap, footprint, {1.5, 0.5}, 0.0));
+    EXPECT_FALSE(isFootprintBlockedInCostmap(nav_msgs::msg::OccupancyGrid{},
+                                             footprint, pose, 0.0));
+}
+
 nav_msgs::msg::OccupancyGrid bearingGrid() {
     // 41x41 cells at 0.05 m centred on the origin, all free.
     nav_msgs::msg::OccupancyGrid map;
@@ -1462,6 +1580,77 @@ TEST(UnknownBearing, SpaceOutsideMapCountsAsUnknown) {
     const auto bearing = unknownBearing(map, {0.0, 0.0}, 0.0, 0.87, 1.0);
     ASSERT_TRUE(bearing.has_value());
     EXPECT_NEAR(std::abs(*bearing), kPi, 0.15);
+}
+
+FrontierExplorerCore makeViewTailCore(
+    const nav_msgs::msg::OccupancyGrid& grid) {
+    auto core = makeCore(grid);
+    auto config = core.config();
+    config.view_tail_length_m = 1.40;
+    config.view_stop_offset_m = 0.35;
+    config.viewpoint_half_fov_rad = 0.5;
+    config.viewpoint_range_m = 3.0;
+    core.setConfig(config);
+    return core;
+}
+
+TEST(ClusterFrontierExplorer, ViewTailFacesTheUnknownAlongAFreeStraightTail) {
+    // Known free room x < 3.0 m, unknown beyond. The goal 0.55 m short of
+    // the unknown must be approached straight along a yaw that looks into it.
+    auto grid = buildGrid(40, 30, 0.1);
+    for (int y = 0; y < 30; ++y) {
+        for (int x = 30; x < 40; ++x) {
+            setCell(grid, x, y, -1);
+        }
+    }
+    auto core = makeViewTailCore(grid);
+    const std::vector<Cell> cluster{{24, 15}};
+    const std::vector<std::uint8_t> blocked(grid.data.size(), false);
+    FrontierCounts counts;
+    const auto candidate = core.makeCandidate(
+        cluster, {5, 15}, core.mapToWorld(5, 15), blocked, 40, 30, counts);
+
+    ASSERT_TRUE(candidate);
+    const auto& view = requireValue(candidate);
+    EXPECT_LE(std::abs(view.goal_yaw), 0.5);
+    EXPECT_GT(view.visible_unknown, 0);
+    EXPECT_EQ(static_cast<std::size_t>(view.visible_unknown),
+              view.view_cells.size());
+    // Every target is currently unknown, so none counts as observed yet.
+    EXPECT_EQ(core.countObserved(view.view_cells), 0);
+}
+
+TEST(ClusterFrontierExplorer, ViewTailRejectsAGoalNoStraightTailFits) {
+    // A 2 m square map: from its centre every 1.4 m tail (plus the rear of
+    // the footprint) leaves the map, which the footprint rule treats as
+    // occupied. Without the tail the same goal is accepted.
+    auto grid = buildGrid(20, 20, 0.1);
+    setCell(grid, 15, 15, -1);
+    const std::vector<Cell> cluster{{10, 10}};
+    const std::vector<std::uint8_t> blocked(grid.data.size(), false);
+
+    auto plain = makeCore(grid);
+    FrontierCounts plain_counts;
+    EXPECT_TRUE(plain.makeCandidate(cluster, {4, 10}, plain.mapToWorld(4, 10),
+                                    blocked, 20, 20, plain_counts));
+
+    auto core = makeViewTailCore(grid);
+    FrontierCounts counts;
+    EXPECT_FALSE(core.makeCandidate(cluster, {4, 10}, core.mapToWorld(4, 10),
+                                    blocked, 20, 20, counts));
+    EXPECT_EQ(counts.rejected_footprint, 1);
+}
+
+TEST(ClusterFrontierExplorer, CountObservedCountsCellsNoLongerUnknown) {
+    auto grid = buildGrid(10, 10, 0.1, -1);
+    auto core = makeCore(grid);
+    const std::vector<WorldPoint> cells{
+        core.mapToWorld(2, 2), core.mapToWorld(5, 5), core.mapToWorld(7, 1)};
+    EXPECT_EQ(core.countObserved(cells), 0);
+    setCell(grid, 5, 5, 0);
+    setCell(grid, 7, 1, 100);
+    core.setMap(grid);
+    EXPECT_EQ(core.countObserved(cells), 2);
 }
 
 }  // namespace

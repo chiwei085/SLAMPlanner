@@ -89,6 +89,10 @@ controller_server:
 
     general_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
+      # Navigation success only: RPP has no heading control at the path end and
+      # the car cannot turn in place, so a yaw tolerance made 10/16 replayed
+      # frontier goals abort (2026-11-22). Whether the frontier was actually
+      # seen is the explorer's judgement, not this checker's.
       xy_goal_tolerance: 0.35
       yaw_goal_tolerance: 6.283185
       stateful: True
@@ -118,6 +122,12 @@ controller_server:
       curvature_lookahead_dist: 0.35
       use_rotate_to_heading: false
       allow_reversing: true
+      # Reeds-Shepp paths fold back on themselves at a cusp, so the nearest pose
+      # by Euclidean distance jumps past the cusp before the car reaches it (the
+      # default window is the whole local costmap). An arc window of W skips a
+      # cusp at most W/2 early; W must still cover one pose spacing (~0.09) plus
+      # one cycle of travel (0.011).
+      max_robot_pose_search_dist: 0.15
       rotate_to_heading_min_angle: 0.785
       rotate_to_heading_angular_vel: 0.3
       max_angular_accel: 0.5
@@ -315,7 +325,22 @@ planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
     use_sim_time: False
-    planner_plugins: ["GridBased"]
+    planner_plugins: ["GridBased", "ViewApproach"]
+    # Frontier view goals (navigate_to_view_rgbd.xml): GridBased to the tail
+    # start, then a straight tail along the goal yaw, so the car stops facing
+    # the frontier (straight_tail.hpp). Values are derived, not tuned:
+    ViewApproach:
+      plugin: "yahboom_alc_bringup/StraightTailPlanner"
+      inner_plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      inner_name: "GridBased"
+      # xy_goal_tolerance (0.35, the stop can come that early) plus
+      # 3 * lookahead_dist: pure pursuit's cross-track error decays about as
+      # exp(-s / L_d), so 3 L_d leaves 5% of the error at entry.
+      tail_length: 1.40
+      # FollowPath.lookahead_dist (fixed: use_velocity_scaled_lookahead_dist
+      # is false) and 1 / minimum_turning_radius (0.50).
+      lookahead_dist: 0.35
+      max_curvature: 2.0
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       # Path end may fall this far short of the goal, and the goal checker

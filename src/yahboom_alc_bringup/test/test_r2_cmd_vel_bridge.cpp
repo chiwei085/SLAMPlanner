@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <numbers>
 
 #include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
 #include "yahboom_alc_bringup/recent_free_costmap_history.hpp"
@@ -19,15 +20,22 @@ using yahboom_alc_bringup::ReverseSafetyPose;
 
 constexpr double kTolerance = 1e-9;
 
+// R2 firmware steering for a path curvature: wheel angle in whole degrees
+// / 1000, from the bicycle model tan(delta) = L * curvature.
+double firmwareSteeringFor(const double curvature) {
+    const double degrees =
+        std::atan(0.2353 * curvature) * 180.0 / std::numbers::pi;
+    return std::round(degrees) / 1000.0;
+}
+
 R2CmdVelBridgeConfig defaultConfig() {
     R2CmdVelBridgeConfig config;
     config.min_linear_speed = 0.05;
     config.max_linear_speed = 0.26;
-    config.steering_gain = 1.25;
-    config.max_steering = 1.25;
+    config.wheelbase_m = 0.2353;
     config.min_turning_radius_m = 0.50;
     config.max_curvature = 2.0;
-    config.max_steering_angle_rad = 1.25;
+    config.max_steering_angle_rad = 0.6;
     config.linear_deadband = 0.001;
     config.angular_deadband = 0.001;
     config.arc_turn_when_stationary = true;
@@ -111,7 +119,9 @@ TEST(R2CmdVelBridge, AngularCommandMapsToLinearY) {
     const Twist output = convertNavTwistToR2(input, defaultConfig());
 
     EXPECT_NEAR(output.linear.x, 0.1, kTolerance);
-    EXPECT_NEAR(output.linear.y, 0.25, kTolerance);
+    // 0.4 / 0.1 = 4 exceeds the 1 / 0.5 m turning-radius limit -> curvature 2.
+    EXPECT_NEAR(output.linear.y, firmwareSteeringFor(2.0), kTolerance);
+    EXPECT_NEAR(output.linear.y, 0.025, kTolerance);
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
 }
 
@@ -179,7 +189,7 @@ TEST(R2CmdVelBridge, StationarySpinBecomesLowSpeedArcWhenEnabled) {
     const Twist output = convertNavTwistToR2(input, defaultConfig());
 
     EXPECT_NEAR(output.linear.x, 0.05, kTolerance);
-    EXPECT_NEAR(output.linear.y, -0.125, kTolerance);
+    EXPECT_NEAR(output.linear.y, firmwareSteeringFor(-2.0), kTolerance);
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
 }
 
@@ -207,12 +217,12 @@ TEST(R2CmdVelBridge, ReverseCommandFlipsSteeringAndClampsToTurningRadius) {
     const Twist output = convertNavTwistToR2(input, defaultConfig());
 
     EXPECT_NEAR(output.linear.x, -0.10, kTolerance);
-    EXPECT_NEAR(output.linear.y, 0.25, kTolerance);
+    EXPECT_NEAR(output.linear.y, firmwareSteeringFor(2.0), kTolerance);
 }
 
 TEST(R2CmdVelBridge, ForwardCommandClampsSteeringToTurningRadius) {
-    // angular_limit = |linear.x| / min_turning_radius_m = 0.10 / 0.50 = 0.20
-    // steering with clamp: 0.20 * 1.25 = 0.25 (vs unclamped 1.0 * 1.25 = 1.25)
+    // angular_limit = |linear.x| / min_turning_radius_m = 0.10 / 0.50 = 0.20,
+    // so curvature 2.0 instead of the requested 10.
     Twist input;
     input.linear.x = 0.10;
     input.angular.z = 1.0;
@@ -220,7 +230,35 @@ TEST(R2CmdVelBridge, ForwardCommandClampsSteeringToTurningRadius) {
     const Twist output = convertNavTwistToR2(input, defaultConfig());
 
     EXPECT_NEAR(output.linear.x, 0.10, kTolerance);
-    EXPECT_NEAR(output.linear.y, 0.25, kTolerance);
+    EXPECT_NEAR(output.linear.y, firmwareSteeringFor(2.0), kTolerance);
+}
+
+// run_20261122_095413: steering was angular * 1.25 on a firmware whose full
+// lock is 0.045, so 74% of commands saturated. Small curvatures must now stay
+// small.
+TEST(R2CmdVelBridge, SmallCurvatureGivesProportionalWheelAngle) {
+    Twist input;
+    input.linear.x = 0.10;
+    input.angular.z = 0.05;  // curvature 0.5 -> 6.7 deg
+
+    const Twist output = convertNavTwistToR2(input, defaultConfig());
+
+    EXPECT_NEAR(output.linear.y, 0.007, kTolerance);
+    EXPECT_LT(std::abs(output.linear.y), 0.045);
+}
+
+TEST(R2CmdVelBridge, WheelAngleIsClampedToSteerJointLimit) {
+    R2CmdVelBridgeConfig config = defaultConfig();
+    config.min_turning_radius_m = 0.0;
+    config.max_curvature = 100.0;
+    Twist input;
+    input.linear.x = 0.10;
+    input.angular.z = 10.0;
+
+    const Twist output = convertNavTwistToR2(input, config);
+
+    // 0.6 rad = 34.4 deg -> 34 whole degrees.
+    EXPECT_NEAR(output.linear.y, 0.034, kTolerance);
 }
 
 TEST(R2CmdVelBridge, ReverseSafetyAllowsFullyFreeRearFootprint) {
@@ -246,9 +284,19 @@ TEST(R2CmdVelBridge, ReverseSafetyAllowsInflatedRearFootprintCost) {
     EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
 }
 
-TEST(R2CmdVelBridge, ReverseSafetyBlocksHighRearFootprintCost) {
+// run_20261122_095413: all 133 rear_blocked events had only inscribed (99)
+// cells in the strip, with the nearest lethal cell 0.075-0.10 m outside it.
+TEST(R2CmdVelBridge, ReverseSafetyAllowsInscribedRearFootprintCost) {
     auto costmap = buildCostmap();
     setWorldCell(costmap, -0.22, 0.0, 99);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, ReverseSafetyBlocksLethalRearFootprintCost) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, -0.22, 0.0, 100);
     const ReverseSafetyPose pose{0.0, 0.0, 0.0};
 
     EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
@@ -265,10 +313,21 @@ TEST(R2CmdVelBridge, ReverseSafetyBlocksUnknownRearFootprint) {
 // A cell that flips to unknown (e.g. it just fell out of the rolling
 // costmap's observation window) but was seen clearly free moments ago should
 // not fail closed the same way a cell that was never observed does.
+TEST(R2CmdVelBridge, RecentFreeHistoryRejectsTruncatedCostmap) {
+    RecentFreeCostmapHistory history;
+    auto truncated = buildCostmap();
+    truncated.data.resize(truncated.data.size() / 2);
+    EXPECT_FALSE(history.observe(truncated, /*now_sec=*/100.0,
+                                 yahboom_alc_bringup::kFootprintFreeCostMax));
+    EXPECT_FALSE(history.wasRecentlyFree(-0.22, 0.0, 100.5, 2.0));
+    EXPECT_TRUE(history.observe(buildCostmap(), /*now_sec=*/100.0,
+                                yahboom_alc_bringup::kFootprintFreeCostMax));
+}
+
 TEST(R2CmdVelBridge, ReverseSafetyAllowsRecentlyFreeUnknownRearFootprint) {
     RecentFreeCostmapHistory history;
     history.observe(buildCostmap(), /*now_sec=*/100.0,
-                    defaultConfig().reverse_allowed_cost_max);
+                    yahboom_alc_bringup::kFootprintFreeCostMax);
 
     auto costmap = buildCostmap();
     setWorldCell(costmap, -0.22, 0.0, -1);
@@ -294,7 +353,7 @@ TEST(R2CmdVelBridge,
      ReverseSafetyBlocksUnknownRearFootprintOnceRecentFreeGraceExpires) {
     RecentFreeCostmapHistory history;
     history.observe(buildCostmap(), /*now_sec=*/100.0,
-                    defaultConfig().reverse_allowed_cost_max);
+                    yahboom_alc_bringup::kFootprintFreeCostMax);
 
     auto costmap = buildCostmap();
     setWorldCell(costmap, -0.22, 0.0, -1);
@@ -352,9 +411,18 @@ TEST(R2CmdVelBridge, StationaryArcForwardSafetyAllowsClearFrontFootprint) {
                                                     defaultConfig()));
 }
 
-TEST(R2CmdVelBridge, StationaryArcForwardSafetyBlocksHighFrontCost) {
+TEST(R2CmdVelBridge, StationaryArcForwardSafetyAllowsInscribedFrontCost) {
     auto costmap = buildCostmap();
     setWorldCell(costmap, 0.22, 0.0, 99);
+    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
+
+    EXPECT_TRUE(isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05,
+                                                    defaultConfig()));
+}
+
+TEST(R2CmdVelBridge, StationaryArcForwardSafetyBlocksLethalFrontCost) {
+    auto costmap = buildCostmap();
+    setWorldCell(costmap, 0.22, 0.0, 100);
     const ReverseSafetyPose pose{0.0, 0.0, 0.0};
 
     EXPECT_FALSE(isStationaryArcForwardSafeInCostmap(costmap, pose, 0.05,
@@ -422,11 +490,25 @@ TEST(BlindReverseWindow, OpensOnTurnStartAndClosesOnFinishOrTimeout) {
 
 TEST(IdleStop, StreamsZeroOnlyDuringBurstAfterInputSilence) {
     using yahboom_alc_bringup::shouldPublishIdleStop;
-    EXPECT_FALSE(shouldPublishIdleStop(0.3, 0.5, 1.0));  // input still fresh
-    EXPECT_TRUE(shouldPublishIdleStop(0.6, 0.5, 1.0));
-    EXPECT_TRUE(shouldPublishIdleStop(1.5, 0.5, 1.0));
-    EXPECT_FALSE(shouldPublishIdleStop(1.6, 0.5, 1.0));  // burst done: idle
-    EXPECT_FALSE(shouldPublishIdleStop(5.0, 0.0, 1.0));  // disabled
+    std::optional<double> end;
+    EXPECT_FALSE(shouldPublishIdleStop(0.3, 0.0, 0.5, 1.0, end));  // fresh
+    EXPECT_TRUE(shouldPublishIdleStop(0.6, 0.0, 0.5, 1.0, end));
+    EXPECT_TRUE(shouldPublishIdleStop(1.6, 0.0, 0.5, 1.0, end));
+    EXPECT_FALSE(shouldPublishIdleStop(1.7, 0.0, 0.5, 1.0, end));  // done
+    std::optional<double> disabled;
+    EXPECT_FALSE(shouldPublishIdleStop(5.0, 0.0, 0.0, 1.0, disabled));
+}
+
+TEST(IdleStop, LateTimerStillSendsTheFullBurst) {
+    using yahboom_alc_bringup::shouldPublishIdleStop;
+    std::optional<double> end;
+    // The first tick after silence comes 2 s late: the burst starts there.
+    EXPECT_TRUE(shouldPublishIdleStop(2.0, 0.0, 0.5, 1.0, end));
+    EXPECT_TRUE(shouldPublishIdleStop(2.9, 0.0, 0.5, 1.0, end));
+    EXPECT_FALSE(shouldPublishIdleStop(3.1, 0.0, 0.5, 1.0, end));
+    // New input resets the deadline; the next silence gets its own burst.
+    end.reset();
+    EXPECT_TRUE(shouldPublishIdleStop(10.0, 9.0, 0.5, 1.0, end));
 }
 
 }  // namespace

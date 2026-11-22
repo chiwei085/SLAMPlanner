@@ -20,12 +20,13 @@ README for the mode table and how the defaults were measured.
 
 The launch disables RTAB-Map's `map -> odom` TF publisher and runs
 `rtabmap_map_tf_relay` as the only `map -> odom` TF publisher. Nav2 is started
-with `navigation_launch.py` only, so AMCL and Nav2 map_server do not compete
-with RTAB-Map localization.
+with this package's `r2_navigation_launch.py` only, so AMCL and Nav2 map_server
+do not compete with RTAB-Map localization.
 
 The integration launch passes an indoor MVP parameter profile to `alc_planner`
 so candidate radius, revisit floors, trigger threshold, and navigation timeout
-can be tuned without recompiling. RTAB-Map uses visual+ICP registration, and
+can be tuned without recompiling. RTAB-Map uses visual-only registration
+(`Reg/Strategy=0`, 3D-3D estimation for dual cameras, PnP for astra), and
 Nav2's goal checker is configured with a wide yaw tolerance to avoid R2 arc-turn
 loops around ALC revisit targets.
 
@@ -35,12 +36,17 @@ loops around ALC revisit targets.
 `/alc/nav_cmd_vel` to the Yahboom R2 driver's `/cmd_vel` convention:
 
 - `linear.x` remains the forward velocity.
-- `angular.z` is converted to R2 steering in `linear.y`.
+- `angular.z` is converted to R2 steering in `linear.y`: the curvature
+  `angular.z / linear.x` gives the front wheel angle `atan(wheelbase * curvature)`,
+  sent as degrees / 1000, which is the unit the R2 firmware reads (±0.045 is its
+  ±45° limit).
 - output `angular.z` is set to zero by default.
 
-Default limits follow the lowest gear in
-`yahboom_joy_R2_v2.py`: `min_linear_speed=0.05`,
-`steering_gain=1.25`, and `max_steering=1.25`.
+The exploration launch sets `min_linear_speed=0.08`,
+`max_linear_speed=0.11`, `wheelbase_m=0.2353` (Yahboom R2 URDF axles), and
+`max_steering_angle_rad=0.6` (URDF steer-joint limit).
+After 0.5 s without input, the bridge streams centered zero commands for 1 s
+because the R2 driver has no command timeout.
 
 ## Reeds-Shepp Reverse Safety
 
@@ -50,11 +56,17 @@ pre-checks, and command bridge share a conservative R2 footprint of about
 `0.38 x 0.23 m`, plus inflation in Nav2.
 
 The bridge is the final gate for reverse motion. Every negative `linear.x`
-command is fail-closed against the local costmap: stale costmap, missing TF,
+command is checked against the local costmap: stale costmap, missing TF,
 unknown cells, out-of-bounds swept footprint, or any footprint cell above the
 configured cost threshold publishes zero `/cmd_vel` and emits
 `reverse_blocked`. The check covers the full short swept footprint volume
 behind the robot, not only the rear centerline.
+
+There are two exceptions for unknown cells: cells seen free within the last
+2 s are accepted, and observation turns toward unknown space permit blind
+reverse for up to 30 s per turn. Known occupied cells still block motion.
+There is no rear sensor, so the observation-turn exception carries a
+blind-reverse risk.
 
 Because this profile assumes front-facing RGB-D only (one or two cameras), Nav2 `BackUp` recovery is kept
 short and slow. Repeated reverse safety failures mark the current frontier as
@@ -63,19 +75,18 @@ viewpoint.
 
 ## Stall Detection
 
-`r2_stall_detector` handles the case where forward commands and wheel odometry
-show progress but independent observations do not. Its forward depth check reads
-the D455 depth image in dual mode (the high Astra cannot see the near floor) and
-the Astra depth image in astra mode. It compares `/alc/nav_cmd_vel`,
-wheel `/odom`, the SLAM `map -> base_footprint` TF, and `/imu/data`. When a
-forward command persists, wheel odom advances, but SLAM/IMU motion does not
-match, it publishes a zero command burst and emits `stall_or_slip`.
+`r2_stall_detector` compares expected forward motion from executed `/cmd_vel`
+with EKF `/odom` displacement. It also reads `/imu/data` yaw rate to avoid
+declaring a stall while turning; it has no depth or SLAM-pose input. The launch
+allows 1.5 s for the chassis to respond from rest, then accumulates at least
+0.06 m of expected motion. Displacement below 30% of that distance, without
+IMU yaw motion, triggers a 0.5 s zero-command burst and `stall_or_slip`.
 
-The frontier explorer treats `stall_or_slip` as a front blockage signal, cancels
-the active Nav2 goal, marks the viewpoint `STALL_OR_SLIP`, and selects a new
-frontier. Nav2 `SimpleProgressChecker` remains enabled as a Nav2-level timeout,
-but it is not the only stuck detector because wheel odometry can be fooled by
-slip.
+The frontier explorer feeds this event into its recovery state machine and
+hazard/goal-failure tracking. Nav2 `SimpleProgressChecker` also remains enabled.
+Neither EKF odometry nor this detector independently measures body translation,
+so wheel slip cannot be reliably distinguished from actual progress. There is
+no IMU impact reflex.
 
 ## Spin Compatibility
 
@@ -202,13 +213,17 @@ discovery alone is insufficient: confirm continuing RGB-D delivery.
 
 ## Run
 
+This package requires C++20 and a standard library with `std::format` support
+(verified on this Jetson with GCC 16.2). The ALC planner keeps its own
+language standard.
+
 Build this overlay together with the ALC planner:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/yahboomcar_ros2_ws/software/library_ws/install/setup.bash
 source ~/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash
-colcon build --packages-select alc_planner yahboom_alc_bringup
+colcon build --packages-select alc_planner yahboom_alc_bringup --cmake-args -GNinja
 source install/setup.bash
 ```
 

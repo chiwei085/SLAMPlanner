@@ -17,12 +17,14 @@ constexpr double kPruneHorizonSec = 30.0;
 
 }  // namespace
 
-void RecentFreeCostmapHistory::observe(
+bool RecentFreeCostmapHistory::observe(
     const nav_msgs::msg::OccupancyGrid& costmap, const double now_sec,
     const int free_cost_max) {
     const double resolution = costmap.info.resolution;
-    if (resolution <= 0.0 || costmap.data.empty()) {
-        return;
+    if (resolution <= 0.0 || costmap.data.empty() ||
+        costmap.data.size() != static_cast<std::size_t>(costmap.info.width) *
+                                   costmap.info.height) {
+        return false;
     }
     resolution_ = resolution;
     const double origin_x = costmap.info.origin.position.x;
@@ -42,14 +44,10 @@ void RecentFreeCostmapHistory::observe(
                             floorDiv(world_y, resolution)}] = now_sec;
         }
     }
-    for (auto it = last_free_sec_.begin(); it != last_free_sec_.end();) {
-        if (now_sec - it->second > kPruneHorizonSec) {
-            it = last_free_sec_.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
+    std::erase_if(last_free_sec_, [now_sec](const auto& entry) {
+        return now_sec - entry.second > kPruneHorizonSec;
+    });
+    return true;
 }
 
 bool RecentFreeCostmapHistory::wasRecentlyFree(const double world_x,

@@ -205,12 +205,12 @@ Visualization Manager:
         Value: /camera/color/image_raw
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
-      Max Value: 1
+      Enabled: true
+      Max Value: 5000
       Median window: 5
       Min Value: 0
       Name: Astra Depth (high)
-      Normalize Range: true
+      Normalize Range: false
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -234,11 +234,11 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
-      Max Value: 1
+      Max Value: 5000
       Median window: 5
       Min Value: 0
       Name: D455 Depth (low)
-      Normalize Range: true
+      Normalize Range: false
       Topic:
         Depth: 5
         Durability Policy: Volatile

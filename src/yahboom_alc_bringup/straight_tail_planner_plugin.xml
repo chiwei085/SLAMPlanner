@@ -1,0 +1,5 @@
+<library path="straight_tail_planner">
+  <class name="yahboom_alc_bringup/StraightTailPlanner" type="yahboom_alc_bringup::StraightTailPlanner" base_class_type="nav2_core::GlobalPlanner">
+    <description>Inner planner to a straight tail that ends at the goal along its yaw (frontier view goals).</description>
+  </class>
+</library>

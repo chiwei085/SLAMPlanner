@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.8)
 project(yahboom_alc_bringup)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -25,11 +25,14 @@ find_package(ament_index_cpp REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
+find_package(nav2_core REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_planner REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(PCL REQUIRED COMPONENTS filters)
 find_package(pcl_conversions REQUIRED)
+find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -41,15 +44,19 @@ find_package(visualization_msgs REQUIRED)
 
 add_library(yahboom_alc_bringup_lib
   src/backtrace_recovery.cpp
-  src/frontier_explorer_core.cpp
+  src/exploration_memory.cpp
+  src/frontier_search.cpp
+  src/grid_planning.cpp
   src/planner_event.cpp
   src/planner_runtime_logger.cpp
   src/r2_cmd_vel_bridge.cpp
   src/r2_stall_detector_core.cpp
   src/recent_free_costmap_history.cpp
   src/recovery_state_machine.cpp
+  src/straight_tail.cpp
 )
 set_target_properties(yahboom_alc_bringup_lib PROPERTIES UNITY_BUILD ON)
+target_compile_features(yahboom_alc_bringup_lib PUBLIC cxx_std_20)
 target_include_directories(yahboom_alc_bringup_lib
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -65,11 +72,38 @@ ament_target_dependencies(yahboom_alc_bringup_lib
   tf2_ros
 )
 
+# The explorer node class, shared by its executable and the sequence tests.
+add_library(cluster_frontier_explorer_node STATIC
+  src/explorer/behavior_attempt.cpp
+  src/explorer/cluster_frontier_explorer_node.cpp
+  src/explorer/observation_turn.cpp
+  src/explorer/recovery_driver.cpp
+  src/explorer/route_executor.cpp
+)
+target_include_directories(cluster_frontier_explorer_node
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(cluster_frontier_explorer_node
+  yahboom_alc_bringup_lib
+)
+ament_target_dependencies(cluster_frontier_explorer_node
+  geometry_msgs
+  lifecycle_msgs
+  nav2_msgs
+  nav_msgs
+  rclcpp
+  rclcpp_action
+  sensor_msgs
+  std_msgs
+  tf2_ros
+  visualization_msgs
+)
+
 add_executable(cluster_frontier_explorer
-  src/cluster_frontier_explorer_node.cpp
+  src/explorer/explorer_main.cpp
 )
 target_link_libraries(cluster_frontier_explorer
-  yahboom_alc_bringup_lib
+  cluster_frontier_explorer_node
 )
 ament_target_dependencies(cluster_frontier_explorer
   geometry_msgs
@@ -158,6 +192,22 @@ ament_target_dependencies(r2_planner_server
   rclcpp
 )
 
+add_library(straight_tail_planner SHARED
+  src/straight_tail.cpp
+  src/straight_tail_planner.cpp
+)
+target_compile_features(straight_tail_planner PUBLIC cxx_std_20)
+target_include_directories(straight_tail_planner
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ament_target_dependencies(straight_tail_planner
+  nav2_core
+  nav2_costmap_2d
+  pluginlib
+  rclcpp
+  tf2
+)
+pluginlib_export_plugin_description_file(nav2_core straight_tail_planner_plugin.xml)
+
 add_executable(depth_cloud_preprocessor
   src/depth_cloud_preprocessor.cpp
 )
@@ -212,6 +262,7 @@ install(
     r2_safety_stop
     r2_stall_detector
     r2_planner_server
+    straight_tail_planner
     rtabmap_map_tf_relay
     yahboom_r2_cmd_vel_bridge
   ARCHIVE DESTINATION lib
@@ -247,6 +298,21 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_cluster_frontier_explorer
     nav_msgs
+  )
+
+  ament_add_gtest(test_straight_tail
+    test/test_straight_tail.cpp
+  )
+  target_link_libraries(test_straight_tail
+    yahboom_alc_bringup_lib
+  )
+
+  ament_add_gtest(test_explorer_node_sequences
+    test/test_explorer_node_sequences.cpp
+    TIMEOUT 300
+  )
+  target_link_libraries(test_explorer_node_sequences
+    cluster_frontier_explorer_node
   )
 
   ament_add_gtest(test_backtrace_recovery
@@ -297,6 +363,11 @@ if(BUILD_TESTING)
     rclcpp
     sensor_msgs
   )
+
+  # Humble's GoogleTest relies on a transitive cstdint include absent in newer GCC.
+  if(TARGET gtest AND (CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+    target_compile_options(gtest PRIVATE -include cstdint)
+  endif()
 endif()
 
 ament_package()

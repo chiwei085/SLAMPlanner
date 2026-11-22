@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cmath>
+#include <numbers>
 #include <utility>
 
 namespace yahboom_alc_bringup
 {
 
-constexpr double kPi = 3.14159265358979323846;
+inline constexpr double kPi = std::numbers::pi;
 
 struct DecimalPlaces
 {

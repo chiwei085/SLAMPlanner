@@ -1,8 +1,8 @@
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
 
 #include <chrono>
-#include <iomanip>
-#include <sstream>
+#include <ctime>
+#include <format>
 #include <stdexcept>
 
 namespace yahboom_alc_bringup
@@ -99,9 +99,9 @@ std::string makeRunLogName() {
     const auto time = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
     localtime_r(&time, &tm);
-    std::ostringstream out;
-    out << "run_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".jsonl";
-    return out.str();
+    return std::format("run_{:04}{:02}{:02}_{:02}{:02}{:02}.jsonl",
+                       tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                       tm.tm_min, tm.tm_sec);
 }
 
 PlannerLogWriter::PlannerLogWriter(const std::filesystem::path& log_dir,

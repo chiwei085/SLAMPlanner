@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -21,6 +22,23 @@ nav_msgs::msg::OccupancyGrid buildGrid() {
     grid.data[0] = -1;
     grid.data[1] = 100;
     return grid;
+}
+
+TEST(PlannerRuntimeLogger, RunLogNamePreservesLocalTimestampFormat) {
+    const auto before = std::time(nullptr);
+    const auto name = makeRunLogName();
+    const auto after = std::time(nullptr);
+
+    std::tm local_time{};
+    const auto* suffix =
+        strptime(name.c_str(), "run_%Y%m%d_%H%M%S.jsonl", &local_time);
+    ASSERT_NE(suffix, nullptr);
+    EXPECT_EQ(*suffix, '\0');
+    EXPECT_EQ(name.size(), 25U);
+    local_time.tm_isdst = -1;
+    const auto timestamp = std::mktime(&local_time);
+    EXPECT_GE(timestamp, before);
+    EXPECT_LE(timestamp, after);
 }
 
 TEST(PlannerRuntimeLogger, LogWriterAppendsCompleteJsonRecordsOnSeparateLines) {
