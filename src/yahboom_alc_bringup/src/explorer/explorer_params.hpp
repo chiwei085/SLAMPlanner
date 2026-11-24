@@ -122,27 +122,11 @@ struct descriptor<yahboom_alc_bringup::RecoveryStateMachineConfig>
             named(
                 &RecoveryStateMachineConfig::recovery_forward_escape_distance_m,
                 "recovery_forward_escape_distance_m"),
-            named(&RecoveryStateMachineConfig::rear_blocked_min_latch_sec,
-                  "rear_blocked_min_latch_sec"),
-            named(&RecoveryStateMachineConfig::
-                      rear_blocked_clear_forward_displacement_m,
-                  "rear_blocked_clear_forward_displacement_m"),
+
+            named(&RecoveryStateMachineConfig::recovery_spin_time_allowance_sec,
+                  "recovery_spin_time_allowance_sec"),
             named(&RecoveryStateMachineConfig::recovery_clearance_backup_m,
-                  "recovery_clearance_backup_m"),
-            named(&RecoveryStateMachineConfig::
-                      recovery_stagnation_escalation_trees,
-                  "recovery_stagnation_escalation_trees"),
-            named(&RecoveryStateMachineConfig::recovery_stagnation_radius_m,
-                  "recovery_stagnation_radius_m"),
-            named(&RecoveryStateMachineConfig::
-                      recovery_reobserve_map_stall_ceiling_sec,
-                  "recovery_reobserve_map_stall_ceiling_sec"),
-            named(&RecoveryStateMachineConfig::
-                      recovery_reobserve_perception_stall_max_extensions,
-                  "recovery_reobserve_perception_stall_max_extensions"),
-            named(&RecoveryStateMachineConfig::
-                      recovery_perception_stall_pause_max_sec,
-                  "recovery_perception_stall_pause_max_sec"));
+                  "recovery_clearance_backup_m"));
     }
 };
 
@@ -252,20 +236,7 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "stuck_progress_radius_m"),
             named(&FrontierConfig::stuck_progress_timeout_sec,
                   "stuck_progress_timeout_sec"),
-            named(&FrontierConfig::near_goal_hysteresis_radius_m,
-                  "near_goal_hysteresis_radius_m"),
-            named(&FrontierConfig::near_goal_retry_limit,
-                  "near_goal_retry_limit"),
-            named(&FrontierConfig::near_goal_hysteresis_sec,
-                  "near_goal_hysteresis_sec"),
-            named(&FrontierConfig::alignment_grace_enabled,
-                  "alignment_grace_enabled"),
-            named(&FrontierConfig::alignment_heading_threshold_rad,
-                  "alignment_heading_threshold_rad"),
-            named(&FrontierConfig::alignment_max_grace_sec,
-                  "alignment_max_grace_sec"),
-            named(&FrontierConfig::alignment_min_rotation_delta_rad,
-                  "alignment_min_rotation_delta_rad"),
+
             named(&FrontierConfig::failed_goal_blacklist_radius_m,
                   "failed_goal_blacklist_radius_m"),
             named(&FrontierConfig::failed_goal_blacklist_sec,
@@ -290,18 +261,12 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "subgoal_path_tolerance_m"),
             named(&FrontierConfig::min_subgoal_spacing_m,
                   "min_subgoal_spacing_m"),
-            named(&FrontierConfig::no_frontier_relax_sec,
-                  "no_frontier_relax_sec"),
+
             named(&FrontierConfig::relaxed_min_frontier_size,
                   "relaxed_min_frontier_size"),
             named(&FrontierConfig::relaxed_max_frontier_distance,
                   "relaxed_max_frontier_distance"),
-            named(&FrontierConfig::alignment_spin_enabled,
-                  "alignment_spin_enabled"),
-            named(&FrontierConfig::alignment_spin_max_attempts,
-                  "alignment_spin_max_attempts"),
-            named(&FrontierConfig::alignment_spin_time_allowance_sec,
-                  "alignment_spin_time_allowance_sec"),
+
             named(&FrontierConfig::coverage_blend_weight,
                   "coverage_blend_weight"),
             named(&FrontierConfig::intention_distance_threshold_m,

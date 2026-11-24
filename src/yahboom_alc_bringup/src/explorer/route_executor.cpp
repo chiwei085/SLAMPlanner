@@ -470,20 +470,12 @@ void ClusterFrontierExplorerNode::startRoute(
             visited.tried = false;
         }
     }
-    const auto projection = core_.projectOntoPath(robot_xy, active_route_path_);
-    last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
-    rear_latch_progress_arc_length_ = last_progress_arc_length_;
     last_progress_time_sec_ = nowSec();
     active_goal_sent_time_sec_ = nowSec();
     active_waypoint_sent_time_sec_ = nowSec();
-    last_alignment_robot_yaw_.reset();
-    active_goal_hysteresis_retries_ = 0;
-    alignment_spin_attempts_ = 0;
     breadcrumb_trail_.clear();
     breadcrumb_trail_.add({robot_xy, 0.0, nowSec()});
     backtrace_planner_.reset();
-    consecutive_reverse_blocked_ = 0;
-    spurious_success_resend_streak_ = 0;
     recovery_escape_active_ = false;
     core_.noteGoalPublished(final_candidate.goal_xy, final_candidate.goal_yaw,
                             nowSec(), final_candidate.path_length);
@@ -538,7 +530,6 @@ void ClusterFrontierExplorerNode::sendGoal(const WorldPoint& goal_xy,
     goal_active_ = true;
     active_goal_ = goal_xy;
     active_waypoint_sent_time_sec_ = nowSec();
-    last_alignment_robot_yaw_.reset();
     wait_log_count_ = 0;
     publishGoalMarker(goal_xy, goal_yaw);
     RCLCPP_INFO(get_logger(),
@@ -584,8 +575,7 @@ void ClusterFrontierExplorerNode::onGoalResponse(
 
 void ClusterFrontierExplorerNode::onGoalResult(
     const int generation, const GoalHandle::WrappedResult& result) {
-    if (generation != nav_goal_generation_ || !goal_active_ ||
-        behaviorActive(BehaviorPurpose::kAlignSpin)) {
+    if (generation != nav_goal_generation_ || !goal_active_) {
         return;
     }
     const int status = static_cast<int>(result.code);
@@ -614,26 +604,12 @@ void ClusterFrontierExplorerNode::onGoalResult(
             {{"goal_xy", activeGoalJson()},
              {"distance_m", rounded(goal_distance)},
              {"tolerance_m", rounded(nav2_success_xy_tolerance_m_)},
-             {"elapsed_sec", rounded(elapsed)},
-             {"resend_streak", spurious_success_resend_streak_}});
-        if (spurious_success_resend_streak_ < kSpuriousSuccessResendMax) {
-            ++spurious_success_resend_streak_;
-            publishPlannerEvent(
-                "nav2_spurious_success_resend",
-                {{"goal_xy", activeGoalJson()},
-                 {"resend_streak", spurious_success_resend_streak_},
-                 {"elapsed_sec", rounded(elapsed)}});
-            goal_handle_.reset();
-            goal_active_ = false;
-            last_progress_time_sec_ = nowSec();
-            sendActiveWaypoint();
-            return;
-        }
-        spurious_success_resend_streak_ = 0;
-        startRecoveryTree("nav2_success_pose_mismatch");
+             {"elapsed_sec", rounded(elapsed)}});
+        // Driven and ended elsewhere: a fact about this goal.
+        abandonActiveGoal("nav2_success_pose_mismatch",
+                          FailureClass::kControllerNoProgress);
         return;
     }
-    spurious_success_resend_streak_ = 0;
 
     if (active_route_index_ + 1 < active_route_.size()) {
         publishPlannerEvent(
@@ -642,14 +618,8 @@ void ClusterFrontierExplorerNode::onGoalResult(
         goal_handle_.reset();
         goal_active_ = false;
         ++active_route_index_;
-        const auto projection =
-            core_.projectOntoPath(robot_pose->xy, active_route_path_);
-        if (projection) {
-            last_progress_arc_length_ = projection->arc_length;
-        }
         last_progress_time_sec_ = nowSec();
         active_waypoint_sent_time_sec_ = nowSec();
-        last_alignment_robot_yaw_.reset();
         sendActiveWaypoint();
         return;
     }
@@ -665,7 +635,6 @@ void ClusterFrontierExplorerNode::onGoalResult(
                              {"failure_class", "global_path_blocked"},
                              {"duration_sec", rounded(route_duration)}});
         blacklistActiveGoal(FailureClass::kGlobalPathBlocked);
-        consecutive_backtrace_stall_count_ = 0;
         clearActiveGoal();
         return;
     }
@@ -675,7 +644,6 @@ void ClusterFrontierExplorerNode::onGoalResult(
         pending_view_check_ =
             ViewCheck{*active_final_goal_, std::move(active_view_cells_)};
     }
-    consecutive_backtrace_stall_count_ = 0;
     clearActiveGoal();
 }
 
@@ -683,10 +651,6 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
     const RobotPose& robot_pose) {
     const double now = nowSec();
     breadcrumb_trail_.add({robot_pose.xy, robot_pose.yaw, now});
-    if (behaviorActive(BehaviorPurpose::kAlignSpin)) {
-        checkBehaviorTimeout(now);
-        return;
-    }
     const auto& config = core_.config();
     if (config.goal_timeout_sec > 0.0 &&
         now - active_goal_sent_time_sec_ >= config.goal_timeout_sec) {
@@ -705,31 +669,6 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
                           FailureClass::kGlobalPathBlocked);
         return;
     }
-    const auto projection =
-        core_.projectOntoPath(robot_pose.xy, active_route_path_);
-    if (projection && recovery_.rearBlockedLatchActive()) {
-        const double latch_progress_delta =
-            projection->arc_length - rear_latch_progress_arc_length_;
-        if (latch_progress_delta > 0.0 &&
-            recovery_.noteForwardDisplacement(latch_progress_delta, now)) {
-            publishPlannerEvent(
-                "rear_blocked_cleared",
-                {{"stage", recoveryStageName(recovery_.stage())},
-                 {"reason", "forward_displacement"},
-                 {"failure_class", "none"},
-                 {"distance_m", rounded(latch_progress_delta)},
-                 {"goal_xy", activeFinalGoalJson()},
-                 {"active_waypoint_xy", activeGoalJson()},
-                 {"robot_xy", pointJson(robot_pose.xy)}});
-        }
-        if (latch_progress_delta > 0.0) {
-            rear_latch_progress_arc_length_ = projection->arc_length;
-        }
-    }
-    if (projection) {
-        last_progress_arc_length_ =
-            std::max(last_progress_arc_length_, projection->arc_length);
-    }
     // An Ackermann car backs up and turns on its way; only a car that stands
     // still makes no progress. The frontier's grid path cannot tell.
     const auto odom_pose = lookupPoseIn(kOdomFrame);
@@ -737,24 +676,10 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
                                               config.stuck_progress_radius_m)) {
         progress_odom_xy_ = odom_pose->xy;
         last_progress_time_sec_ = now;
-        last_alignment_robot_yaw_.reset();
-        consecutive_reverse_blocked_ = 0;
         return;
     }
     if (config.stuck_progress_timeout_sec > 0.0 &&
         now - last_progress_time_sec_ >= config.stuck_progress_timeout_sec) {
-        const auto alignment = evaluateActiveGoalAlignment(robot_pose, now);
-        if (tryAlignmentProgressGrace(robot_pose, now, alignment)) {
-            last_alignment_robot_yaw_ = robot_pose.yaw;
-            return;
-        }
-        if (tryNearGoalHysteresis(robot_pose.xy, now)) {
-            last_alignment_robot_yaw_ = robot_pose.yaw;
-            return;
-        }
-        if (trySpinAlignmentRecovery(robot_pose, alignment)) {
-            return;
-        }
         RCLCPP_WARN(get_logger(), "Abandoning frontier goal after no progress");
         publishPlannerEvent(
             "progress_window_expired",
@@ -767,157 +692,6 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
              {"limit_sec", rounded(config.stuck_progress_timeout_sec)}});
         startRecoveryTree("no_progress");
         return;
-    }
-    last_alignment_robot_yaw_ = robot_pose.yaw;
-}
-
-AlignmentGraceStatus ClusterFrontierExplorerNode::evaluateActiveGoalAlignment(
-    const RobotPose& robot_pose, const double now) const {
-    if (!active_goal_) {
-        return {};
-    }
-    return core_.evaluateAlignmentGrace(robot_pose.xy, robot_pose.yaw,
-                                        last_alignment_robot_yaw_,
-                                        active_route_path_, *active_goal_,
-                                        now - active_waypoint_sent_time_sec_);
-}
-
-bool ClusterFrontierExplorerNode::tryAlignmentProgressGrace(
-    const RobotPose& robot_pose, const double now,
-    const AlignmentGraceStatus& status) {
-    if (!status.active) {
-        return false;
-    }
-
-    const auto& config = core_.config();
-    const double last_progress_age = now - last_progress_time_sec_;
-    // Backdate so no_progress won't re-fire until alignment_max_grace_sec
-    // has elapsed from when this waypoint was sent.
-    const double capped_progress_time = active_waypoint_sent_time_sec_ +
-                                        config.alignment_max_grace_sec -
-                                        config.stuck_progress_timeout_sec;
-    last_progress_time_sec_ =
-        std::max(last_progress_time_sec_, capped_progress_time);
-    publishPlannerEvent("alignment_progress_grace",
-                        {{"goal_xy", activeFinalGoalJson()},
-                         {"active_waypoint_xy", activeGoalJson()},
-                         {"robot_xy", pointJson(robot_pose.xy)},
-                         {"heading_error", rounded(status.heading_error)},
-                         {"target_yaw", rounded(status.target_yaw)},
-                         {"elapsed_since_waypoint_sent",
-                          rounded(now - active_waypoint_sent_time_sec_)},
-                         {"last_progress_age", rounded(last_progress_age)}});
-    RCLCPP_DEBUG(get_logger(),
-                 "Holding frontier goal for alignment heading_error=%.3f",
-                 status.heading_error);
-    return true;
-}
-
-bool ClusterFrontierExplorerNode::tryNearGoalHysteresis(
-    const WorldPoint& robot_xy, const double now) {
-    const auto& config = core_.config();
-    if (config.near_goal_retry_limit <= 0 ||
-        active_goal_hysteresis_retries_ >= config.near_goal_retry_limit ||
-        config.near_goal_hysteresis_radius_m <= 0.0) {
-        return false;
-    }
-    if (!isNearActiveGoal(robot_xy, config.near_goal_hysteresis_radius_m)) {
-        return false;
-    }
-
-    ++active_goal_hysteresis_retries_;
-    extendActiveGoalTimers(now);
-    publishPlannerEvent("no_progress_hysteresis_retry",
-                        {{"goal_xy", activeFinalGoalJson()},
-                         {"active_waypoint_xy", activeGoalJson()},
-                         {"retry", active_goal_hysteresis_retries_},
-                         {"retry_limit", config.near_goal_retry_limit},
-                         {"robot_xy", pointJson(robot_xy)}});
-    RCLCPP_WARN(get_logger(),
-                "Holding near frontier goal after no progress retry %d/%d",
-                active_goal_hysteresis_retries_, config.near_goal_retry_limit);
-    return true;
-}
-
-bool ClusterFrontierExplorerNode::trySpinAlignmentRecovery(
-    const RobotPose& robot_pose, const AlignmentGraceStatus& status) {
-    const auto& config = core_.config();
-    if (!config.alignment_spin_enabled || !active_goal_ ||
-        alignment_spin_attempts_ >= config.alignment_spin_max_attempts) {
-        return false;
-    }
-    if (status.heading_error <= config.alignment_heading_threshold_rad) {
-        return false;
-    }
-    if (!spin_client_->action_server_is_ready()) {
-        return false;
-    }
-
-    ++alignment_spin_attempts_;
-    if (goal_handle_) {
-        safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
-        goal_handle_.reset();
-    }
-
-    const double commanded_yaw = std::remainder(
-        status.target_yaw - robot_pose.yaw, 2.0 * std::numbers::pi);
-    Spin::Goal spin_goal;
-    spin_goal.target_yaw = static_cast<float>(commanded_yaw);
-    spin_goal.time_allowance = rclcpp::Duration::from_seconds(
-        config.alignment_spin_time_allowance_sec);
-    publishPlannerEvent("alignment_spin_recovery",
-                        {{"goal_xy", activeFinalGoalJson()},
-                         {"active_waypoint_xy", activeGoalJson()},
-                         {"heading_error", rounded(status.heading_error)},
-                         {"commanded_yaw", rounded(commanded_yaw)},
-                         {"attempt", alignment_spin_attempts_}});
-    RCLCPP_WARN(get_logger(),
-                "Spinning %.2f rad to recover alignment before retrying "
-                "frontier waypoint",
-                commanded_yaw);
-    sendBehavior<Spin>(spin_goal, BehaviorPurpose::kAlignSpin);
-    return true;
-}
-
-void ClusterFrontierExplorerNode::finishSpinRecovery(const std::string& reason,
-                                                     const double started_sec) {
-    const double now = nowSec();
-    const double spin_elapsed = std::max(0.0, now - started_sec);
-    publishPlannerEvent("alignment_spin_recovery_finished",
-                        {{"reason", reason},
-                         {"elapsed", rounded(spin_elapsed)},
-                         {"goal_xy", activeFinalGoalJson()},
-                         {"active_waypoint_xy", activeGoalJson()}});
-    if (!goal_active_ || active_route_index_ >= active_route_.size()) {
-        return;
-    }
-    // The spin should not eat into route progress budgets.
-    active_goal_sent_time_sec_ += spin_elapsed;
-    last_progress_time_sec_ = now;
-    last_alignment_robot_yaw_.reset();
-    sendActiveWaypoint();
-}
-
-bool ClusterFrontierExplorerNode::isNearActiveGoal(const WorldPoint& robot_xy,
-                                                   const double radius) const {
-    const auto near = [&](const std::optional<WorldPoint>& goal) {
-        return goal && withinDistanceTolerance(robot_xy, *goal, radius);
-    };
-    return near(active_goal_) || near(active_final_goal_);
-}
-
-void ClusterFrontierExplorerNode::extendActiveGoalTimers(const double now) {
-    const auto& config = core_.config();
-    const double grace = config.near_goal_hysteresis_sec > 0.0
-                             ? config.near_goal_hysteresis_sec
-                             : config.stuck_progress_timeout_sec;
-    if (config.stuck_progress_timeout_sec > 0.0) {
-        last_progress_time_sec_ =
-            now - std::max(0.0, config.stuck_progress_timeout_sec - grace);
-    }
-    if (config.goal_timeout_sec > 0.0) {
-        active_goal_sent_time_sec_ =
-            now - std::max(0.0, config.goal_timeout_sec - grace);
     }
 }
 
@@ -954,7 +728,6 @@ void ClusterFrontierExplorerNode::clearActiveGoal() {
     backtrace_planner_.reset();
     goal_active_ = false;
     goal_handle_.reset();
-    alignment_spin_attempts_ = 0;
     resetRecoveryStateOnly();
     recovery_reobserve_used_ = false;
     active_goal_.reset();
@@ -963,13 +736,8 @@ void ClusterFrontierExplorerNode::clearActiveGoal() {
     active_final_goal_.reset();
     active_route_path_.clear();
     active_view_cells_.clear();
-    last_progress_arc_length_ = 0.0;
-    rear_latch_progress_arc_length_ = 0.0;
-    active_goal_hysteresis_retries_ = 0;
     active_waypoint_sent_time_sec_ = 0.0;
-    last_alignment_robot_yaw_.reset();
     breadcrumb_trail_.clear();
-    consecutive_reverse_blocked_ = 0;
     recovery_escape_active_ = false;
 }
 

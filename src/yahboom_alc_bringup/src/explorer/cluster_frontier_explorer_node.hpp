@@ -64,7 +64,6 @@ enum class FailureClass : std::uint8_t
     kRecoveryFailed,  // weight 2: all recovery strategies exhausted
     // The bridge blocked motion because it couldn't see (stale local
     // costmap / no TF), not because it saw an obstacle. Never blames a goal.
-    kPerceptionStall,
     // A frontier view goal succeeded but none of the unknown cells it was
     // chosen to see became known.
     kViewNotObserved,
@@ -93,8 +92,6 @@ constexpr const char* failureClassName(const FailureClass fc) noexcept {
             return "local_hazard";
         case FailureClass::kRecoveryFailed:
             return "recovery_failed";
-        case FailureClass::kPerceptionStall:
-            return "perception_stall";
         case FailureClass::kViewNotObserved:
             return "view_not_observed";
     }
@@ -104,11 +101,6 @@ constexpr const char* failureClassName(const FailureClass fc) noexcept {
 // Margin granted on top of the behavior server's own spin time allowance
 // to cover action transport before declaring a spin lost.
 constexpr double kSpinTransportMarginSec = 5.0;
-constexpr int kReverseBlockedBacktraceThreshold = 3;
-constexpr double kRecentReverseBlockedWindowSec = 3.0;
-// After this many consecutive backup_stalled failures, the rear is blocked;
-// skip backtrace and directly abandon to avoid spinning wheels in place.
-constexpr int kBacktraceStallSkipThreshold = 3;
 // If nav2 declares SUCCEEDED in under this many seconds the robot was already
 // at the goal and didn't actually navigate anywhere.  Blacklist the goal to
 // break the "frontier never clears" cycling loop.
@@ -116,13 +108,6 @@ constexpr double kTrivialSuccessThresholdSec = 2.0;
 constexpr double kNav2ReadinessPollSec = 1.0;
 constexpr double kNav2ReadinessRetrySec = 1.0;
 constexpr double kNav2ReadinessRequestTimeoutSec = 2.0;
-// Nav2 humble's ControllerServer::isGoalReached() ignores the return value of
-// the end-pose transform: when the map->odom lookup fails the goal checker
-// compares the robot against a default-constructed (identity) pose.  A robot
-// near the odom origin then gets phantom SUCCEEDED results far from the goal.
-// Resend the same waypoint up to this many times before treating the phantom
-// success as a real failure and entering the recovery tree.
-constexpr int kSpuriousSuccessResendMax = 2;
 
 inline geometry_msgs::msg::Quaternion yawToQuaternion(const double yaw) {
     geometry_msgs::msg::Quaternion q;
@@ -216,14 +201,6 @@ private:
     void onGoalResult(const int generation,
                       const GoalHandle::WrappedResult& result);
     void checkActiveGoalProgress(const RobotPose& robot_pose);
-    AlignmentGraceStatus evaluateActiveGoalAlignment(
-        const RobotPose& robot_pose, const double now) const;
-    bool tryAlignmentProgressGrace(const RobotPose& robot_pose,
-                                   const double now,
-                                   const AlignmentGraceStatus& status);
-    bool tryNearGoalHysteresis(const WorldPoint& robot_xy, const double now);
-    bool trySpinAlignmentRecovery(const RobotPose& robot_pose,
-                                  const AlignmentGraceStatus& status);
 
     // Spin and BackUp both run on the behavior server, one request at a time.
     // Each request carries its own id: a callback with any other id belongs
@@ -232,7 +209,6 @@ private:
     // follows the attempt.
     enum class BehaviorPurpose : std::uint8_t
     {
-        kAlignSpin,
         kRecoverySpin,
         kClearanceBackup,
         kBacktraceBackup,
@@ -249,7 +225,7 @@ private:
     struct BehaviorAttempt
     {
         int id = 0;
-        BehaviorPurpose purpose = BehaviorPurpose::kAlignSpin;
+        BehaviorPurpose purpose = BehaviorPurpose::kRecoverySpin;
         double started_sec = 0.0;
         SpinGoalHandle::SharedPtr spin_handle;
         BackUpGoalHandle::SharedPtr backup_handle;
@@ -312,11 +288,6 @@ private:
     void checkBehaviorTimeout(const double now);
     void onBehaviorEnded(const BehaviorAttempt& attempt,
                          const BehaviorOutcome outcome);
-    void finishSpinRecovery(const std::string& reason,
-                            const double started_sec);
-    bool isNearActiveGoal(const WorldPoint& robot_xy,
-                          const double radius) const;
-    void extendActiveGoalTimers(const double now);
     bool recoveryActive() const;
     nlohmann::json recoveryEventFields(
         const std::string& reason = "",
@@ -335,7 +306,7 @@ private:
     void checkRecoveryReversePulse();
     void finishRecoveryHardFail(const std::string& reason,
                                 const FailureClass fc);
-    void latchRearBlocked(const std::string& reason);
+    bool rearBlocked();
     void startBacktraceRecovery(const std::string& reason);
     void checkBacktraceRecovery();
     void sendNextBacktraceSegment();
@@ -384,7 +355,6 @@ private:
         }
     }
     void onPlannerEvent(const std_msgs::msg::String& msg);
-    void handlePerceptionStallReverseBlock(const std::string& reason);
     void handleReverseBlockedEvent();
     void handleStallOrSlipEvent();
     bool triggerForwardEscape(const RobotPose& robot_pose);
@@ -402,7 +372,6 @@ private:
     nlohmann::json activeFinalGoalJson() const;
 
     double nowSec() { return get_clock()->now().seconds(); }
-    double mapReceiveSilenceSec();
 
     struct LifecycleStateClient
     {
@@ -500,14 +469,9 @@ private:
     double active_goal_sent_time_sec_ = 0.0;
     double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
-    double last_progress_arc_length_ = 0.0;
     WorldPoint progress_odom_xy_{0.0, 0.0};
-    double rear_latch_progress_arc_length_ = 0.0;
-    int active_goal_hysteresis_retries_ = 0;
-    std::optional<double> last_alignment_robot_yaw_;
     GoalHandle::SharedPtr goal_handle_;
     int nav_goal_generation_ = 0;
-    int alignment_spin_attempts_ = 0;
     BacktraceRecoveryConfig backtrace_config_;
     BreadcrumbTrail breadcrumb_trail_;
     BacktraceRecoveryPlanner backtrace_planner_;
@@ -516,30 +480,14 @@ private:
     bool backtrace_waiting_for_cancel_ = false;
     double backtrace_cancel_started_sec_ = 0.0;
     std::string backtrace_reason_;
-    int consecutive_reverse_blocked_ = 0;
-    int consecutive_backtrace_stall_count_ = 0;
-    int spurious_success_resend_streak_ = 0;
     RecoveryStateMachineConfig recovery_config_;
     RecoveryStateMachine recovery_;
     double pending_recovery_spin_yaw_ = 0.0;
     std::optional<BehaviorAttempt> behavior_;
     int behavior_id_ = 0;
     bool recovery_reobserve_used_ = false;
-    bool perception_stall_paused_ = false;
-    double perception_stall_pause_started_sec_ = 0.0;
     bool recovery_escape_active_ = false;
-    // The stagnation escalation that jumps straight to kReversePulse is
-    // triggered BY a reverse_blocked event, which always leaves the rear
-    // latch/recency guard in checkRecoveryReversePulse() tripped.  Without
-    // this flag every escalated attempt would bounce off that guard into
-    // finishRecoveryHardFail() -- which never blacklists -- so the goal
-    // would never actually reach the backtrace tail end that does.  Set
-    // when escalating, consumed (and cleared) by the first reverse-pulse
-    // check so later non-escalated arrivals still get the guard.
-    bool reverse_pulse_escalation_pending_ = false;
     std::string recovery_reason_;
-    std::optional<WorldPoint> recovery_start_xy_;
-    double last_reverse_blocked_sec_ = -1.0;
 
     bool nav2_validation_enabled_ = true;
     bool selection_bypass_ = false;

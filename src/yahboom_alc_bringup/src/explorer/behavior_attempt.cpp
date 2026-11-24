@@ -22,12 +22,11 @@ void ClusterFrontierExplorerNode::cancelBehavior() {
 // Spins are bounded here as well as by the server's time allowance, in
 // case the result never arrives.
 void ClusterFrontierExplorerNode::checkBehaviorTimeout(const double now) {
-    if (!behaviorActive(BehaviorPurpose::kAlignSpin) &&
-        !behaviorActive(BehaviorPurpose::kRecoverySpin)) {
+    if (!behaviorActive(BehaviorPurpose::kRecoverySpin)) {
         return;
     }
     if (now - behavior_->started_sec <
-        core_.config().alignment_spin_time_allowance_sec +
+        recovery_config_.recovery_spin_time_allowance_sec +
             kSpinTransportMarginSec) {
         return;
     }
@@ -45,9 +44,6 @@ void ClusterFrontierExplorerNode::onBehaviorEnded(
         : outcome == BehaviorOutcome::kRejected ? "spin_rejected"
                                                 : "spin_timeout";
     switch (attempt.purpose) {
-        case BehaviorPurpose::kAlignSpin:
-            finishSpinRecovery(spin_reason, attempt.started_sec);
-            return;
         case BehaviorPurpose::kRecoverySpin:
             finishRecoverySpin(
                 spin_reason,

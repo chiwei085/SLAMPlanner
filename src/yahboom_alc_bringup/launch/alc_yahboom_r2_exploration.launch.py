@@ -62,7 +62,6 @@ NAV2_RUNTIME_METADATA = {
     "costmap_transform_tolerance": 1.0,
     "controller_transform_tolerance": 1.0,
     "bt_navigator_transform_tolerance": 1.0,
-    "recovery_stagnation_escalation_trees": 3,
     "bridge_reverse": {
         "enabled": True,
         "footprint_free_cost_max": 99,
@@ -247,17 +246,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "goal_timeout_sec": 35.0,
                     "stuck_progress_radius_m": 0.08,
                     "stuck_progress_timeout_sec": 9.0,
-                    "near_goal_hysteresis_radius_m": 0.52,
-                    "near_goal_retry_limit": 1,
-                    "near_goal_hysteresis_sec": 12.0,
-                    "alignment_grace_enabled": True,
-                    "alignment_heading_threshold_rad": 0.55,
-                    "alignment_max_grace_sec": 8.0,
-                    "alignment_min_rotation_delta_rad": 0.12,
-                    "alignment_spin_enabled": False,
-                    "alignment_spin_max_attempts": 1,
-                    "alignment_spin_time_allowance_sec": 8.0,
-                    "no_frontier_relax_sec": 30.0,
+                    "recovery_spin_time_allowance_sec": 8.0,
                     "relaxed_min_frontier_size": 8,
                     "relaxed_max_frontier_distance": 5.0,
                     "failed_goal_blacklist_radius_m": 0.35,
@@ -298,18 +287,7 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     # recovery (沿軌跡撤退) is the preferred escape mechanism.
                     "recovery_small_spin_attempts": 1,
                     "recovery_forward_escape_distance_m": 1.5,
-                    "rear_blocked_min_latch_sec": 15.0,
-                    "rear_blocked_clear_forward_displacement_m": 0.25,
                     "recovery_clearance_backup_m": 0.30,
-                    # Cross-tree stagnation escalation: the explorer re-sends a
-                    # goal after every reobserve, which resets the recovery
-                    # tree (and its spin counter), so the backtrace stage was
-                    # unreachable — 4 runs on 2026-07-07 show backtrace=0
-                    # despite 18-47 recovery trees each.  When 3 consecutive
-                    # trees start with the robot inside a 0.25 m circle, jump
-                    # straight to the reverse-pulse/backtrace stage.
-                    "recovery_stagnation_escalation_trees": 3,
-                    "recovery_stagnation_radius_m": 0.25,
                     "marker_topic": "/waypoints",
                     "goal_marker_topic": "/frontier_goal_marker",
                 }

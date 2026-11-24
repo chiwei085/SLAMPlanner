@@ -317,12 +317,16 @@ TEST_F(ExplorerSequenceTest, PauseDuringSpinCancelsAndIgnoresLateResult) {
 // The same reverse_blocked verdict fails a backtrace backup (it is the
 // recovery's own reverse motion) instead of skipping it.
 TEST_F(ExplorerSequenceTest, BacktraceBackupBlockedFailsTheBacktrace) {
-    startExplorer({{"recovery_stagnation_escalation_trees", 1}});
+    // No spin and no room to escape forward: the tree reaches the backtrace.
+    startExplorer({{"recovery_small_spin_attempts", 0}});
     ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
     robot_x_ = 0.8;  // a breadcrumb trail to back along
     spinFor(500ms);
+    map_ = makeMap(false);
+    std::fill(map_.data.begin(), map_.data.end(), std::int8_t{100});
+    last_map_pub_ = {};
+    spinFor(500ms);
     inject({{"event", "stall_or_slip"}});
-    ASSERT_TRUE(waitForEvent("recovery_stagnation_escalation"));
     ASSERT_TRUE(spinUntil([&] { return backup_->goals.size() == 1; }))
         << "backtrace backup was not sent";
     ASSERT_TRUE(waitForEvent("backtrace_recovery_segment"));
@@ -338,69 +342,6 @@ TEST_F(ExplorerSequenceTest, BacktraceBackupBlockedFailsTheBacktrace) {
     backup_->succeed(0);
     spinFor(500ms);
     EXPECT_EQ(countEvents("backtrace_recovery_segment", mark), 0U);
-}
-
-// Nav2 SUCCEEDED far from the goal is resent twice, then recovery starts;
-// the streak resets so the next route gets its own resends.
-TEST_F(ExplorerSequenceTest, SpuriousSuccessResendsThenRecoversAndResets) {
-    startExplorer();
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
-    nav_->succeed(0);
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 2; }));
-    nav_->succeed(1);
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 3; }));
-    EXPECT_TRUE(spinUntil(
-        [&] { return countEvents("nav2_spurious_success_resend") == 2U; }));
-    nav_->succeed(2);
-    ASSERT_TRUE(spinUntil([&] {
-        const auto e = lastEvent("recovery_tree_started");
-        return e && field(*e, "reason") == "nav2_success_pose_mismatch";
-    }));
-    // Reobserve still sees the frontier, so a fresh route starts.
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 4; }));
-    const auto mark = events_.size();
-    nav_->succeed(3);
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 5; }));
-    ASSERT_TRUE(waitForEvent("nav2_spurious_success_resend", mark));
-    spinFor(300ms);
-    EXPECT_EQ(countEvents("nav2_spurious_success_resend", mark), 1U);
-    const auto resend = lastEvent("nav2_spurious_success_resend");
-    EXPECT_EQ(static_cast<double>((*resend)["resend_streak"]), 1.0);
-}
-
-// An alignment spin still running when a stall starts recovery is cancelled;
-// its late result must not be taken for the recovery's own spin.
-TEST_F(ExplorerSequenceTest, AlignmentSpinResultIsNotTakenForRecoverySpin) {
-    robot_yaw_ = std::numbers::pi;  // facing away from the route
-    startExplorer({{"alignment_spin_enabled", true},
-                   {"stuck_progress_timeout_sec", 0.5}});
-    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }));
-    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 1; }))
-        << "alignment spin was not sent\n"
-        << eventLog();
-    ASSERT_TRUE(waitForEvent("alignment_spin_recovery"));
-
-    map_ = makeMap(false);
-    last_map_pub_ = {};
-    spinFor(500ms);
-    inject({{"event", "stall_or_slip"}});
-    ASSERT_TRUE(waitForEvent("recovery_tree_started"));
-    ASSERT_TRUE(spinUntil([&] { return backup_->goals.size() == 1; }));
-    backup_->succeed(0);
-    ASSERT_TRUE(spinUntil([&] { return spin_->goals.size() == 2; }))
-        << "recovery spin was not sent";
-
-    const auto mark = events_.size();
-    spin_->succeed(0);  // the alignment spin, late
-    spinFor(500ms);
-    EXPECT_EQ(countEvents("recovery_stage_finished", mark), 0U);
-    EXPECT_EQ(countEvents("alignment_spin_recovery_finished", mark), 0U);
-
-    spin_->succeed(1);
-    ASSERT_TRUE(spinUntil([&] {
-        const auto e = lastEvent("recovery_stage_finished");
-        return e && field(*e, "reason") == "spin_completed";
-    }));
 }
 
 // Pinned after a forward segment: the turn must undo the driven arc with the

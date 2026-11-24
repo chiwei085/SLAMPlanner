@@ -109,11 +109,6 @@ struct FrontierConfig
     double goal_timeout_sec = 45.0;
     double stuck_progress_radius_m = 0.12;
     double stuck_progress_timeout_sec = 12.0;
-    double near_goal_hysteresis_radius_m = 0.35;
-    double near_goal_hysteresis_sec = 0.0;
-    double alignment_heading_threshold_rad = 0.35;
-    double alignment_max_grace_sec = 12.0;
-    double alignment_min_rotation_delta_rad = 0.05;
     double failed_goal_blacklist_radius_m = 0.35;
     double failed_goal_blacklist_sec = 600.0;
     double hazard_region_severity1_radius_m = 0.6;
@@ -122,24 +117,18 @@ struct FrontierConfig
     double hazard_region_path_penalty = 100.0;
     double subgoal_path_tolerance_m = 0.30;
     double min_subgoal_spacing_m = 0.45;
-    double no_frontier_relax_sec = 0.0;
     double relaxed_max_frontier_distance = 0.0;
-    double alignment_spin_time_allowance_sec = 15.0;
     int min_frontier_size = 8;
     int occupied_threshold = 50;
     int min_clearance_cells = 2;
     int path_clearance_cells = 2;
     int exploratory_path_clearance_cells = 1;
-    int near_goal_retry_limit = 0;
     int failed_goal_max_retries = 2;
     int max_subgoals = 3;
     int relaxed_min_frontier_size = 8;
-    int alignment_spin_max_attempts = 1;
     bool allow_unreachable_goal = false;
     bool nav2_validation_required_for_final_goal = true;
-    bool alignment_grace_enabled = true;
     bool enable_subgoals = true;
-    bool alignment_spin_enabled = false;
     bool hazard_region_enabled = true;
     bool hazard_region_safe_traversal_clear_enabled = true;
 };
@@ -259,15 +248,6 @@ struct CandidateResult
     std::vector<FrontierCandidate> candidates;
     FrontierCounts counts;
     bool relaxed = false;
-};
-
-struct AlignmentGraceStatus
-{
-    bool active = false;
-    double target_yaw = 0.0;
-    double heading_error = 0.0;
-    double previous_heading_error = 0.0;
-    double heading_error_delta = 0.0;
 };
 
 struct IntentionState
@@ -413,11 +393,6 @@ public:
                               int radius) const;
     std::optional<double> pathTargetYawNear(
         const WorldPoint& robot_xy, const std::vector<Cell>& path) const;
-    AlignmentGraceStatus evaluateAlignmentGrace(
-        const WorldPoint& robot_xy, double robot_yaw,
-        std::optional<double> previous_robot_yaw, const std::vector<Cell>& path,
-        const WorldPoint& active_goal_xy,
-        double elapsed_since_waypoint_sent_sec) const;
     double pathInitialYaw(const std::vector<Cell>& path,
                           const WorldPoint& robot_xy,
                           const WorldPoint& goal_xy) const;
@@ -489,8 +464,6 @@ private:
     std::vector<WorldPoint> rejected_plans_;
     bool require_view_tail_ = true;
     std::vector<HazardRegion> hazard_regions_;
-    std::optional<double> last_strict_candidate_sec_;
-    bool relaxation_active_ = false;
     // Quantised world cells (kVisitQuantM) the robot has occupied, for
     // coverage-revisit under-observed detection.
     static constexpr double kVisitQuantM = 0.25;

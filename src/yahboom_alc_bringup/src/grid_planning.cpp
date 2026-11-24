@@ -419,43 +419,6 @@ std::optional<double> FrontierExplorerCore::pathTargetYawNear(
     return yawBetween(a, b);
 }
 
-AlignmentGraceStatus FrontierExplorerCore::evaluateAlignmentGrace(
-    const WorldPoint& robot_xy, const double robot_yaw,
-    const std::optional<double> previous_robot_yaw,
-    const std::vector<Cell>& path, const WorldPoint& active_goal_xy,
-    const double elapsed_since_waypoint_sent_sec) const {
-    AlignmentGraceStatus status;
-    if (!config_.alignment_grace_enabled ||
-        config_.alignment_max_grace_sec <= 0.0) {
-        return status;
-    }
-
-    const auto target_yaw = pathTargetYawNear(robot_xy, path);
-    status.target_yaw =
-        target_yaw ? *target_yaw : yawBetween(robot_xy, active_goal_xy);
-    status.heading_error = headingDelta(robot_yaw, status.target_yaw);
-    status.previous_heading_error =
-        previous_robot_yaw
-            ? headingDelta(*previous_robot_yaw, status.target_yaw)
-            : status.heading_error;
-    status.heading_error_delta =
-        status.previous_heading_error - status.heading_error;
-
-    if (elapsed_since_waypoint_sent_sec >= config_.alignment_max_grace_sec) {
-        return status;
-    }
-    if (status.heading_error <= config_.alignment_heading_threshold_rad) {
-        return status;
-    }
-    if (!previous_robot_yaw ||
-        status.heading_error_delta < config_.alignment_min_rotation_delta_rad) {
-        return status;
-    }
-
-    status.active = true;
-    return status;
-}
-
 double FrontierExplorerCore::pathInitialYaw(const std::vector<Cell>& path,
                                             const WorldPoint& robot_xy,
                                             const WorldPoint& goal_xy) const {

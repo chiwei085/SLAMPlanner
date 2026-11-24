@@ -19,8 +19,6 @@ FrontierExplorerCore::FrontierExplorerCore(FrontierConfig config)
 void FrontierExplorerCore::setConfig(const FrontierConfig& config) {
     config_ = config;
     footprint_geometry_.reset();
-    last_strict_candidate_sec_.reset();
-    relaxation_active_ = false;
 }
 
 bool FrontierExplorerCore::setMap(const nav_msgs::msg::OccupancyGrid& map) {
@@ -63,8 +61,6 @@ CandidateResult FrontierExplorerCore::findCandidates(
     const auto grid = prepareSearchGrid(robot_xy);
     auto result = findCandidatesOnce(robot_xy, grid, strictLimits(), robot_yaw);
     if (!result.candidates.empty()) {
-        last_strict_candidate_sec_ = now_sec;
-        relaxation_active_ = false;
         // In blend mode, always merge coverage candidates into the main pool
         // even when frontier candidates exist (coverage_blend_weight > 0).
         // In fallback-only mode the guard inside appendCoverageCandidates keeps
@@ -75,23 +71,13 @@ CandidateResult FrontierExplorerCore::findCandidates(
         }
         return result;
     }
-    if (config_.no_frontier_relax_sec <= 0.0) {
-        // Frontier search is exhausted with relaxation disabled: fall back to
-        // revisiting known-but-unapproached space rather than idling.
+    // Smaller and farther clusters belong to the same fallback as goals
+    // without a view tail.
+    if (require_view_tail_) {
         appendCoverageCandidates(result, robot_xy, grid, strictLimits(),
                                  robot_yaw);
         return result;
     }
-    if (!last_strict_candidate_sec_) {
-        last_strict_candidate_sec_ = now_sec;
-        return result;
-    }
-    if (!relaxation_active_ &&
-        now_sec - *last_strict_candidate_sec_ < config_.no_frontier_relax_sec) {
-        return result;
-    }
-
-    relaxation_active_ = true;
     auto relaxed_result =
         findCandidatesOnce(robot_xy, grid, relaxedLimits(), robot_yaw);
     relaxed_result.relaxed = true;

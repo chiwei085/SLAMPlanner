@@ -65,13 +65,6 @@ FrontierExplorerCore makeCore(const nav_msgs::msg::OccupancyGrid& grid) {
     config.goal_timeout_sec = 45.0;
     config.stuck_progress_radius_m = 0.12;
     config.stuck_progress_timeout_sec = 12.0;
-    config.near_goal_hysteresis_radius_m = 0.35;
-    config.near_goal_retry_limit = 0;
-    config.near_goal_hysteresis_sec = 0.0;
-    config.alignment_grace_enabled = true;
-    config.alignment_heading_threshold_rad = 0.35;
-    config.alignment_max_grace_sec = 12.0;
-    config.alignment_min_rotation_delta_rad = 0.05;
     config.failed_goal_blacklist_radius_m = 0.35;
     config.failed_goal_blacklist_sec = 600.0;
     config.failed_goal_max_retries = 2;
@@ -961,82 +954,27 @@ nav_msgs::msg::OccupancyGrid buildHalfUnknownGrid() {
     return grid;
 }
 
-FrontierExplorerCore makeRelaxableCore(const double relax_sec) {
+FrontierExplorerCore makeRelaxableCore() {
     auto core = makeCore(buildHalfUnknownGrid());
     auto config = core.config();
     config.min_frontier_size = 50;
     config.unknown_overlap_max_ratio = 0.7;
-    config.no_frontier_relax_sec = relax_sec;
     config.relaxed_min_frontier_size = 4;
     config.relaxed_max_frontier_distance = 5.0;
     core.setConfig(config);
     return core;
 }
 
-TEST(ClusterFrontierExplorer, RelaxedSearchRecoversAfterNoFrontierStall) {
-    auto core = makeRelaxableCore(10.0);
+TEST(ClusterFrontierExplorer, SmallClustersAreOfferedInTheFallback) {
+    auto core = makeRelaxableCore();
     const auto robot_xy = core.mapToWorld(2, 5);
-
-    const auto first = core.findCandidates(robot_xy, 100.0, 0.0);
-    EXPECT_TRUE(first.candidates.empty());
-    EXPECT_FALSE(first.relaxed);
-
-    const auto early = core.findCandidates(robot_xy, 105.0, 0.0);
-    EXPECT_TRUE(early.candidates.empty());
-    EXPECT_FALSE(early.relaxed);
-
-    const auto relaxed = core.findCandidates(robot_xy, 110.0, 0.0);
-    EXPECT_TRUE(relaxed.relaxed);
-    ASSERT_FALSE(relaxed.candidates.empty());
-
-    // Relaxation stays latched while strict searches keep failing, so the
-    // next cycle does not wait another relax window.
-    const auto latched = core.findCandidates(robot_xy, 111.0, 0.0);
-    EXPECT_TRUE(latched.relaxed);
-    EXPECT_FALSE(latched.candidates.empty());
-}
-
-TEST(ClusterFrontierExplorer, RelaxationDisabledKeepsStrictThreshold) {
-    auto core = makeRelaxableCore(0.0);
-    const auto robot_xy = core.mapToWorld(2, 5);
-
-    const auto first = core.findCandidates(robot_xy, 100.0, 0.0);
-    EXPECT_TRUE(first.candidates.empty());
-    EXPECT_FALSE(first.relaxed);
-
-    const auto later = core.findCandidates(robot_xy, 500.0, 0.0);
-    EXPECT_TRUE(later.candidates.empty());
-    EXPECT_FALSE(later.relaxed);
-}
-
-TEST(ClusterFrontierExplorer, StrictSuccessResetsRelaxation) {
-    auto core = makeRelaxableCore(10.0);
-    const auto robot_xy = core.mapToWorld(2, 5);
-    ASSERT_TRUE(core.findCandidates(robot_xy, 100.0).candidates.empty());
-    const auto relaxed = core.findCandidates(robot_xy, 110.0);
-    ASSERT_TRUE(relaxed.relaxed);
-    ASSERT_FALSE(relaxed.candidates.empty());
-
-    // A longer frontier passes the strict cluster-size limit without resetting
-    // config.
-    auto grid = buildGrid(20, 70, 0.1);
-    for (int y = 0; y < 70; ++y) {
-        for (int x = 12; x < 20; ++x) {
-            setCell(grid, x, y, -1);
-        }
-    }
-    core.setMap(grid);
-    const auto strict = core.findCandidates(robot_xy, 111.0);
+    const auto strict = core.findCandidates(robot_xy, 100.0, 0.0);
+    EXPECT_TRUE(strict.candidates.empty());
     EXPECT_FALSE(strict.relaxed);
-    ASSERT_FALSE(strict.candidates.empty());
-
-    core.setMap(buildHalfUnknownGrid());
-    const auto waiting = core.findCandidates(robot_xy, 112.0);
-    EXPECT_TRUE(waiting.candidates.empty());
-    EXPECT_FALSE(waiting.relaxed);
-    const auto relaxed_again = core.findCandidates(robot_xy, 121.0);
-    EXPECT_TRUE(relaxed_again.relaxed);
-    EXPECT_FALSE(relaxed_again.candidates.empty());
+    core.setRequireViewTail(false);
+    const auto fallback = core.findCandidates(robot_xy, 100.0, 0.0);
+    EXPECT_TRUE(fallback.relaxed);
+    EXPECT_FALSE(fallback.candidates.empty());
 }
 
 TEST(ClusterFrontierExplorer, ClearestEscapeDirectionAvoidsBlockedForwardRay) {
@@ -1112,86 +1050,6 @@ TEST(ClusterFrontierExplorer, PathTargetYawUsesNearestPathSegment) {
     ASSERT_TRUE(second_segment);
     EXPECT_NEAR(requireValue(first_segment), 0.0, 1e-6);
     EXPECT_NEAR(requireValue(second_segment), (std::numbers::pi / 2.0), 1e-6);
-}
-
-TEST(ClusterFrontierExplorer, AlignmentGraceFallsBackToActiveGoalYaw) {
-    auto grid = buildGrid(20, 20, 0.1);
-    auto core = makeCore(grid);
-    const auto robot_xy = core.mapToWorld(5, 5);
-    const auto goal_xy = core.mapToWorld(5, 10);
-
-    const auto status = core.evaluateAlignmentGrace(robot_xy, 0.0, std::nullopt,
-                                                    {}, goal_xy, 1.0);
-
-    EXPECT_FALSE(status.active);
-    EXPECT_NEAR(status.target_yaw, (std::numbers::pi / 2.0), 1e-6);
-    EXPECT_GT(status.heading_error,
-              core.config().alignment_heading_threshold_rad);
-}
-
-TEST(ClusterFrontierExplorer, AlignmentGraceActivatesWhenYawConverges) {
-    auto grid = buildGrid(20, 20, 0.1);
-    auto core = makeCore(grid);
-    auto config = core.config();
-    config.alignment_heading_threshold_rad = 0.35;
-    config.alignment_max_grace_sec = 12.0;
-    config.alignment_min_rotation_delta_rad = 0.05;
-    core.setConfig(config);
-    const auto robot_xy = core.mapToWorld(5, 5);
-    const auto goal_xy = core.mapToWorld(12, 5);
-    const std::vector<Cell> path{{5, 5}, {12, 5}};
-
-    const auto status = core.evaluateAlignmentGrace(
-        robot_xy, 1.40, (std::numbers::pi / 2.0), path, goal_xy, 9.0);
-
-    EXPECT_TRUE(status.active);
-    EXPECT_NEAR(status.target_yaw, 0.0, 1e-6);
-    EXPECT_GT(status.heading_error_delta,
-              core.config().alignment_min_rotation_delta_rad);
-}
-
-TEST(ClusterFrontierExplorer, AlignmentGraceRejectsNonConvergingYaw) {
-    auto grid = buildGrid(20, 20, 0.1);
-    auto core = makeCore(grid);
-    const auto robot_xy = core.mapToWorld(5, 5);
-    const auto goal_xy = core.mapToWorld(12, 5);
-    const std::vector<Cell> path{{5, 5}, {12, 5}};
-
-    const auto status =
-        core.evaluateAlignmentGrace(robot_xy, 1.40, 1.30, path, goal_xy, 9.0);
-
-    EXPECT_FALSE(status.active);
-    EXPECT_LT(status.heading_error_delta, 0.0);
-}
-
-TEST(ClusterFrontierExplorer, AlignmentGraceRejectsAlignedHeading) {
-    auto grid = buildGrid(20, 20, 0.1);
-    auto core = makeCore(grid);
-    const auto robot_xy = core.mapToWorld(5, 5);
-    const auto goal_xy = core.mapToWorld(12, 5);
-    const std::vector<Cell> path{{5, 5}, {12, 5}};
-
-    const auto status =
-        core.evaluateAlignmentGrace(robot_xy, 0.10, 0.30, path, goal_xy, 9.0);
-
-    EXPECT_FALSE(status.active);
-    EXPECT_LT(status.heading_error,
-              core.config().alignment_heading_threshold_rad);
-}
-
-TEST(ClusterFrontierExplorer, AlignmentGraceExpiresAfterMaxGrace) {
-    auto grid = buildGrid(20, 20, 0.1);
-    auto core = makeCore(grid);
-    const auto robot_xy = core.mapToWorld(5, 5);
-    const auto goal_xy = core.mapToWorld(12, 5);
-    const std::vector<Cell> path{{5, 5}, {12, 5}};
-
-    const auto status = core.evaluateAlignmentGrace(
-        robot_xy, 1.40, (std::numbers::pi / 2.0), path, goal_xy, 12.0);
-
-    EXPECT_FALSE(status.active);
-    EXPECT_GT(status.heading_error_delta,
-              core.config().alignment_min_rotation_delta_rad);
 }
 
 // ---------------------------------------------------------------------------

@@ -141,34 +141,6 @@ void ClusterFrontierExplorerNode::onTimer() {
     for (const auto& region : core_.pruneHazardRegions(nowSec())) {
         publishHazardCleared(region, "expired");
     }
-    if (perception_stall_paused_) {
-        const double paused_for =
-            nowSec() - perception_stall_pause_started_sec_;
-        const bool map_receiving =
-            mapReceiveSilenceSec() <=
-            recovery_config_.recovery_reobserve_map_stall_ceiling_sec;
-        // /map silence alone can never clear while the robot stands
-        // still (RTAB-Map publishes on motion), so a wall-clock budget
-        // is the guaranteed exit: retry, and re-pause if the bridge
-        // still cannot see.
-        if (map_receiving ||
-            paused_for >=
-                recovery_config_.recovery_perception_stall_pause_max_sec) {
-            perception_stall_paused_ = false;
-            publishPlannerEvent(
-                "exploration_resumed_perception_recovered",
-                {{"reason",
-                  map_receiving ? "map_receiving" : "pause_budget_exhausted"},
-                 {"paused_for_sec", rounded(paused_for)}});
-        }
-        else {
-            publishPlannerEvent(
-                "exploration_paused_perception_stalled",
-                {{"map_receive_silence_sec", rounded(mapReceiveSilenceSec())},
-                 {"paused_for_sec", rounded(paused_for)}});
-            return;
-        }
-    }
     if (alc_gate_.paused()) {
         logWaiting("Frontier exploration paused for ALC");
         return;
@@ -428,7 +400,9 @@ void ClusterFrontierExplorerNode::onPlannerEvent(
     const auto event = parsePlannerEvent(msg.data);
     switch (event.observation) {
         case PlannerObservation::kReverseUnverified:
-            handlePerceptionStallReverseBlock(event.reason);
+            // The bridge holds the car until it can see; only the blind turn
+            // has to end.
+            finishObservationTurn("perception_stalled");
             break;
         case PlannerObservation::kReverseBlocked:
             handleReverseBlockedEvent();
@@ -445,37 +419,6 @@ void ClusterFrontierExplorerNode::onPlannerEvent(
         case PlannerObservation::kNone:
             break;
     }
-}
-
-void ClusterFrontierExplorerNode::handlePerceptionStallReverseBlock(
-    const std::string& reason) {
-    // The bridge streams one reverse_blocked per blocked command; only
-    // the first one needs to act.
-    if (perception_stall_paused_) {
-        return;
-    }
-    perception_stall_paused_ = true;
-    perception_stall_pause_started_sec_ = nowSec();
-    finishObservationTurn("perception_stalled");
-    publishPlannerEvent(
-        "exploration_paused_perception_stalled",
-        {{"source", "reverse_gate"},
-         {"reason", reason},
-         {"goal_xy", activeFinalGoalJson()},
-         {"active_waypoint_xy", activeGoalJson()},
-         {"failure_class", failureClassName(FailureClass::kPerceptionStall)}});
-    // The robot didn't fail to reverse -- the bridge just couldn't
-    // verify it was safe to -- so nothing here assigns blame: no
-    // blacklist, no unsafe marking, no reverse-blocked streak.  But the
-    // pause gate stops every onTimer watchdog, so anything left in
-    // flight (nav goal, backtrace backup, recovery spin) would keep
-    // commanding the robot unsupervised, and a backup left to die on
-    // its time allowance would come back through onBacktraceBackupEnded as
-    // "backup_failed" and blacklist the goal after all.  Cancel it all
-    // instead; goal selection is idempotent, so resuming replans the
-    // same frontier at no cost.
-    clearPendingRouteSelection();
-    clearActiveGoal();
 }
 
 void ClusterFrontierExplorerNode::markActiveGoalUnsafe(
@@ -574,14 +517,6 @@ void ClusterFrontierExplorerNode::logWaiting(const std::string& message) {
 
 nlohmann::json ClusterFrontierExplorerNode::activeFinalGoalJson() const {
     return optPointJson(active_final_goal_);
-}
-
-// Fail-closed: a missing signal (state never initialized) reads as
-// maximally stale rather than fresh.
-double ClusterFrontierExplorerNode::mapReceiveSilenceSec() {
-    const auto silence =
-        temporalSignalAt(map_temporal_state_, nowSec()).receive_silence_sec;
-    return silence.value_or(std::numeric_limits<double>::max());
 }
 
 void ClusterFrontierExplorerNode::createNav2LifecycleClients() {
