@@ -1640,16 +1640,20 @@ TEST(ClusterFrontierExplorer, ViewTailRejectsAGoalNoStraightTailFits) {
                                     blocked, 20, 20, counts));
     // The one-cell search radius offers five goal cells; each is rejected.
     EXPECT_EQ(counts.rejected_footprint, 5);
+    // The tail is a preference: without it the same goal is offered.
+    core.setRequireViewTail(false);
+    EXPECT_TRUE(core.makeCandidate(cluster, {4, 10}, core.mapToWorld(4, 10),
+                                   blocked, 20, 20, counts));
 }
 
-TEST(ClusterFrontierExplorer, RejectedPlanOnlyLastsForOnePass) {
+TEST(ClusterFrontierExplorer, RejectedPlanExcludesOnlyThatGoalUntilCleared) {
     auto core = makeCore(buildGrid(10, 10, 0.1));
     core.rejectPlan({1.0, 1.0});
-    EXPECT_TRUE(core.isBlacklisted({1.1, 1.0}));
-    EXPECT_FALSE(core.isBlacklisted({2.0, 1.0}));
+    EXPECT_TRUE(core.isBlacklisted({1.0, 1.0}));
+    EXPECT_FALSE(core.isBlacklisted({1.1, 1.0}));
     EXPECT_TRUE(core.goalAttempts().empty());
     core.clearRejectedPlans();
-    EXPECT_FALSE(core.isBlacklisted({1.1, 1.0}));
+    EXPECT_FALSE(core.isBlacklisted({1.0, 1.0}));
 }
 
 TEST(ClusterFrontierExplorer, CountObservedCountsCellsNoLongerUnknown) {

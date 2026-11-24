@@ -89,6 +89,21 @@ TEST(R2StallDetector, FiresWhenMotionIsBelowRatio) {
     EXPECT_NEAR(decision.odom_delta_m, 0.01, 1e-9);
 }
 
+// Reverse to forward: the car coasts back, then passes its window start again
+// with zero net displacement while driving (real car, 2026-11-24).
+TEST(R2StallDetector, DrivingPastTheWindowStartIsNotAStall) {
+    StallDetectorCore detector(testConfig());
+    detector.update(driving(0.0, 0.0));
+    StallDetectorDecision decision;
+    for (int i = 1; i <= 9; ++i) {
+        const double x = i < 8 ? -0.02 : 0.012 * (i - 8);
+        decision = detector.update(driving(0.1 * i, x));
+        ASSERT_FALSE(decision.stall_or_slip);
+    }
+    EXPECT_FALSE(decision.stall_or_slip);
+    EXPECT_EQ(decision.reason, "motion_observed");
+}
+
 TEST(R2StallDetector, YawMotionIsNotAStall) {
     StallDetectorCore detector(testConfig());
     detector.update(driving(0.0, 0.0));

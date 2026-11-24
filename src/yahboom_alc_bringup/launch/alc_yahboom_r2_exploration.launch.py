@@ -264,8 +264,10 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "failed_goal_blacklist_sec": 600.0,
                     "failed_goal_max_retries": 2,
                     "hazard_region_enabled": True,
-                    "hazard_region_severity1_radius_m": 0.6,
-                    "hazard_region_severity2_radius_m": 1.0,
+                    # Reach of the footprint (front 0.19 + padding 0.02): a goal
+                    # closer than this to the contact point touches it again.
+                    "hazard_region_severity1_radius_m": 0.21,
+                    "hazard_region_severity2_radius_m": 0.21,
                     "hazard_region_ttl_sec": 600.0,
                     "hazard_region_path_penalty": 100.0,
                     "hazard_region_safe_traversal_clear_enabled": True,

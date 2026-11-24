@@ -368,10 +368,15 @@ public:
                             const WorldPoint& axis) const;
 
     bool isBlacklisted(const WorldPoint& goal_xy) const;
-    // A failed plan is a fact about one start, goal yaw and costmap, so it
-    // only steers the rest of the same selection pass.
+    // A failed plan is a fact about one start, goal and map: it excludes that
+    // goal cell only, until the robot moves or the map changes.
     void rejectPlan(const WorldPoint& goal_xy) {
         rejected_plans_.push_back(goal_xy);
+    }
+    // The straight view tail makes a better look, but a goal without one is
+    // still somewhere to go.
+    void setRequireViewTail(const bool required) {
+        require_view_tail_ = required;
     }
     void clearRejectedPlans() { rejected_plans_.clear(); }
     std::size_t rejectedPlanCount() const { return rejected_plans_.size(); }
@@ -482,6 +487,7 @@ private:
     double last_goal_time_sec_ = 0.0;
     std::vector<GoalAttemptRecord> goal_attempts_;
     std::vector<WorldPoint> rejected_plans_;
+    bool require_view_tail_ = true;
     std::vector<HazardRegion> hazard_regions_;
     std::optional<double> last_strict_candidate_sec_;
     bool relaxation_active_ = false;

@@ -31,7 +31,7 @@ void ClusterFrontierExplorerNode::maybeStartObservationTurn(
                                 kObservationRepeatRadiusM)) {
         return;
     }
-    const auto odom_pose = lookupPoseIn(kObservationOdomFrame);
+    const auto odom_pose = lookupPoseIn(kOdomFrame);
     if (!odom_pose) {
         return;
     }
@@ -69,8 +69,9 @@ void ClusterFrontierExplorerNode::beginObservationSegment(
     const RobotPose& pose) {
     observation_segment_start_xy_ = pose.xy;
     observation_segment_start_sec_ = nowSec();
-    observation_progress_xy_ = pose.xy;
+    observation_travel_.start(pose.xy.first, pose.xy.second);
     observation_progress_sec_ = observation_segment_start_sec_;
+    observation_moved_ = false;
 }
 
 void ClusterFrontierExplorerNode::switchObservationSegment(
@@ -108,7 +109,7 @@ void ClusterFrontierExplorerNode::stepObservationTurn() {
         return;
     }
     const auto map_pose = lookupRobotPose();
-    const auto pose = lookupPoseIn(kObservationOdomFrame);
+    const auto pose = lookupPoseIn(kOdomFrame);
     if (!map_pose || !pose) {
         publishObservationCmd(0.0, 0.0);
         return;
@@ -119,14 +120,21 @@ void ClusterFrontierExplorerNode::stepObservationTurn() {
         finishObservationTurn("heading_reached");
         return;
     }
-    if (!withinDistanceTolerance(pose->xy, observation_progress_xy_,
-                                 kObservationMinProgressM)) {
-        observation_progress_xy_ = pose->xy;
+    const double along =
+        observation_travel_.update(pose->xy.first, pose->xy.second, pose->yaw,
+                                   observation_segment_direction_);
+    if (observation_travel_.takeCoast()) {
         observation_progress_sec_ = now;
     }
-    const bool stuck =
-        now - observation_segment_start_sec_ > kObservationStartGraceSec &&
-        now - observation_progress_sec_ > kObservationNoProgressSec;
+    else if (along >= CommandedTravel::kNoiseM) {
+        observation_moved_ = true;
+        observation_travel_.start(pose->xy.first, pose->xy.second);
+        observation_progress_sec_ = now;
+    }
+    // From rest the chassis needs up to 1.45 s to answer.
+    const bool stuck = now - observation_progress_sec_ >
+                       (observation_moved_ ? kObservationNoProgressSec
+                                           : kObservationStartGraceSec);
     if (observation_retracing_) {
         stepObservationRetrace(*pose, stuck);
         return;
@@ -166,7 +174,7 @@ void ClusterFrontierExplorerNode::stepObservationRetrace(const RobotPose& pose,
             observation_retrace_started_
                 ? distanceBetween(pose.xy, observation_segment_start_xy_)
                 : 0.0;
-        if (segment.length >= kObservationMinProgressM &&
+        if (segment.length >= CommandedTravel::kNoiseM &&
             undone < segment.length) {
             break;
         }

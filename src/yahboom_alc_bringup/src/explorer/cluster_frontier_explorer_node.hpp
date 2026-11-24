@@ -36,6 +36,7 @@
 
 #include "explorer/explorer_params.hpp"
 #include "yahboom_alc_bringup/backtrace_recovery.hpp"
+#include "yahboom_alc_bringup/commanded_travel.hpp"
 #include "yahboom_alc_bringup/frontier_explorer_core.hpp"
 #include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
@@ -171,6 +172,11 @@ private:
                                     const bool bypass_goal_suppression);
     bool selectCandidateRoute(const RobotPose& robot_pose,
                               bool bypass_goal_suppression);
+    bool nextSelectionTier();
+    void moveWithoutGoal(const RobotPose& robot_pose);
+    void noteVisited(const RobotPose& pose);
+    std::optional<FrontierCandidate> returnCandidate(
+        const RobotPose& robot_pose);
 
     struct RouteWaypoint
     {
@@ -420,7 +426,7 @@ private:
     TemporalSignalObservation map_temporal_;
     std::string map_topic_;
     std::string global_costmap_topic_;
-    static constexpr const char* kObservationOdomFrame = "odom";
+    static constexpr const char* kOdomFrame = "odom";
     static constexpr double kObservationScanRadiusM = 1.5;
     static constexpr double kObservationRepeatRadiusM = 0.5;
     // Roughly the D455/Astra horizontal half-FOV; unknown inside it is
@@ -436,7 +442,6 @@ private:
     static constexpr double kObservationAngularCmd = 1.0;
     static constexpr double kObservationStartGraceSec = 1.5;
     static constexpr double kObservationNoProgressSec = 1.0;
-    static constexpr double kObservationMinProgressM = 0.02;
     bool observation_turn_active_ = false;
     double observation_turn_started_sec_ = 0.0;
     double observation_target_yaw_ = 0.0;
@@ -453,8 +458,9 @@ private:
     bool observation_retrace_started_ = false;
     WorldPoint observation_segment_start_xy_{0.0, 0.0};
     double observation_segment_start_sec_ = 0.0;
-    WorldPoint observation_progress_xy_{0.0, 0.0};
+    CommandedTravel observation_travel_;
     double observation_progress_sec_ = 0.0;
+    bool observation_moved_ = false;
     std::optional<WorldPoint> last_observation_turn_xy_;
     rclcpp::TimerBase::SharedPtr observation_timer_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr
@@ -495,6 +501,7 @@ private:
     double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;
     double last_progress_arc_length_ = 0.0;
+    WorldPoint progress_odom_xy_{0.0, 0.0};
     double rear_latch_progress_arc_length_ = 0.0;
     int active_goal_hysteresis_retries_ = 0;
     std::optional<double> last_alignment_robot_yaw_;
@@ -537,6 +544,23 @@ private:
     bool nav2_validation_enabled_ = true;
     bool selection_bypass_ = false;
     std::size_t selection_rejected_before_ = 0;
+    int selection_rounds_ = 0;
+    // What a selection pass settles for when nothing better can be planned.
+    enum class SelectionTier
+    {
+        kView,    // a frontier seen along a straight tail
+        kPlain,   // any reachable frontier goal
+        kReturn,  // an earlier pose of the car
+    };
+    SelectionTier selection_tier_ = SelectionTier::kView;
+    struct VisitedPose
+    {
+        RobotPose pose;
+        bool tried;
+    };
+    std::vector<VisitedPose> visited_;
+    WorldPoint rejected_from_xy_{0.0, 0.0};
+    static constexpr int kMaxSelectionRounds = 8;
     double nav2_validation_timeout_sec_ = 2.0;
     std::string nav2_compute_path_action_;
     int nav2_validation_rejected_retry_max_ = 10;

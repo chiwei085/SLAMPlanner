@@ -615,7 +615,7 @@ void ClusterFrontierExplorerNode::handleStallOrSlipEvent() {
         // when the depth camera sees an obstacle ahead: on a forward
         // segment that just means "this way is blocked" -- turn the
         // segment around instead of abandoning the turn.
-        const auto pose = lookupPoseIn(kObservationOdomFrame);
+        const auto pose = lookupPoseIn(kOdomFrame);
         if (observation_segment_direction_ > 0.0 && pose) {
             switchObservationSegment(*pose, /*stuck=*/true);
         }

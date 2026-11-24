@@ -113,12 +113,16 @@ void ClusterFrontierExplorerNode::loadParams() {
 
 void ClusterFrontierExplorerNode::onMap(
     const nav_msgs::msg::OccupancyGrid& msg) {
+    const bool changed = msg.data != core_.map().data;
     // A malformed map is dropped before it can count as fresh.
     if (!core_.setMap(msg)) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                              "Dropping malformed map: %ux%u with %zu cells",
                              msg.info.width, msg.info.height, msg.data.size());
         return;
+    }
+    if (changed) {
+        core_.clearRejectedPlans();
     }
     map_received_ = true;
     map_temporal_ =
@@ -179,6 +183,7 @@ void ClusterFrontierExplorerNode::onTimer() {
     if (goal_active_) {
         const auto robot_pose = lookupRobotPose();
         if (robot_pose) {
+            noteVisited(*robot_pose);
             observeHazardTraversal(robot_pose->xy);
             checkActiveGoalProgress(*robot_pose);
         }
@@ -197,8 +202,9 @@ void ClusterFrontierExplorerNode::onTimer() {
         return;
     }
     observeHazardTraversal(robot_pose->xy);
+    noteVisited(*robot_pose);
     if (!findAndBeginCandidateRoute(*robot_pose, false)) {
-        maybeStartObservationTurn(*robot_pose);
+        moveWithoutGoal(*robot_pose);
     }
 }
 
@@ -286,8 +292,16 @@ void ClusterFrontierExplorerNode::recordPhysicalHazard(
              {"failure_class", failureClassName(failure_class)}});
         return;
     }
+    // The evidence is a contact at the leading edge, not around the car.
+    const auto footprint = core_.footprintGeometry();
+    const double reach = failure_class == FailureClass::kStallOrSlip
+                             ? footprint.front
+                             : -footprint.rear;
+    const WorldPoint contact{
+        robot_pose->xy.first + reach * std::cos(robot_pose->yaw),
+        robot_pose->xy.second + reach * std::sin(robot_pose->yaw)};
     const auto update = core_.recordHazardRegion(
-        robot_pose->xy, nowSec(), blacklistWeight(failure_class));
+        contact, nowSec(), blacklistWeight(failure_class));
     if (!update) {
         return;
     }

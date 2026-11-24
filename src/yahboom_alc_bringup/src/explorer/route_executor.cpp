@@ -20,8 +20,79 @@ void ClusterFrontierExplorerNode::checkPendingViewObservation() {
 
 bool ClusterFrontierExplorerNode::findAndBeginCandidateRoute(
     const RobotPose& robot_pose, const bool bypass_goal_suppression) {
-    core_.clearRejectedPlans();
+    // A failed plan stays failed from the same place on the same map.
+    if (!withinDistanceTolerance(robot_pose.xy, rejected_from_xy_,
+                                 core_.mapResolution())) {
+        core_.clearRejectedPlans();
+        rejected_from_xy_ = robot_pose.xy;
+    }
+    selection_rounds_ = 0;
+    selection_tier_ = SelectionTier::kView;
+    core_.setRequireViewTail(true);
     return selectCandidateRoute(robot_pose, bypass_goal_suppression);
+}
+
+bool ClusterFrontierExplorerNode::nextSelectionTier() {
+    if (selection_tier_ == SelectionTier::kReturn) {
+        return false;
+    }
+    selection_tier_ = selection_tier_ == SelectionTier::kView
+                          ? SelectionTier::kPlain
+                          : SelectionTier::kReturn;
+    core_.setRequireViewTail(false);
+    core_.clearRejectedPlans();
+    selection_rounds_ = 0;
+    publishPlannerEvent(
+        "selection_fallback",
+        {{"to", selection_tier_ == SelectionTier::kPlain ? "plain_goal"
+                                                         : "return_on_track"}});
+    return true;
+}
+
+// Distances and turning circles rule goals out only from the present pose. The
+// car's own track is free, so it can go and look from an earlier pose instead
+// of standing still. Each is tried once until a frontier goal is found again.
+void ClusterFrontierExplorerNode::noteVisited(const RobotPose& pose) {
+    const double spacing = core_.config().min_turning_radius_m;
+    if (spacing > 0.0 &&
+        std::none_of(visited_.begin(), visited_.end(), [&](const auto& v) {
+            return withinDistanceTolerance(v.pose.xy, pose.xy, spacing);
+        })) {
+        visited_.push_back({pose, false});
+    }
+}
+
+std::optional<FrontierCandidate> ClusterFrontierExplorerNode::returnCandidate(
+    const RobotPose& robot_pose) {
+    // Outside both turning circles.
+    const double nearest = 2.0 * core_.config().min_turning_radius_m;
+    VisitedPose* best = nullptr;
+    for (auto& visited : visited_) {
+        const double distance = distanceBetween(visited.pose.xy, robot_pose.xy);
+        if (visited.tried || distance < nearest ||
+            !core_.worldToMap(visited.pose.xy.first, visited.pose.xy.second)) {
+            continue;
+        }
+        if (!best || distance < distanceBetween(best->pose.xy, robot_pose.xy)) {
+            best = &visited;
+        }
+    }
+    const auto start =
+        core_.worldToMap(robot_pose.xy.first, robot_pose.xy.second);
+    if (!best || !start) {
+        return std::nullopt;
+    }
+    best->tried = true;
+    FrontierCandidate candidate;
+    candidate.goal_cell =
+        *core_.worldToMap(best->pose.xy.first, best->pose.xy.second);
+    candidate.goal_xy = best->pose.xy;
+    candidate.goal_yaw = best->pose.yaw;
+    candidate.path = {*start, candidate.goal_cell};
+    candidate.path_length = distanceBetween(best->pose.xy, robot_pose.xy);
+    candidate.is_coverage = true;
+    candidate.reachable = true;
+    return candidate;
 }
 
 bool ClusterFrontierExplorerNode::selectCandidateRoute(
@@ -29,9 +100,22 @@ bool ClusterFrontierExplorerNode::selectCandidateRoute(
     selection_bypass_ = bypass_goal_suppression;
     selection_rejected_before_ = core_.rejectedPlanCount();
     checkPendingViewObservation();
+    if (selection_tier_ == SelectionTier::kReturn) {
+        const auto back = returnCandidate(robot_pose);
+        if (back) {
+            beginRouteSelection(robot_pose, {*back});
+            return true;
+        }
+    }
     auto result = core_.findCandidates(robot_pose.xy, nowSec(), robot_pose.yaw);
     publishFrontierMarkers(result.candidates);
+    if (selection_tier_ == SelectionTier::kReturn) {
+        result.candidates.clear();
+    }
     if (result.candidates.empty()) {
+        if (nextSelectionTier()) {
+            return selectCandidateRoute(robot_pose, bypass_goal_suppression);
+        }
         clearGoalMarker();
         publishNoCandidateEvent(result.counts, result.relaxed);
         logWaiting(
@@ -108,6 +192,18 @@ void ClusterFrontierExplorerNode::beginRouteSelection(
     validateNextCandidateRoute();
 }
 
+// Nothing can be planned. With the footprint on lethal cells that is true for
+// every goal, so step off them first; otherwise turn to see more.
+void ClusterFrontierExplorerNode::moveWithoutGoal(const RobotPose& robot_pose) {
+    if (nav2LifecycleReady() && global_costmap_ &&
+        isFootprintBlockedInCostmap(*global_costmap_, core_.footprintGeometry(),
+                                    robot_pose.xy, robot_pose.yaw)) {
+        startRecoveryTree("planning_start_blocked", /*skip_reobserve=*/true);
+        return;
+    }
+    maybeStartObservationTurn(robot_pose);
+}
+
 void ClusterFrontierExplorerNode::validateNextCandidateRoute() {
     if (alc_gate_.paused()) {
         clearPendingRouteSelection();
@@ -157,10 +253,17 @@ void ClusterFrontierExplorerNode::validateNextCandidateRoute() {
     pending_robot_pose_.reset();
     // Each cluster offers one goal per search, so look for its other goals
     // until none is left to plan to.
-    if (robot_pose && core_.rejectedPlanCount() > selection_rejected_before_ &&
-        !selectCandidateRoute(*robot_pose, selection_bypass_) &&
-        !recoveryActive()) {
-        maybeStartObservationTurn(*robot_pose);
+    if (!robot_pose ||
+        core_.rejectedPlanCount() <= selection_rejected_before_) {
+        return;
+    }
+    const bool more =
+        ++selection_rounds_ < kMaxSelectionRounds || nextSelectionTier();
+    if (more && selectCandidateRoute(*robot_pose, selection_bypass_)) {
+        return;
+    }
+    if (!recoveryActive()) {
+        moveWithoutGoal(*robot_pose);
     }
 }
 
@@ -362,6 +465,11 @@ void ClusterFrontierExplorerNode::startRoute(
     active_final_goal_ = final_candidate.goal_xy;
     active_route_path_ = final_candidate.path;
     active_view_cells_ = final_candidate.view_cells;
+    if (selection_tier_ != SelectionTier::kReturn) {
+        for (auto& visited : visited_) {
+            visited.tried = false;
+        }
+    }
     const auto projection = core_.projectOntoPath(robot_xy, active_route_path_);
     last_progress_arc_length_ = projection ? projection->arc_length : 0.0;
     rear_latch_progress_arc_length_ = last_progress_arc_length_;
@@ -618,14 +726,19 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
             rear_latch_progress_arc_length_ = projection->arc_length;
         }
     }
-    if (projection && projection->arc_length - last_progress_arc_length_ >=
-                          config.stuck_progress_radius_m) {
-        last_progress_arc_length_ = projection->arc_length;
+    if (projection) {
+        last_progress_arc_length_ =
+            std::max(last_progress_arc_length_, projection->arc_length);
+    }
+    // An Ackermann car backs up and turns on its way; only a car that stands
+    // still makes no progress. The frontier's grid path cannot tell.
+    const auto odom_pose = lookupPoseIn(kOdomFrame);
+    if (odom_pose && !withinDistanceTolerance(odom_pose->xy, progress_odom_xy_,
+                                              config.stuck_progress_radius_m)) {
+        progress_odom_xy_ = odom_pose->xy;
         last_progress_time_sec_ = now;
         last_alignment_robot_yaw_.reset();
         consecutive_reverse_blocked_ = 0;
-        RCLCPP_DEBUG(get_logger(), "Route progress arc=%.3f",
-                     last_progress_arc_length_);
         return;
     }
     if (config.stuck_progress_timeout_sec > 0.0 &&
@@ -645,15 +758,11 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
         RCLCPP_WARN(get_logger(), "Abandoning frontier goal after no progress");
         publishPlannerEvent(
             "progress_window_expired",
-            {{"quantity", "route_grid_arc_length_m"},
-             {"value", projection
-                           ? nlohmann::json(rounded(projection->arc_length))
-                           : nlohmann::json(nullptr)},
-             {"baseline", rounded(last_progress_arc_length_)},
+            {{"quantity", "odom_displacement_m"},
+             {"value", odom_pose ? nlohmann::json(rounded(distanceBetween(
+                                       odom_pose->xy, progress_odom_xy_)))
+                                 : nlohmann::json(nullptr)},
              {"required_gain", rounded(config.stuck_progress_radius_m)},
-             {"lateral_distance_m",
-              projection ? nlohmann::json(rounded(projection->distance))
-                         : nlohmann::json(nullptr)},
              {"window_sec", rounded(now - last_progress_time_sec_)},
              {"limit_sec", rounded(config.stuck_progress_timeout_sec)}});
         startRecoveryTree("no_progress");

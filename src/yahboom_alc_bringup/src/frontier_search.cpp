@@ -315,7 +315,7 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
         double goal_yaw = 0.0;
         FootprintCheck footprint;
         std::optional<ViewTail> view;
-        if (config_.view_tail_length_m > 0.0) {
+        if (config_.view_tail_length_m > 0.0 && require_view_tail_) {
             // The yaw is the direction the car will face on its straight
             // approach, chosen for what it sees; no tail fits = no view.
             view = bestViewTail(goal_xy);

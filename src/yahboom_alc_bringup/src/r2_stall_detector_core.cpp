@@ -23,6 +23,7 @@ void StallDetectorCore::reset() {
 void StallDetectorCore::restartWindow(
     const StallDetectorObservation& observation, const bool from_rest) {
     window_start_ = observation;
+    travel_.start(observation.odom_x, observation.odom_y);
     window_from_rest_ = from_rest;
     last_observation_sec_ = observation.time_sec;
     expected_motion_m_ = 0.0;
@@ -55,9 +56,13 @@ StallDetectorDecision StallDetectorCore::update(
     }
     last_observation_sec_ = observation.time_sec;
     decision.expected_motion_m = expected_motion_m_;
-    decision.odom_delta_m =
-        std::hypot(observation.odom_x - window_start_->odom_x,
-                   observation.odom_y - window_start_->odom_y);
+    decision.odom_delta_m = travel_.update(
+        observation.odom_x, observation.odom_y, observation.odom_yaw, 1.0);
+    if (travel_.takeCoast()) {
+        restartWindow(observation, true);
+        decision.reason = "coasting";
+        return decision;
+    }
     decision.imu_motion_consistent = std::abs(observation.imu_yaw_rate) >=
                                      config_.imu_yaw_rate_threshold_radps;
 

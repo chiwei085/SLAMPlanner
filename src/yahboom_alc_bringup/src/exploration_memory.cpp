@@ -94,7 +94,7 @@ bool FrontierExplorerCore::isBlacklisted(const WorldPoint& goal_xy) const {
                     [&](const WorldPoint& rejected) {
                         return std::hypot(goal_xy.first - rejected.first,
                                           goal_xy.second - rejected.second) <=
-                               config_.failed_goal_blacklist_radius_m;
+                               0.5 * mapResolution();
                     })) {
         return true;
     }

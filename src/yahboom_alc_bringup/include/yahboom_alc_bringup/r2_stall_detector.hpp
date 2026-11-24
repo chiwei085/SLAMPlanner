@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 
+#include "yahboom_alc_bringup/commanded_travel.hpp"
+
 namespace yahboom_alc_bringup
 {
 
@@ -50,6 +52,7 @@ struct StallDetectorObservation
     double driver_cmd_vx = 0.0;
     double odom_x = 0.0;
     double odom_y = 0.0;
+    double odom_yaw = 0.0;
     double imu_yaw_rate = 0.0;
 };
 
@@ -78,6 +81,7 @@ private:
 
     R2StallDetectorConfig config_;
     std::optional<StallDetectorObservation> window_start_;
+    CommandedTravel travel_;
     double last_observation_sec_ = 0.0;
     double expected_motion_m_ = 0.0;
     bool window_from_rest_ = true;

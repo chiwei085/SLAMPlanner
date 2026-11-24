@@ -461,5 +461,20 @@ TEST_F(ExplorerSequenceTest, FailedPlansAreRetriedInTheNextPass) {
     EXPECT_EQ(nav_->goals.size(), 0U);
 }
 
+// Nothing left to see from here: go back to an earlier pose, do not stand.
+TEST_F(ExplorerSequenceTest, ReturnsAlongItsTrackWhenNoGoalIsLeft) {
+    startExplorer({{"min_turning_radius_m", 0.5}});
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }))
+        << eventLog();
+    robot_x_ = 2.2;
+    map_ = makeMap(false);
+    last_map_pub_ = {};
+    spinFor(600ms);
+    nav_->abort(0);
+    ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() >= 2; }, 15000ms))
+        << eventLog();
+    EXPECT_NEAR(nav_->goals.back()->get_goal()->pose.pose.position.x, 0.5, 0.3);
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

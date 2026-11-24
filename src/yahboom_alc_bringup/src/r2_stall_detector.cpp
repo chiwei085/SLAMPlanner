@@ -14,6 +14,7 @@
 
 #include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
+#include "yahboom_alc_bringup/yaw_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -97,6 +98,8 @@ private:
         observation.driver_cmd_vx = latest_driver_cmd_->linear.x;
         observation.odom_x = latest_odom_->pose.pose.position.x;
         observation.odom_y = latest_odom_->pose.pose.position.y;
+        observation.odom_yaw =
+            yawFromQuaternion(latest_odom_->pose.pose.orientation);
         observation.imu_yaw_rate = latest_imu_->angular_velocity.z;
         return observation;
     }
