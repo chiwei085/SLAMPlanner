@@ -130,6 +130,8 @@ double applyDriveStallFloor(double rate_limited_linear_x,
                             double target_linear_x,
                             const R2CmdVelBridgeConfig& config);
 
+geometry_msgs::msg::Twist reversedArc(const geometry_msgs::msg::Twist& arc);
+
 // Tracks the explorer's observation-turn window from planner events:
 // "observation_turn_started" opens it for max_sec, "observation_turn_finished"
 // closes it. The time bound keeps a lost "finished" event from leaving blind
@@ -180,7 +182,7 @@ private:
     R2CmdVelBridgeConfig loadConfig();
     void onCmdVel(const geometry_msgs::msg::Twist::ConstSharedPtr& msg);
     geometry_msgs::msg::Twist limitRate(const geometry_msgs::msg::Twist& target,
-                                        bool apply_stationary_arc_safety);
+                                        bool stationary_arc);
     geometry_msgs::msg::Twist applyReverseSafety(
         const geometry_msgs::msg::Twist& target);
     geometry_msgs::msg::Twist applyStationaryArcSafety(

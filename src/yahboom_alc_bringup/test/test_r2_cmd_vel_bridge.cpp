@@ -193,6 +193,16 @@ TEST(R2CmdVelBridge, StationarySpinBecomesLowSpeedArcWhenEnabled) {
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
 }
 
+TEST(R2CmdVelBridge, ReversedArcKeepsTheYawDirection) {
+    geometry_msgs::msg::Twist arc;
+    arc.linear.x = 0.08;
+    arc.linear.y = 0.025;
+    const auto reversed = yahboom_alc_bringup::reversedArc(arc);
+    EXPECT_LT(reversed.linear.x, 0.0);
+    // Yaw rate has the sign of speed times wheel angle.
+    EXPECT_GT(reversed.linear.x * reversed.linear.y, 0.0);
+}
+
 TEST(R2CmdVelBridge, StationarySpinStaysZeroForwardWhenDisabled) {
     R2CmdVelBridgeConfig config = defaultConfig();
     config.arc_turn_when_stationary = false;

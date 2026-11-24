@@ -284,6 +284,14 @@ geometry_msgs::msg::Twist convertNavTwistToR2(
     return output;
 }
 
+geometry_msgs::msg::Twist reversedArc(const geometry_msgs::msg::Twist& arc) {
+    // Reversing with the same wheel angle turns the other way; flip both.
+    geometry_msgs::msg::Twist output = arc;
+    output.linear.x = -arc.linear.x;
+    output.linear.y = -arc.linear.y;
+    return output;
+}
+
 double applyDriveStallFloor(const double rate_limited_linear_x,
                             const double target_linear_x,
                             const R2CmdVelBridgeConfig& config) {
@@ -481,8 +489,13 @@ void R2CmdVelBridgeNode::onCmdVel(
                                         requested_angular != 0.0 &&
                                         config_.arc_turn_when_stationary;
 
-    publisher_->publish(limitRate(convertNavTwistToR2(command, config_),
-                                  stationary_arc_command));
+    // The arc direction is chosen before rate limiting, so the steering slews
+    // to the reversed side instead of jumping.
+    auto target = convertNavTwistToR2(command, config_);
+    if (stationary_arc_command) {
+        target = applyStationaryArcSafety(target);
+    }
+    publisher_->publish(limitRate(target, stationary_arc_command));
 }
 
 geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyReverseSafety(
@@ -577,7 +590,7 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::applyStationaryArcSafety(
                                   reverseUnknownIsBlocked(), config_,
                                   &reverse_recent_free_history_, now_sec);
         if (reverse_status == FootprintSafetyStatus::kSafe) {
-            output.linear.x = -output.linear.x;
+            output = reversedArc(output);
             publishPlannerEvent("stationary_arc_reversed",
                                 "front_blocked_reverse_ok");
             return output;
@@ -660,8 +673,7 @@ void R2CmdVelBridgeNode::publishPlannerEvent(const std::string& event,
 }
 
 geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
-    const geometry_msgs::msg::Twist& target,
-    const bool apply_stationary_arc_safety) {
+    const geometry_msgs::msg::Twist& target, const bool stationary_arc) {
     const rclcpp::Time now = get_clock()->now();
 
     double dt = config_.assumed_command_period;
@@ -692,8 +704,9 @@ geometry_msgs::msg::Twist R2CmdVelBridgeNode::limitRate(
         applyDriveStallFloor(output.linear.x, target.linear.x, config_);
 
     output = applyReverseSafety(output);
-    if (apply_stationary_arc_safety) {
-        output = applyStationaryArcSafety(output);
+    // The front is blocked or the arc reversed: no forward ramp-down.
+    if (stationary_arc && target.linear.x <= 0.0 && output.linear.x > 0.0) {
+        output.linear.x = 0.0;
     }
     last_output_ = output;
     last_output_time_ = now;
