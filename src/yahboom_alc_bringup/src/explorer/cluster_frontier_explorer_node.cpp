@@ -205,9 +205,14 @@ void ClusterFrontierExplorerNode::onTimer() {
 }
 
 std::optional<RobotPose> ClusterFrontierExplorerNode::lookupRobotPose() {
+    return lookupPoseIn(global_frame_);
+}
+
+std::optional<RobotPose> ClusterFrontierExplorerNode::lookupPoseIn(
+    const std::string& frame) {
     try {
-        const auto transform = tf_buffer_.lookupTransform(
-            global_frame_, robot_frame_, tf2::TimePointZero);
+        const auto transform =
+            tf_buffer_.lookupTransform(frame, robot_frame_, tf2::TimePointZero);
         const auto& t = transform.transform.translation;
         return RobotPose{WorldPoint{t.x, t.y},
                          yawFromQuaternion(transform.transform.rotation)};

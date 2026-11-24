@@ -2,6 +2,7 @@
 // node runs unchanged against fake Nav2 action servers; the tests drive it
 // only through ROS interfaces (TF, /map, action results, /planner/events).
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <gtest/gtest.h>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -150,13 +151,19 @@ protected:
     void publishWorld() {
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = fake_->now();
-        tf.header.frame_id = "map";
         tf.child_frame_id = "base_footprint";
         tf.transform.translation.x = robot_x_;
         tf.transform.translation.y = 1.0;
         tf.transform.rotation.z = std::sin(robot_yaw_ / 2.0);
         tf.transform.rotation.w = std::cos(robot_yaw_ / 2.0);
+        tf.header.frame_id = "odom";
         tf_->sendTransform(tf);
+        geometry_msgs::msg::TransformStamped map_to_odom;
+        map_to_odom.header.stamp = tf.header.stamp;
+        map_to_odom.header.frame_id = "map";
+        map_to_odom.child_frame_id = "odom";
+        map_to_odom.transform.rotation.w = 1.0;
+        tf_->sendTransform(map_to_odom);
         const auto now = std::chrono::steady_clock::now();
         if (now - last_map_pub_ > 300ms) {
             map_.header.stamp = fake_->now();
@@ -394,6 +401,43 @@ TEST_F(ExplorerSequenceTest, AlignmentSpinResultIsNotTakenForRecoverySpin) {
         const auto e = lastEvent("recovery_stage_finished");
         return e && field(*e, "reason") == "spin_completed";
     }));
+}
+
+// Pinned after a forward segment: the turn must undo the driven arc with the
+// same wheel angle (reverse speed, opposite yaw rate) back to its start.
+TEST_F(ExplorerSequenceTest, ObservationTurnRetracesItsTrackWhenPinned) {
+    map_ = makeMap(false);
+    geometry_msgs::msg::Twist cmd;
+    bool retracing = false;
+    double forward_yaw_rate = 0.0;
+    bool same_wheel = true;
+    auto last = std::chrono::steady_clock::now();
+    const auto sub = fake_->create_subscription<geometry_msgs::msg::Twist>(
+        "cmd_vel_smoothed_raw", 10, [&](const geometry_msgs::msg::Twist& msg) {
+            const auto now = std::chrono::steady_clock::now();
+            const double dt = std::chrono::duration<double>(now - last).count();
+            last = now;
+            // The retrace opens with a stop, after the last pinned command.
+            retracing |= countEvents("observation_turn_retrace_started") > 0 &&
+                         cmd.linear.x == 0.0;
+            if (cmd.linear.x > 0.0 && !retracing) {
+                forward_yaw_rate = cmd.angular.z;
+                robot_x_ = std::min(0.65, robot_x_ + cmd.linear.x * dt);
+            }
+            else if (cmd.linear.x < 0.0 && retracing) {
+                same_wheel &= cmd.angular.z * forward_yaw_rate < 0.0;
+                robot_x_ += cmd.linear.x * dt;
+            }
+            cmd = msg;
+        });
+    startExplorer();
+    ASSERT_TRUE(spinUntil(
+        [&] { return countEvents("observation_turn_finished") > 0; }, 25000ms))
+        << eventLog();
+    const auto finished = lastEvent("observation_turn_finished");
+    EXPECT_EQ(field(*finished, "reason"), "retraced_after_contact");
+    EXPECT_TRUE(same_wheel);
+    EXPECT_NEAR(robot_x_, 0.5, 0.06);
 }
 
 }  // namespace

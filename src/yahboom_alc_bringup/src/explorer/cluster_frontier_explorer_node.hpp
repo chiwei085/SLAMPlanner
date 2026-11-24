@@ -165,6 +165,8 @@ private:
     void stepObservationTurn();
     void publishObservationCmd(const double linear, const double angular);
     void finishObservationTurn(const std::string& reason);
+    void beginObservationRetrace(const RobotPose& pose);
+    void stepObservationRetrace(const RobotPose& pose, bool stuck);
     bool findAndBeginCandidateRoute(const RobotPose& robot_pose,
                                     const bool bypass_goal_suppression);
 
@@ -197,6 +199,7 @@ private:
                     const std::vector<RouteWaypoint>& route);
     void sendActiveWaypoint();
     std::optional<RobotPose> lookupRobotPose();
+    std::optional<RobotPose> lookupPoseIn(const std::string& frame);
     void sendGoal(const WorldPoint& goal_xy, const double goal_yaw,
                   const bool view = false);
     void checkPendingViewObservation();
@@ -415,6 +418,7 @@ private:
     TemporalSignalObservation map_temporal_;
     std::string map_topic_;
     std::string global_costmap_topic_;
+    static constexpr const char* kObservationOdomFrame = "odom";
     static constexpr double kObservationScanRadiusM = 1.5;
     static constexpr double kObservationRepeatRadiusM = 0.5;
     // Roughly the D455/Astra horizontal half-FOV; unknown inside it is
@@ -437,6 +441,14 @@ private:
     double observation_turn_sign_ = 1.0;
     double observation_segment_direction_ = 1.0;
     int observation_stuck_segments_ = 0;
+    struct ObservationSegment
+    {
+        double direction;
+        double length;
+    };
+    std::vector<ObservationSegment> observation_driven_;
+    bool observation_retracing_ = false;
+    bool observation_retrace_started_ = false;
     WorldPoint observation_segment_start_xy_{0.0, 0.0};
     double observation_segment_start_sec_ = 0.0;
     WorldPoint observation_progress_xy_{0.0, 0.0};

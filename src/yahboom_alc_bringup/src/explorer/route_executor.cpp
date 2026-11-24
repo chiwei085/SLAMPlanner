@@ -187,7 +187,9 @@ void ClusterFrontierExplorerNode::validateRouteSegment(const int generation) {
     ComputePathToPose::Goal goal;
     goal.start = poseForPoint(start_xy, start_yaw);
     goal.goal = poseForPoint(waypoint.xy, waypoint.yaw);
-    goal.planner_id = waypoint.view ? nav2_view_planner_id_ : "";
+    // Nav2 rejects an empty id once it has two planners; this one matches
+    // navigate_to_pose_rgbd.xml.
+    goal.planner_id = waypoint.view ? nav2_view_planner_id_ : "GridBased";
     goal.use_start = true;
 
     validation_segment_started_sec_ = nowSec();

@@ -14,8 +14,11 @@ namespace yahboom_alc_bringup
 // (front safety) and the bridge (rear costmap check). Reversing goes into
 // unseen space and nothing else detects a rear contact (the IMU gate and
 // stall detector watch forward motion only), so a segment that stops moving
-// is ended here and two stuck segments in a row abort the turn. At most one
-// turn per spot, so a finished exploration does not loop.
+// is ended here, and two stuck segments in a row end the turn by driving the
+// segments backwards: reversing with the wheels turned the other way swings
+// the front wheels into whatever they touch, while the track already driven
+// is free. At most one turn per spot, so a finished exploration does not loop.
+// Distances are odometry: the map pose jumps when SLAM corrects it.
 void ClusterFrontierExplorerNode::maybeStartObservationTurn(
     const RobotPose& robot_pose) {
     // Commands sent before the collision monitor is active are dropped;
@@ -26,6 +29,10 @@ void ClusterFrontierExplorerNode::maybeStartObservationTurn(
     if (last_observation_turn_xy_ &&
         withinDistanceTolerance(robot_pose.xy, *last_observation_turn_xy_,
                                 kObservationRepeatRadiusM)) {
+        return;
+    }
+    const auto odom_pose = lookupPoseIn(kObservationOdomFrame);
+    if (!odom_pose) {
         return;
     }
     last_observation_turn_xy_ = robot_pose.xy;
@@ -46,7 +53,9 @@ void ClusterFrontierExplorerNode::maybeStartObservationTurn(
                                                                     : -1.0;
     observation_segment_direction_ = 1.0;
     observation_stuck_segments_ = 0;
-    beginObservationSegment(robot_pose);
+    observation_driven_.clear();
+    observation_retracing_ = false;
+    beginObservationSegment(*odom_pose);
     publishPlannerEvent("observation_turn_started",
                         {{"robot_xy", pointJson(robot_pose.xy)},
                          {"robot_yaw", rounded(robot_pose.yaw)},
@@ -66,9 +75,16 @@ void ClusterFrontierExplorerNode::beginObservationSegment(
 
 void ClusterFrontierExplorerNode::switchObservationSegment(
     const RobotPose& pose, const bool stuck) {
+    if (observation_retracing_) {
+        finishObservationTurn("blocked_both_ways");
+        return;
+    }
+    observation_driven_.push_back(
+        {observation_segment_direction_,
+         distanceBetween(pose.xy, observation_segment_start_xy_)});
     observation_stuck_segments_ = stuck ? observation_stuck_segments_ + 1 : 0;
     if (observation_stuck_segments_ >= 2) {
-        finishObservationTurn("blocked_both_ways");
+        beginObservationRetrace(pose);
         return;
     }
     publishObservationCmd(0.0, 0.0);
@@ -91,13 +107,15 @@ void ClusterFrontierExplorerNode::stepObservationTurn() {
         finishObservationTurn("timeout");
         return;
     }
-    const auto pose = lookupRobotPose();
-    if (!pose) {
+    const auto map_pose = lookupRobotPose();
+    const auto pose = lookupPoseIn(kObservationOdomFrame);
+    if (!map_pose || !pose) {
         publishObservationCmd(0.0, 0.0);
         return;
     }
-    if (headingDelta(pose->yaw, observation_target_yaw_) <
-        kObservationDoneYawRad) {
+    if (!observation_retracing_ &&
+        headingDelta(map_pose->yaw, observation_target_yaw_) <
+            kObservationDoneYawRad) {
         finishObservationTurn("heading_reached");
         return;
     }
@@ -109,6 +127,10 @@ void ClusterFrontierExplorerNode::stepObservationTurn() {
     const bool stuck =
         now - observation_segment_start_sec_ > kObservationStartGraceSec &&
         now - observation_progress_sec_ > kObservationNoProgressSec;
+    if (observation_retracing_) {
+        stepObservationRetrace(*pose, stuck);
+        return;
+    }
     const bool segment_done = !withinDistanceTolerance(
         pose->xy, observation_segment_start_xy_, kObservationSegmentM);
     if (stuck || segment_done) {
@@ -119,6 +141,52 @@ void ClusterFrontierExplorerNode::stepObservationTurn() {
     // reversing, so the same sign rotates the heading in both segments.
     publishObservationCmd(observation_segment_direction_ * kObservationSpeedMps,
                           observation_turn_sign_ * kObservationAngularCmd);
+}
+
+void ClusterFrontierExplorerNode::beginObservationRetrace(
+    const RobotPose& pose) {
+    observation_retracing_ = true;
+    observation_retrace_started_ = false;
+    publishPlannerEvent("observation_turn_retrace_started",
+                        {{"segments", observation_driven_.size()}});
+    stepObservationRetrace(pose, false);
+}
+
+void ClusterFrontierExplorerNode::stepObservationRetrace(const RobotPose& pose,
+                                                         const bool stuck) {
+    if (stuck) {
+        finishObservationTurn("blocked_both_ways");
+        return;
+    }
+    // The last segment is done once its length is undone; one that never
+    // moved has nothing to undo. The first call starts from zero distance.
+    while (!observation_driven_.empty()) {
+        const auto& segment = observation_driven_.back();
+        const double undone =
+            observation_retrace_started_
+                ? distanceBetween(pose.xy, observation_segment_start_xy_)
+                : 0.0;
+        if (segment.length >= kObservationMinProgressM &&
+            undone < segment.length) {
+            break;
+        }
+        observation_driven_.pop_back();
+        observation_retrace_started_ = false;
+    }
+    if (observation_driven_.empty()) {
+        finishObservationTurn("retraced_after_contact");
+        return;
+    }
+    if (!observation_retrace_started_) {
+        publishObservationCmd(0.0, 0.0);
+        observation_retrace_started_ = true;
+        observation_segment_direction_ = -observation_driven_.back().direction;
+        beginObservationSegment(pose);
+        return;
+    }
+    // Same wheel angle as the original segment, opposite travel.
+    publishObservationCmd(observation_segment_direction_ * kObservationSpeedMps,
+                          -observation_turn_sign_ * kObservationAngularCmd);
 }
 
 void ClusterFrontierExplorerNode::publishObservationCmd(const double linear,
