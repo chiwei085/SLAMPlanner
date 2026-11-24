@@ -1642,6 +1642,16 @@ TEST(ClusterFrontierExplorer, ViewTailRejectsAGoalNoStraightTailFits) {
     EXPECT_EQ(counts.rejected_footprint, 5);
 }
 
+TEST(ClusterFrontierExplorer, RejectedPlanOnlyLastsForOnePass) {
+    auto core = makeCore(buildGrid(10, 10, 0.1));
+    core.rejectPlan({1.0, 1.0});
+    EXPECT_TRUE(core.isBlacklisted({1.1, 1.0}));
+    EXPECT_FALSE(core.isBlacklisted({2.0, 1.0}));
+    EXPECT_TRUE(core.goalAttempts().empty());
+    core.clearRejectedPlans();
+    EXPECT_FALSE(core.isBlacklisted({1.1, 1.0}));
+}
+
 TEST(ClusterFrontierExplorer, CountObservedCountsCellsNoLongerUnknown) {
     auto grid = buildGrid(10, 10, 0.1, -1);
     auto core = makeCore(grid);

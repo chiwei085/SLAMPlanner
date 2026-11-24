@@ -368,6 +368,13 @@ public:
                             const WorldPoint& axis) const;
 
     bool isBlacklisted(const WorldPoint& goal_xy) const;
+    // A failed plan is a fact about one start, goal yaw and costmap, so it
+    // only steers the rest of the same selection pass.
+    void rejectPlan(const WorldPoint& goal_xy) {
+        rejected_plans_.push_back(goal_xy);
+    }
+    void clearRejectedPlans() { rejected_plans_.clear(); }
+    std::size_t rejectedPlanCount() const { return rejected_plans_.size(); }
     void blacklistGoal(const WorldPoint& goal_xy, double now_sec);
     void recordGoalFailure(const WorldPoint& goal_xy, double now_sec,
                            int failure_weight = 1);
@@ -474,6 +481,7 @@ private:
     double last_goal_yaw_ = 0.0;
     double last_goal_time_sec_ = 0.0;
     std::vector<GoalAttemptRecord> goal_attempts_;
+    std::vector<WorldPoint> rejected_plans_;
     std::vector<HazardRegion> hazard_regions_;
     std::optional<double> last_strict_candidate_sec_;
     bool relaxation_active_ = false;

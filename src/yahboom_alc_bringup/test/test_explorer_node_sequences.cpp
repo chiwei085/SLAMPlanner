@@ -440,5 +440,26 @@ TEST_F(ExplorerSequenceTest, ObservationTurnRetracesItsTrackWhenPinned) {
     EXPECT_NEAR(robot_x_, 0.5, 0.06);
 }
 
+// Nav2 refuses every plan from here: the pass must try the other goals of a
+// cluster, end without a 600 s blacklist, and try again in the next pass.
+TEST_F(ExplorerSequenceTest, FailedPlansAreRetriedInTheNextPass) {
+    FakeActionServer<nav2_msgs::action::ComputePathToPose> planner(
+        fake_, "/compute_path_to_pose");
+    startExplorer({{"nav2_validation_enabled", true}});
+    std::size_t aborted = 0;
+    ASSERT_TRUE(spinUntil(
+        [&] {
+            while (aborted < planner.goals.size()) {
+                planner.abort(aborted++);
+            }
+            return countEvents("no_frontier_candidate") >= 2;
+        },
+        15000ms))
+        << eventLog();
+    EXPECT_GE(aborted, 2U);
+    EXPECT_EQ(countEvents("goal_attempt_updated"), 0U);
+    EXPECT_EQ(nav_->goals.size(), 0U);
+}
+
 }  // namespace
 }  // namespace yahboom_alc_bringup

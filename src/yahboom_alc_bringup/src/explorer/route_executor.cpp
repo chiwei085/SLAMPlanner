@@ -20,6 +20,14 @@ void ClusterFrontierExplorerNode::checkPendingViewObservation() {
 
 bool ClusterFrontierExplorerNode::findAndBeginCandidateRoute(
     const RobotPose& robot_pose, const bool bypass_goal_suppression) {
+    core_.clearRejectedPlans();
+    return selectCandidateRoute(robot_pose, bypass_goal_suppression);
+}
+
+bool ClusterFrontierExplorerNode::selectCandidateRoute(
+    const RobotPose& robot_pose, const bool bypass_goal_suppression) {
+    selection_bypass_ = bypass_goal_suppression;
+    selection_rejected_before_ = core_.rejectedPlanCount();
     checkPendingViewObservation();
     auto result = core_.findCandidates(robot_pose.xy, nowSec(), robot_pose.yaw);
     publishFrontierMarkers(result.candidates);
@@ -145,7 +153,15 @@ void ClusterFrontierExplorerNode::validateNextCandidateRoute() {
                          {"candidates_tried", pending_candidates_.size()}});
     clearGoalMarker();
     pending_candidates_.clear();
+    const auto robot_pose = pending_robot_pose_;
     pending_robot_pose_.reset();
+    // Each cluster offers one goal per search, so look for its other goals
+    // until none is left to plan to.
+    if (robot_pose && core_.rejectedPlanCount() > selection_rejected_before_ &&
+        !selectCandidateRoute(*robot_pose, selection_bypass_) &&
+        !recoveryActive()) {
+        maybeStartObservationTurn(*robot_pose);
+    }
 }
 
 geometry_msgs::msg::PoseStamped ClusterFrontierExplorerNode::poseForPoint(
@@ -266,7 +282,7 @@ void ClusterFrontierExplorerNode::onValidationResult(
              {"segment", validation_segment_index_},
              {"goal_xy", validationGoalJson()},
              {"waypoint_xy", validationWaypointJson()}});
-        recordValidationFailure(FailureClass::kGlobalPathBlocked);
+        rejectValidationPlan();
         validateNextCandidateRoute();
         return;
     }
@@ -330,7 +346,7 @@ void ClusterFrontierExplorerNode::checkValidationTimeout() {
                          {"segment", validation_segment_index_},
                          {"goal_xy", validationGoalJson()},
                          {"waypoint_xy", validationWaypointJson()}});
-    recordValidationFailure(FailureClass::kGlobalPathBlocked);
+    rejectValidationPlan();
     ++validation_generation_;
     validateNextCandidateRoute();
 }
@@ -863,14 +879,10 @@ void ClusterFrontierExplorerNode::clearPendingRouteSelection() {
 // A failed segment proves only that its own waypoint was unreachable from
 // the previous one, so the failure is charged to that waypoint. Charging
 // the final goal blacklisted goals Nav2 was never asked to reach.
-void ClusterFrontierExplorerNode::recordValidationFailure(
-    const FailureClass failure_class) {
-    if (!nav2_validation_blacklist_enabled_ ||
-        validation_segment_index_ >= validation_route_.size()) {
-        return;
+void ClusterFrontierExplorerNode::rejectValidationPlan() {
+    if (validation_final_candidate_) {
+        core_.rejectPlan(validation_final_candidate_->goal_xy);
     }
-    recordGoalFailure(validation_route_[validation_segment_index_].xy,
-                      failure_class);
 }
 
 nlohmann::json ClusterFrontierExplorerNode::validationGoalJson() const {

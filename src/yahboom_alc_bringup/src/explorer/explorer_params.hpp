@@ -35,7 +35,6 @@ struct Nav2ValidationParams
     bool nav2_validation_enabled = true;
     double nav2_validation_timeout_sec = 2.0;
     std::string nav2_compute_path_action = "/compute_path_to_pose";
-    bool nav2_validation_blacklist_enabled = true;
     int nav2_validation_rejected_retry_max = 10;
     double nav2_validation_rejected_retry_delay_sec = 3.0;
     // Frontier view goals (view_tail_length_m > 0) run this BT and are
@@ -159,8 +158,6 @@ struct descriptor<yahboom_alc_bringup::Nav2ValidationParams>
                   "nav2_validation_timeout_sec"),
             named(&Nav2ValidationParams::nav2_compute_path_action,
                   "nav2_compute_path_action"),
-            named(&Nav2ValidationParams::nav2_validation_blacklist_enabled,
-                  "nav2_validation_blacklist_enabled"),
             named(&Nav2ValidationParams::nav2_validation_rejected_retry_max,
                   "nav2_validation_rejected_retry_max"),
             named(

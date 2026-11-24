@@ -169,6 +169,8 @@ private:
     void stepObservationRetrace(const RobotPose& pose, bool stuck);
     bool findAndBeginCandidateRoute(const RobotPose& robot_pose,
                                     const bool bypass_goal_suppression);
+    bool selectCandidateRoute(const RobotPose& robot_pose,
+                              bool bypass_goal_suppression);
 
     struct RouteWaypoint
     {
@@ -348,7 +350,7 @@ private:
     void observeHazardTraversal(const WorldPoint& robot_xy);
     void publishHazardCleared(const HazardRegion& region,
                               const std::string& reason);
-    void recordValidationFailure(const FailureClass failure_class);
+    void rejectValidationPlan();
     void recordGoalFailure(const WorldPoint& goal_xy,
                            const FailureClass failure_class);
     nlohmann::json validationGoalJson() const;
@@ -533,7 +535,8 @@ private:
     double last_reverse_blocked_sec_ = -1.0;
 
     bool nav2_validation_enabled_ = true;
-    bool nav2_validation_blacklist_enabled_ = true;
+    bool selection_bypass_ = false;
+    std::size_t selection_rejected_before_ = 0;
     double nav2_validation_timeout_sec_ = 2.0;
     std::string nav2_compute_path_action_;
     int nav2_validation_rejected_retry_max_ = 10;

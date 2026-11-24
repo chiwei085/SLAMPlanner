@@ -92,8 +92,6 @@ void ClusterFrontierExplorerNode::loadParams() {
     nav2_validation_enabled_ = nav2_params.nav2_validation_enabled;
     nav2_validation_timeout_sec_ = nav2_params.nav2_validation_timeout_sec;
     nav2_compute_path_action_ = nav2_params.nav2_compute_path_action;
-    nav2_validation_blacklist_enabled_ =
-        nav2_params.nav2_validation_blacklist_enabled;
     nav2_validation_rejected_retry_max_ =
         nav2_params.nav2_validation_rejected_retry_max;
     nav2_validation_rejected_retry_delay_sec_ =

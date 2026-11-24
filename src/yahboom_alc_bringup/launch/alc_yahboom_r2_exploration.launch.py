@@ -276,7 +276,6 @@ def launch_frontier_explorer(context, *args, **kwargs):
                     "nav2_validation_enabled": True,
                     "nav2_validation_timeout_sec": 2.0,
                     "nav2_compute_path_action": "/compute_path_to_pose",
-                    "nav2_validation_blacklist_enabled": True,
                     "backtrace_recovery_enabled": True,
                     "backtrace_breadcrumb_max_distance_m": 2.0,
                     "backtrace_breadcrumb_max_age_sec": 90.0,

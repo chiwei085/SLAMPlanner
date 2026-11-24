@@ -90,6 +90,14 @@ void FrontierExplorerCore::noteGoalPublished(const WorldPoint& goal_xy,
 }
 
 bool FrontierExplorerCore::isBlacklisted(const WorldPoint& goal_xy) const {
+    if (std::any_of(rejected_plans_.begin(), rejected_plans_.end(),
+                    [&](const WorldPoint& rejected) {
+                        return std::hypot(goal_xy.first - rejected.first,
+                                          goal_xy.second - rejected.second) <=
+                               config_.failed_goal_blacklist_radius_m;
+                    })) {
+        return true;
+    }
     const auto index = findGoalAttemptIndex(goal_xy);
     if (!index) {
         return false;
