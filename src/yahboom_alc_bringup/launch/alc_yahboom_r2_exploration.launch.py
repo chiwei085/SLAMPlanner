@@ -542,23 +542,13 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "cE": 4.0,
-                "tau_min_revisit": 4,
-                "theta_max": 0.25,
-                "lambda_decay": 0.03,
-                "cl": 6.0,
-                "plc_min_revisit": 0.02,
-                "map_dist_min_revisit": 0.75,
                 "navigation_timeout_sec": 120.0,
-                "degraded_exploration_alc_bonus": 0.35,
-                "degraded_exploration_window_sec": 60.0,
-                "degraded_exploration_min_events": 3,
-                "use_approach_heading": True,
-                "rotation_risk_enabled": True,
-                "rotation_risk_weight": 0.1,
-                "rotation_risk_reference_det": 1.0e-6,
-                "rotation_risk_max_lambda": 2.0,
-                "rotation_risk_max_yaw_rad": 3.141592653589793,
+                # Arrive facing the keyframe's view (straight tail).
+                "nav_behavior_tree": os.path.join(
+                    get_package_share_directory("yahboom_alc_bringup"),
+                    "behavior_trees",
+                    "navigate_to_view_rgbd.xml",
+                ),
                 # Ackermann: a spin becomes an arc that can undo itself.
                 "spin_at_target": False,
                 # rtabmap runs without a namespace here.
