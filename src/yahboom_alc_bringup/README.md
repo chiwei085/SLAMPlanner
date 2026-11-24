@@ -23,9 +23,8 @@ The launch disables RTAB-Map's `map -> odom` TF publisher and runs
 with this package's `r2_navigation_launch.py` only, so AMCL and Nav2 map_server
 do not compete with RTAB-Map localization.
 
-The integration launch passes an indoor MVP parameter profile to `alc_planner`
-so candidate radius, revisit floors, trigger threshold, and navigation timeout
-can be tuned without recompiling. RTAB-Map uses visual-only registration
+Parameters of this package's nodes and of `alc_planner` are in
+[params/exploration.yaml](params/exploration.yaml). RTAB-Map uses visual-only registration
 (`Reg/Strategy=0`, 3D-3D estimation for dual cameras, PnP for astra), and
 Nav2's goal checker is configured with a wide yaw tolerance to avoid R2 arc-turn
 loops around ALC revisit targets.
@@ -33,7 +32,8 @@ loops around ALC revisit targets.
 ## Velocity Bridge
 
 `yahboom_r2_cmd_vel_bridge` converts Nav2-style velocity commands from
-`/alc/nav_cmd_vel` to the Yahboom R2 driver's `/cmd_vel` convention:
+`/alc/nav_cmd_vel` (path following) and `/alc/behavior_cmd_vel` (behaviors,
+which win while they run) to the Yahboom R2 driver's `/cmd_vel` convention:
 
 - `linear.x` remains the forward velocity.
 - `angular.z` is converted to R2 steering in `linear.y`: the curvature
@@ -42,7 +42,7 @@ loops around ALC revisit targets.
   ±45° limit).
 - output `angular.z` is set to zero by default.
 
-The exploration launch sets `min_linear_speed=0.08`,
+`exploration.yaml` sets `min_linear_speed=0.08`,
 `max_linear_speed=0.11`, `wheelbase_m=0.2353` (Yahboom R2 URDF axles), and
 `max_steering_angle_rad=0.6` (URDF steer-joint limit).
 After 0.5 s without input, the bridge streams centered zero commands for 1 s
@@ -90,16 +90,9 @@ no IMU impact reflex.
 
 ## Spin Compatibility
 
-ALC-Planner sends Nav2 `/spin` goals with `target_yaw = 2*pi`. Yahboom R2
-cannot perform a true stationary differential-drive spin through this driver,
-so the bridge approximates stationary spin commands as low-speed arc turns.
-Nav2 spin completion still depends on TF yaw accumulation, so spin actions may
-complete slowly or timeout depending on odometry and behavior-server timing.
-
-For MVP this is acceptable because Nav2 still returns an action result and the
-ALC state machine should not remain stuck. If loop-closure attempts are often
-reported as failed, provide a tuned Nav2 YAML through the launch
-`nav2_params_file` argument.
+The R2 cannot turn on the spot, so the bridge turns a stationary spin command
+into low-speed arcs. ALC targets are not spun at (`spin_at_target: false`);
+the car arrives facing the keyframe's view instead.
 
 ## RealSense D455 setup (RSUSB)
 
@@ -227,7 +220,7 @@ colcon build --packages-select alc_planner yahboom_alc_bringup --cmake-args -GNi
 source install/setup.bash
 ```
 
-Launch the MVP pipeline (dual camera by default):
+Launch the pipeline (dual camera by default):
 
 ```bash
 ros2 launch yahboom_alc_bringup alc_yahboom_r2_exploration.launch.py

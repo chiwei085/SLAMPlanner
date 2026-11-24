@@ -95,11 +95,9 @@ public:
         // generation below the PR_SET_PDEATHSIG we set below. PDEATHSIG does
         // not cascade to grandchildren: when the supervisor dies, the kernel
         // correctly kills the `ros2 run` wrapper, but the driver process it
-        // spawned is simply orphaned and keeps running unsupervised (seen
-        // live 2026-07-08: 11 leaked Ackman_driver_R2 processes across a
-        // single day of relaunches). Exec'ing the resolved path directly
-        // means this forked+prctl'd process IS the driver, with no
-        // ungoverned grandchild for PDEATHSIG to miss.
+        // spawned is simply orphaned and keeps running unsupervised. Exec'ing
+        // the resolved path directly means this forked+prctl'd process IS the
+        // driver, with no ungoverned grandchild for PDEATHSIG to miss.
         std::string driver_path;
         try {
             driver_path = ament_index_cpp::get_package_prefix(driver_package_) +

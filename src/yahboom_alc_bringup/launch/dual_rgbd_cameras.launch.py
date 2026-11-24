@@ -36,10 +36,10 @@ POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
 # Per-mode mount defaults, (x, y, z, roll, pitch, yaw) relative to base_link.
 #
-# dual -- measured 2026-11-18. x: ruler, both bodies centred 2 cm behind the
+# dual -- x: ruler, both bodies centred 2 cm behind the
 # front axle (URDF x=0.1192 -> 0.099). pitch and z: floor plane fitted in each
-# camera's own depth frame (RANSAC on bottom image rows), which beat the
-# ruler/eyeball 5 deg and the uncalibrated D455 IMU (7.6 deg). z = optical
+# camera's own depth frame (RANSAC on bottom image rows), which
+# beats the ruler and the uncalibrated D455 IMU. z = optical
 # centre height above floor minus base_link's 0.0215. y: the TF root is not
 # the body centre -- Astra depth lens sits 2.5 cm right of its centred RGB
 # lens; d455_link is the left IR lens, half the 95 mm baseline left.
@@ -49,10 +49,7 @@ POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 MOUNT_DEFAULTS = {
     "dual": {
         "astra": ("0.099", "-0.025", "0.870", "0", "0.165", "0"),
-        # Re-measured 2026-11-21 after the D455 mount was re-tilted: floor
-        # fit in its own depth frame (raw depth + camera_info) gave 0.193 m,
-        # 5.7 deg down, 1.7 deg roll; the old 0.239 put the floor 0.14 m low
-        # at 1 m. Verified: body-frame floor flat within 0.1 deg, |z| < 1 mm.
+        # Floor fit: 0.193 m high, 5.7 deg down, 1.7 deg roll.
         "d455": ("0.099", "0.0475", "0.1712", "-0.030", "0.099", "0"),
     },
     "astra": {

@@ -188,8 +188,6 @@ struct descriptor<yahboom_alc_bringup::FrontierConfig>
                   "soft_unreachable_penalty"),
             named(&FrontierConfig::allow_unreachable_goal,
                   "allow_unreachable_goal"),
-            named(&FrontierConfig::nav2_validation_required_for_final_goal,
-                  "nav2_validation_required_for_final_goal"),
             named(&FrontierConfig::goal_update_distance,
                   "goal_update_distance"),
             named(&FrontierConfig::goal_publish_period, "goal_publish_period"),

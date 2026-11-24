@@ -62,8 +62,6 @@ enum class FailureClass : std::uint8_t
     kStallOrSlip,
     kLocalHazard,     // weight 2: physical blockage confirmed by stall/slip
     kRecoveryFailed,  // weight 2: all recovery strategies exhausted
-    // The bridge blocked motion because it couldn't see (stale local
-    // costmap / no TF), not because it saw an obstacle. Never blames a goal.
     // A frontier view goal succeeded but none of the unknown cells it was
     // chosen to see became known.
     kViewNotObserved,

@@ -351,8 +351,6 @@ std::optional<FrontierCandidate> FrontierExplorerCore::makeCandidateImpl(
             ++counts.rejected_nav2_clearance;
             continue;
         }
-        // Stage 2 viewpoint term is additive and only computed when enabled, so
-        // with weight 0 the score (and thus selection) is unchanged.
         int visible_unknown = view ? static_cast<int>(view->cells.size()) : 0;
         double viewpoint_bonus = 0.0;
         if (config_.viewpoint_information_weight > 0.0) {

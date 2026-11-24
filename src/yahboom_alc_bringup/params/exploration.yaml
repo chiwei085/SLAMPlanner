@@ -1,0 +1,238 @@
+# Parameters of this package's own nodes and of the ALC planner.
+# Topics and files that depend on launch arguments are set by the launch file.
+
+/**:
+  ros__parameters:
+    # Chassis footprint, shared by the frontier explorer and the cmd_vel bridge.
+    # Keep in sync with the footprint in nav2_rgbd_params.yaml.
+    footprint_front_m: 0.19
+    footprint_rear_m: 0.19
+    footprint_half_width_m: 0.115
+    footprint_padding_m: 0.02
+
+cluster_frontier_explorer:
+  ros__parameters:
+    enabled: true
+    map_topic: "/map"
+    robot_frame: "base_footprint"
+    global_frame: "map"
+    planner_event_topic: "/planner/events"
+    marker_topic: "/waypoints"
+    goal_marker_topic: "/frontier_goal_marker"
+    cycle_period_sec: 3.0
+
+    # Frontier clusters and goal positions
+    min_frontier_size: 14
+    relaxed_min_frontier_size: 8  # fallback selection
+    min_clearance_cells: 2
+    path_clearance_cells: 2
+    exploratory_path_clearance_cells: 1
+    min_frontier_distance: 0.45
+    max_frontier_distance: 5.5
+    frontier_goal_search_radius: 0.6
+    robot_start_search_radius: 2.0
+    # Same radius as the Smac planner and the bridge: a goal inside a turning
+    # circle needs a reverse cusp.
+    min_turning_radius_m: 0.50
+    allow_unreachable_goal: false
+    goal_update_distance: 0.5
+    goal_publish_period: 3.0
+    swept_step_m: 0.05
+    unknown_overlap_max_ratio: 0.70
+    wall_clearance_m: 0.28
+    min_wall_clearance_m: 0.0
+    # Keeps goals outside the costly part of the Nav2 inflation gradient
+    # (radius 0.55, scaling 3.5; only the inscribed ~0.135 m is lethal).
+    nav2_goal_clearance_m: 0.22
+
+    # Scoring
+    path_weight: 0.65
+    information_weight: 0.15
+    information_radius: 1.5
+    frontier_size_weight: 0.02
+    unreachable_goal_penalty: 3.0
+    soft_unreachable_penalty: 1.5
+    unknown_overlap_weight: 1.5
+    corner_penalty_weight: 1.0
+    corridor_progress_weight: 0.4
+    heading_penalty_weight: 1.2
+    heading_penalty_max_rad: 3.141592653589793
+    # Unknown cells a goal's camera can see. Keep small: it only has to demote
+    # goals that look at walls.
+    viewpoint_information_weight: 0.1
+    viewpoint_range_m: 3.0
+    # Replaced at startup by the half field of view in camera_info.
+    viewpoint_half_fov_rad: 0.5
+    view_camera_info_topic: "/camera/depth/camera_info"
+
+    # Straight approach (ViewApproach planner). The length must equal its
+    # tail_length; the offset is the goal checker xy_goal_tolerance.
+    view_tail_length_m: 1.40
+    view_stop_offset_m: 0.35
+    nav2_view_planner_id: "ViewApproach"
+
+    # Known-free regions the robot has never been near compete with frontiers.
+    coverage_revisit_enabled: true
+    coverage_proximity_m: 1.2
+    coverage_sample_spacing_m: 0.4
+    coverage_max_targets: 12
+    coverage_blend_weight: 1.5
+    # A far goal keeps a bonus, so near ones do not outbid it every cycle.
+    intention_distance_threshold_m: 3.0
+    intention_continuation_bonus: 2.0
+    intention_clear_radius_m: 1.5
+    intention_timeout_sec: 35.0
+
+    # Routes and their validation through Nav2
+    enable_subgoals: true
+    max_subgoals: 3
+    subgoal_path_tolerance_m: 0.30
+    min_subgoal_spacing_m: 0.45
+    nav2_validation_enabled: true
+    nav2_validation_timeout_sec: 2.0
+    nav2_compute_path_action: "/compute_path_to_pose"
+    nav2_success_xy_tolerance_m: 0.55
+    goal_timeout_sec: 35.0
+    stuck_progress_radius_m: 0.08
+    stuck_progress_timeout_sec: 9.0
+
+    # Memory of driven failures and contacts
+    failed_goal_blacklist_radius_m: 0.35
+    failed_goal_blacklist_sec: 600.0
+    failed_goal_max_retries: 2
+    hazard_region_enabled: true
+    # Reach of the footprint: a goal closer than this to the contact point
+    # touches it again.
+    hazard_region_severity1_radius_m: 0.21
+    hazard_region_severity2_radius_m: 0.21
+    hazard_region_ttl_sec: 600.0
+    hazard_region_path_penalty: 100.0
+    hazard_region_safe_traversal_clear_enabled: true
+
+    # Recovery
+    recovery_reobserve_cycles: 1
+    recovery_small_spin_yaw_rad: 0.349066
+    # Turning adds phantom cells through yaw error, so only once.
+    recovery_small_spin_attempts: 1
+    recovery_spin_time_allowance_sec: 8.0
+    recovery_forward_escape_distance_m: 1.5
+    recovery_clearance_backup_m: 0.30
+    backtrace_recovery_enabled: true
+    backtrace_breadcrumb_max_distance_m: 2.0
+    backtrace_breadcrumb_max_age_sec: 90.0
+    backtrace_backup_step_m: 0.10
+    backtrace_backup_speed_mps: 0.08
+    backtrace_backup_time_allowance_sec: 5.0
+    backtrace_max_segments: 4
+    backtrace_min_actual_displacement_m: 0.03
+    backtrace_cancel_timeout_sec: 1.0
+    backtrace_backup_stall_check_sec: 1.0
+    backtrace_reverse_motion_ratio_min: 0.6
+    backtrace_backup_action: "/backup"
+
+yahboom_r2_cmd_vel_bridge:
+  ros__parameters:
+    planner_event_topic: "/planner/events"
+    feedback_imu_topic: "/imu/data_raw"
+    feedback_frozen_timeout_sec: 0.5
+    # The wheels do not turn below the minimum.
+    min_linear_speed: 0.08
+    enforce_min_linear_speed: true
+    max_linear_speed: 0.11
+    # linear.y is the front wheel angle in degrees / 1000 (R2 firmware).
+    wheelbase_m: 0.2353
+    min_turning_radius_m: 0.50
+    max_curvature: 2.0
+    max_steering_angle_rad: 0.6
+    linear_deadband: 0.001
+    angular_deadband: 0.005
+    max_linear_accel: 0.12
+    max_steering_rate: 1.0
+    assumed_command_period: 0.10
+    arc_turn_when_stationary: true
+    stationary_arc_requires_forward_clearance: true
+    stationary_arc_check_distance_m: 0.12
+    # A frontier goal borders unknown space, so turning must not be blocked by
+    # it; reversing blind is.
+    stationary_arc_unknown_is_blocked: false
+    reverse_safety_enabled: true
+    reverse_unknown_is_blocked: true
+    # Cells that leave the observation window count as free for this long.
+    reverse_recent_free_grace_sec: 2.0
+    reverse_costmap_topic: "/local_costmap/costmap"
+    reverse_robot_frame: "base_footprint"
+    reverse_costmap_max_age_sec: 1.0
+    reverse_check_distance_m: 0.12
+    reverse_safety_margin_m: 0.0
+
+r2_stall_detector:
+  ros__parameters:
+    odom_topic: "/odom"
+    imu_topic: "/imu/data"
+    planner_event_topic: "/planner/events"
+    command_vx_threshold_mps: 0.05
+    # 3x the ~2 cm pose noise; moving less than the ratio of it is a stall.
+    min_expected_motion_m: 0.06
+    stuck_motion_ratio: 0.3
+    # From rest the chassis needs up to 1.45 s to move 1 cm.
+    start_response_delay_sec: 1.5
+    imu_yaw_rate_threshold_radps: 0.08
+    stale_observation_timeout_sec: 0.5
+    zero_burst_duration_sec: 0.5
+    retrigger_cooldown_sec: 3.0
+
+depth_cloud_preprocessor:
+  ros__parameters:
+    input_topic: "/camera/depth/points"
+    output_topic: "/camera/depth/points_voxel_base"
+    target_frame: "base_footprint"
+    leaf_size_m: 0.05
+    transform_timeout_sec: 0.2
+    # The collision monitor has no range filter of its own, so invalid near
+    # returns are dropped here. Matches obstacle_min_range in Nav2.
+    min_range_m: 0.2
+    max_range_m: 6.0
+
+d455_cloud_preprocessor:
+  ros__parameters:
+    input_topic: "/realsense/d455/depth/color/points"
+    output_topic: "/realsense/d455/depth/points_voxel_base"
+    target_frame: "base_footprint"
+    leaf_size_m: 0.05
+    transform_timeout_sec: 0.2
+    min_range_m: 0.2
+    max_range_m: 6.0
+
+rtabmap_map_tf_relay:
+  ros__parameters:
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_footprint"
+    publish_rate_hz: 50.0
+    stale_warn_sec: 2.0
+
+alc_planner:
+  ros__parameters:
+    navigation_timeout_sec: 120.0
+    # An Ackermann car cannot turn on the spot.
+    spin_at_target: false
+    # rtabmap runs without a namespace.
+    map_data_topic: "/mapData"
+    info_topic: "/info"
+    map_topic: "/map"
+    planner_event_topic: "/planner/events"
+
+planner_runtime_logger:
+  ros__parameters:
+    event_topic: "/planner/events"
+    map_topic: "/map"
+    global_costmap_topic: "/global_costmap/costmap"
+    wheel_odom_topic: "/odom"
+    global_frame: "map"
+    robot_frame: "base_footprint"
+    snapshot_period_sec: 2.0
+
+r2_safety_stop:
+  ros__parameters:
+    publish_rate_hz: 30.0
+    stop_duration_sec: 4.0

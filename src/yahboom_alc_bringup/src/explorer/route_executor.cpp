@@ -753,9 +753,8 @@ void ClusterFrontierExplorerNode::clearPendingRouteSelection() {
     validation_route_.clear();
 }
 
-// A failed segment proves only that its own waypoint was unreachable from
-// the previous one, so the failure is charged to that waypoint. Charging
-// the final goal blacklisted goals Nav2 was never asked to reach.
+// The goal is out for this selection pass only: nothing was driven, so it is
+// not blacklisted.
 void ClusterFrontierExplorerNode::rejectValidationPlan() {
     if (validation_final_candidate_) {
         core_.rejectPlan(validation_final_candidate_->goal_xy);

@@ -4,19 +4,10 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: odom
-    # rtabmap_map_tf_relay publishes map->odom at 50 Hz (≤20 ms latency),
-    # so the old 1.0 s stall-absorption value is no longer needed. 0.3 s
-    # is a small safety net against any unexpected TF hiccup.
+    # rtabmap_map_tf_relay publishes map->odom at 50 Hz; 0.3 s is margin.
     transform_tolerance: 0.3
-    # Humble renamed this from default_bt_xml_filename to
-    # default_nav_to_pose_bt_xml. r2_navigation_launch.py's RewrittenYaml
-    # param_rewrites already targets the new key name, but RewrittenYaml only
-    # rewrites leaf keys that already exist in the source YAML -- it never
-    # inserts missing ones. With the old key name still here, the rewrite had
-    # nothing to match, so bt_navigator silently fell back to its own
-    # compiled-in default (the stock navigate_to_pose_w_replanning_and_recovery.xml,
-    # whose RoundRobin recovery contains Spin(1.57) = phantom left turns)
-    # instead of navigate_to_pose_rgbd.xml. See memory: stock-bt-loaded-param-rename.
+    # RewrittenYaml only rewrites keys that exist here, so this key must keep
+    # its exact name or bt_navigator silently loads the stock tree.
     default_nav_to_pose_bt_xml: "navigate_to_pose_rgbd.xml"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
@@ -91,7 +82,7 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       # Navigation success only: RPP has no heading control at the path end and
       # the car cannot turn in place, so a yaw tolerance made 10/16 replayed
-      # frontier goals abort (2026-11-22). Whether the frontier was actually
+      # frontier goals abort. Whether the frontier was actually
       # seen is the explorer's judgement, not this checker's.
       xy_goal_tolerance: 0.35
       yaw_goal_tolerance: 6.283185
@@ -122,18 +113,10 @@ controller_server:
       curvature_lookahead_dist: 0.35
       use_rotate_to_heading: false
       allow_reversing: true
-      # Reeds-Shepp paths fold back on themselves at a cusp, so the nearest pose
-      # by Euclidean distance jumps past the cusp before the car reaches it (the
-      # default window is the whole local costmap). An arc window of W skips a
-      # cusp at most W/2 early; W must still cover one pose spacing (~0.09) plus
-      # one cycle of travel (0.011).
-      max_robot_pose_search_dist: 0.15
       rotate_to_heading_min_angle: 0.785
       rotate_to_heading_angular_vel: 0.3
       max_angular_accel: 0.5
-      # rtabmap_map_tf_relay decouples map->odom publishing from the SLAM
-      # graph-optimization mutex; the relay runs at 50 Hz so FollowPath
-      # never sees a stale transform. 0.3 s provides a small safety margin.
+      # map->odom arrives at 50 Hz (rtabmap_map_tf_relay); 0.3 s is margin.
       transform_tolerance: 0.3
       max_robot_pose_search_dist: 2.0
       use_interpolation: true
@@ -150,9 +133,7 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_footprint
       use_sim_time: False
-      # rtabmap_map_tf_relay keeps map->odom fresh at 50 Hz, eliminating the
-      # phantom-SUCCEEDED bug caused by the transform failing silently under
-      # load (run_20260707_fix notes). 0.3 s is a conservative safety net.
+      # map->odom arrives at 50 Hz (rtabmap_map_tf_relay); 0.3 s is margin.
       transform_tolerance: 0.3
       rolling_window: true
       width: 3
@@ -430,8 +411,7 @@ collision_monitor:
     cmd_vel_in_topic: "cmd_vel_smoothed_raw"
     cmd_vel_out_topic: "/alc/nav_cmd_vel"
     state_topic: "collision_monitor_state"
-    # Three-stage depth braking (replaces the old custom r2_collision_safety_gate
-    # velocity governor). The monitor evaluates every polygon each cycle and
+    # Three-stage depth braking. The monitor evaluates every polygon each cycle and
     # applies the most restrictive result, all from the same persistent depth
     # cloud, so braking is smooth instead of an on/off stop:
     #   ApproachZone - time-to-collision scaling: cap speed so the robot can

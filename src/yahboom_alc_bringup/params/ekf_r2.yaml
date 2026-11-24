@@ -19,9 +19,8 @@ ekf_filter_node:
         # /odom_raw (base_node_R2) integrates yaw from the *commanded* steering
         # angle (the R2 servo has no position feedback; vel_raw.linear.y echoes
         # the command), so its x/y/yaw and vyaw are dead reckoning on an open-loop
-        # model. Fusing them as absolute measurements pinned the heading to that
-        # model: on 2026-11-22 the EKF ignored a 90 deg hand rotation and the
-        # heading was ~100 deg off by 236 s. Only the encoder speed vx is used,
+        # model. Fusing them as absolute measurements would pin the heading to
+        # that model. Only the encoder speed vx is used,
         # plus vy = 0 (no lateral slip for an Ackermann car).
         odom0: /odom_raw
         odom0_config: [false, false, false,

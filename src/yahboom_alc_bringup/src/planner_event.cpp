@@ -32,10 +32,6 @@ std::optional<std::string> parseFailureClass(const std::string& payload) {
     return parseJsonStringField(payload, "failure_class");
 }
 
-std::optional<std::string> parseReason(const std::string& payload) {
-    return parseJsonStringField(payload, "reason");
-}
-
 ParsedPlannerEvent parsePlannerEvent(const std::string& payload) {
     ParsedPlannerEvent parsed;
     nlohmann::json json;

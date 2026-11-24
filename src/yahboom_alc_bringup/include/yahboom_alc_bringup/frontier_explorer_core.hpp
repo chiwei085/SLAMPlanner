@@ -50,15 +50,14 @@ struct FrontierConfig
     // 0 disables the floor. Unlike wall_clearance_m (a soft penalty) and
     // min_wall_clearance_m, this floor is preserved under relaxed search.
     double nav2_goal_clearance_m = 0.0;
-    // Viewpoint / next-best-view scoring (Stage 2). When
+    // Viewpoint / next-best-view scoring . When
     // viewpoint_information_weight > 0, each goal pose is additionally scored
     // by how much cluster-relevant unknown its camera can actually SEE: a
     // forward ray-fan from the goal cell, bounded by viewpoint_range_m and
     // +/-viewpoint_half_fov_rad around goal_yaw, counting unknown cells reached
     // before any occupied cell blocks the line of sight. This lets the planner
     // prefer a feasible standoff that observes a hard-to-enter (e.g. near-wall)
-    // pocket over a pose crammed against it. Weight 0 disables it entirely so
-    // selection is byte-identical to the pre-Stage-2 behaviour (no regression).
+    // pocket over a pose crammed against it. Weight 0 disables it.
     double viewpoint_information_weight = 0.0;
     double viewpoint_range_m = 3.0;
     double viewpoint_half_fov_rad = 0.5;
@@ -70,26 +69,17 @@ struct FrontierConfig
     // Must equal the ViewApproach tail_length. 0 keeps the grid-path yaw.
     double view_tail_length_m = 0.0;
     double view_stop_offset_m = 0.0;
-    // Coverage revisit (Stage 3). With a long Grid/RangeMax the map gets
-    // painted from far away, so distant rooms become "known" (non-frontier)
-    // before the robot ever drives near them and exploration loses interest.
-    // When coverage_revisit_enabled and the normal frontier search yields NO
-    // candidate, the robot is instead sent to the nearest reachable known-free
-    // region it has never approached within coverage_proximity_m, to densify
-    // it. It is a pure fallback - it only runs when there would otherwise be
-    // zero candidates - so it cannot change active exploration (no regression).
+    // Coverage revisit. RTAB-Map paints the map from far away, so a room can be
+    // known before the robot drives near it. Known-free regions the robot has
+    // never approached within coverage_proximity_m are candidates too.
     bool coverage_revisit_enabled = false;
     double coverage_proximity_m = 1.2;
     double coverage_sample_spacing_m = 0.4;
     int coverage_max_targets = 12;
-    // Score bonus (subtracted from score) given to coverage-revisit candidates
-    // when blended into the main frontier pool. Positive values make coverage
-    // candidates more attractive so they can compete with live frontier
-    // candidates rather than acting as a pure fallback. Zero (default)
-    // preserves the existing behaviour: coverage candidates are only generated
-    // when no frontier candidates exist.
+    // Bonus that lets coverage candidates compete with frontiers. 0 generates
+    // them only when no frontier candidate exists.
     double coverage_blend_weight = 0.0;
-    // Intention-based commitment (F9). When intention_distance_threshold_m > 0,
+    // Intention-based commitment. When intention_distance_threshold_m > 0,
     // selecting a goal farther than this distance locks in a strategic
     // intention. Subsequent planning cycles give a score bonus
     // (intention_continuation_bonus, subtracted from score) to candidates near
@@ -127,7 +117,6 @@ struct FrontierConfig
     int max_subgoals = 3;
     int relaxed_min_frontier_size = 8;
     bool allow_unreachable_goal = false;
-    bool nav2_validation_required_for_final_goal = true;
     bool enable_subgoals = true;
     bool hazard_region_enabled = true;
     bool hazard_region_safe_traversal_clear_enabled = true;
@@ -307,12 +296,12 @@ public:
                                         int height) const;
     // Counts unique unknown cells visible from `from` within a forward camera
     // ray-fan (viewpoint_range_m, +/-viewpoint_half_fov_rad around `yaw`),
-    // stopping each ray at the first occupied cell. Used for Stage 2 viewpoint
-    // scoring; see viewpoint_information_weight.
+    // stopping each ray at the first occupied cell. See
+    // viewpoint_information_weight.
     int countVisibleUnknown(const Cell& from, double yaw) const;
     std::vector<int> visibleUnknownIndices(const Cell& from, double yaw) const;
     std::optional<ViewTail> bestViewTail(const WorldPoint& goal_xy);
-    // How many of `cells` are no longer unknown in the current map.
+    // How many of `cells` are known in the current map.
     int countObserved(const std::vector<WorldPoint>& cells) const;
     // Camera field of view is a sensor property, read from camera_info.
     void setViewHalfFov(double half_fov_rad) {
@@ -327,7 +316,6 @@ public:
     const std::optional<IntentionState>& intention() const {
         return intention_;
     }
-    void clearIntention() { intention_.reset(); }
 
     FootprintCheck footprintCheckAtWorld(double wx, double wy, double yaw);
     std::optional<double> sweptPathUnknownRatio(const std::vector<Cell>& path);
@@ -380,9 +368,6 @@ public:
     std::vector<HazardRegion> noteHazardTraversal(const WorldPoint& robot_xy);
     std::vector<HazardRegion> pruneHazardRegions(double now_sec);
     const std::vector<HazardRegion>& hazardRegions() const {
-        return hazard_regions_;
-    }
-    std::vector<HazardRegion>& hazardRegionsForTest() {
         return hazard_regions_;
     }
 

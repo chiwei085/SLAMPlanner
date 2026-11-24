@@ -21,9 +21,6 @@ std::optional<std::string> parseEventName(const std::string& payload);
 // Extracts the optional "failure_class" field from planner events.
 std::optional<std::string> parseFailureClass(const std::string& payload);
 
-// Extracts the optional "reason" field from planner events.
-std::optional<std::string> parseReason(const std::string& payload);
-
 // What an incoming planner event lets the explorer conclude, and no more.
 enum class PlannerObservation : std::uint8_t
 {

@@ -89,8 +89,7 @@ Mount overrides are `astra_{x,y,z,roll,pitch,yaw}` and
 pitch looks down). Empty values use the selected mode's defaults in
 [dual_rgbd_cameras.launch.py](src/yahboom_alc_bringup/launch/dual_rgbd_cameras.launch.py).
 Current dual-mode pitches: Astra 0.165 rad, D455 0.099 rad; D455 roll is
--0.030 rad. The D455 defaults were remeasured on 2026-11-21 after re-tilting
-its mount.
+-0.030 rad. 
 
 After re-mounting, measure height and pitch with a floor-plane fit in each
 camera's depth frame; avoid estimates by eye or the uncalibrated D455 IMU.
@@ -106,18 +105,24 @@ TF publisher at 50 Hz, deriving and caching the transform from RTAB-Map's
 publisher. Both modes share the RTAB-Map and EKF settings in
 `src/yahboom_alc_bringup/launch/rtabmap_common.py`.
 
-The default integration profile is tuned for indoor MVP testing: ALC planner
-parameters are supplied through ROS parameters. RTAB-Map uses visual-only
+The default integration profile is tuned for indoor use. RTAB-Map uses visual-only
 registration (`Reg/Strategy=0`), with 3D-3D estimation in dual mode and PnP in
 astra mode. Nav2 uses Smac Hybrid-A* with Reeds-Shepp motion and Regulated
 Pure Pursuit; goal checking accepts 0.35 m position error and a full-turn yaw
 tolerance. The frontier explorer validates routes through Nav2 and also
-scores unvisited known-free regions alongside frontiers.
+scores unvisited known-free regions alongside frontiers. A selection pass
+settles for the best tier that can be planned: a goal seen along a straight
+approach, any reachable frontier, then an earlier pose of the car.
+
+Node parameters are in `src/yahboom_alc_bringup/params/`: `exploration.yaml`
+(explorer, bridge, ALC planner, logger), `nav2_rgbd_params.yaml`, and
+`ekf_r2.yaml`. `exploration_params_file` and `nav2_params_file` override the
+first two.
 
 Nav2 path-following commands pass through the velocity smoother and collision
 monitor to `/alc/nav_cmd_vel`, then through the bridge to the driver's
-`/cmd_vel`. Nav2 recovery behaviors and explorer observation turns also send
-commands to `/alc/nav_cmd_vel`; stop nodes can publish zero directly to
+`/cmd_vel`. Nav2 recovery behaviors and explorer observation turns publish
+to `/alc/behavior_cmd_vel`, which overrides path following while active; stop nodes can publish zero directly to
 `/cmd_vel`. Depth-based obstacle braking is owned by Nav2: the local and global
 costmap voxel layers and the Nav2 collision monitor consume
 the voxel-filtered depth clouds (`/camera/depth/points_voxel_base`, plus
@@ -151,23 +156,10 @@ Source `software/library_ws` before
 `yahboomcar_ws`; Astra camera, optional LiDAR drivers, and the R2 bringup's
 `robot_localization` EKF are installed there.
 
-## Recorded real-car runs
+## Runtime logs
 
-Only start a run when the car is available and someone is watching it:
-
-```bash
-scripts/real_car_run.sh --duration 600 --idle-stop 60
-```
-
-The script refuses to start while robot processes are already running. It
-records costmaps, TF, odometry, map, commands, and planner events under
-`/media/jetson/ADATA/realcar_<timestamp>/`, then copies the planner log and
-RTAB-Map database with its SHA-256. It stops when the duration ends, no frontier
-or a perception-stall pause persists for the idle interval, the launch exits,
-`<output>/STOP` is created, or Ctrl-C is pressed.
-
-Shutdown streams zero `/cmd_vel` before stopping processes: the R2 driver
-latches its last command and has no timeout. Do not stop it by killing
-processes alone. Check any shutdown `WARNING` for surviving processes. Keep
-run data on ADATA; `/tmp` is cleared on reboot. Planner JSONL logs default to
-`/home/jetson/SLAMPlanner/planner-log` (`planner_log_dir` overrides this).
+The planner logs one JSONL file per run to `~/SLAMPlanner/planner-log`
+(`planner_log_dir` overrides this), with the parameter files it used in the
+metadata. To stop the robot, stream zero `/cmd_vel` before killing processes:
+the R2 driver latches its last command and has no timeout. The exploration
+launch does this on Ctrl-C.

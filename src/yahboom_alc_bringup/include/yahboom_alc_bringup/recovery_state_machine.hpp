@@ -41,7 +41,6 @@ public:
     void beginReobserve();
 
     RecoveryStage stage() const { return stage_; }
-    int reobserveCyclesRemaining() const { return reobserve_cycles_remaining_; }
     int spinAttempts() const { return spin_attempts_; }
 
     bool tickReobserve();
