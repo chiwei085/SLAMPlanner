@@ -36,6 +36,7 @@ struct PlannerRuntimeLoggerParams
     std::string wheel_odom_topic = "/odom";
     std::string nav_cmd_topic = "/alc/nav_cmd_vel";
     std::string driver_cmd_topic = "/cmd_vel";
+    std::string behavior_cmd_topic = "/alc/behavior_cmd_vel";
     std::string plan_topic = "/plan";
     std::string navigate_status_topic = "/navigate_to_pose/_action/status";
     std::string global_frame = "map";
@@ -69,6 +70,8 @@ struct descriptor<yahboom_alc_bringup::PlannerRuntimeLoggerParams>
             named(&PlannerRuntimeLoggerParams::nav_cmd_topic, "nav_cmd_topic"),
             named(&PlannerRuntimeLoggerParams::driver_cmd_topic,
                   "driver_cmd_topic"),
+            named(&PlannerRuntimeLoggerParams::behavior_cmd_topic,
+                  "behavior_cmd_topic"),
             named(&PlannerRuntimeLoggerParams::plan_topic, "plan_topic"),
             named(&PlannerRuntimeLoggerParams::navigate_status_topic,
                   "navigate_status_topic"),
@@ -237,6 +240,12 @@ public:
                 nav_cmd_time_ = get_clock()->now();
                 ++nav_cmd_message_count_;
             });
+        behavior_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+            params.behavior_cmd_topic, cmd_qos,
+            [this](const geometry_msgs::msg::Twist& msg) {
+                latest_behavior_cmd_ = summarizeTwist(msg);
+                behavior_cmd_time_ = get_clock()->now();
+            });
         plan_sub_ = create_subscription<nav_msgs::msg::Path>(
             params.plan_topic, 10, [this](const nav_msgs::msg::Path& msg) {
                 plan_length_m_ = pathLengthM(msg);
@@ -319,6 +328,9 @@ private:
             {"nav_cmd", twistSummaryJson(latest_nav_cmd_)},
             {"nav_cmd_silence_sec",
              nullableJson(receiveSilence(nav_cmd_time_, now))},
+            {"behavior_cmd", twistSummaryJson(latest_behavior_cmd_)},
+            {"behavior_cmd_silence_sec",
+             nullableJson(receiveSilence(behavior_cmd_time_, now))},
             {"driver_cmd", twistSummaryJson(latest_driver_cmd_)},
             {"driver_cmd_silence_sec",
              nullableJson(receiveSilence(driver_cmd_time_, now))},
@@ -563,6 +575,8 @@ private:
     std::optional<nav_msgs::msg::OccupancyGrid> latest_global_costmap_;
     std::optional<TwistSummary> latest_nav_cmd_;
     std::optional<TwistSummary> latest_driver_cmd_;
+    std::optional<TwistSummary> latest_behavior_cmd_;
+    std::optional<rclcpp::Time> behavior_cmd_time_;
     std::optional<action_msgs::msg::GoalStatusArray> latest_status_;
     std::optional<nav_msgs::msg::Odometry> latest_odom_;
     std::optional<double> plan_length_m_;
@@ -590,6 +604,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr plan_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr
+        behavior_cmd_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr driver_cmd_sub_;
     rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr
         navigate_status_sub_;

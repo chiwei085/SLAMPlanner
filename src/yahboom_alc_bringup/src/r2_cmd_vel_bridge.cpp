@@ -354,6 +354,14 @@ R2CmdVelBridgeNode::R2CmdVelBridgeNode(const rclcpp::NodeOptions& options)
     subscriber_ = create_subscription<geometry_msgs::msg::Twist>(
         config_.input_topic, input_qos,
         [this](const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
+            if (command_owner_.navAllowed(get_clock()->now().seconds())) {
+                onCmdVel(msg);
+            }
+        });
+    behavior_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+        config_.behavior_topic, input_qos,
+        [this](const geometry_msgs::msg::Twist::ConstSharedPtr& msg) {
+            command_owner_.onBehavior(get_clock()->now().seconds());
             onCmdVel(msg);
         });
     idle_stop_timer_ = create_wall_timer(100ms, [this]() {

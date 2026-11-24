@@ -29,6 +29,7 @@ constexpr int kFootprintFreeCostMax = 99;
 struct R2CmdVelBridgeConfig
 {
     std::string input_topic = "/alc/nav_cmd_vel";
+    std::string behavior_topic = "/alc/behavior_cmd_vel";
     std::string output_topic = "/cmd_vel";
     std::string planner_event_topic = "/planner/events";
     double min_linear_speed = 0.05;
@@ -171,6 +172,22 @@ private:
     std::optional<double> last_change_sec_;
 };
 
+// A behavior (BackUp, Spin) owns the robot while it publishes. The velocity
+// smoother keeps ramping the cancelled path command down for about a second,
+// and the speed floor would turn both streams into alternating full commands.
+class CommandOwner
+{
+public:
+    void onBehavior(double now_sec) { last_behavior_sec_ = now_sec; }
+    bool navAllowed(double now_sec) const {
+        // Three periods of the 10 Hz behavior server.
+        return !last_behavior_sec_ || now_sec - *last_behavior_sec_ > 0.3;
+    }
+
+private:
+    std::optional<double> last_behavior_sec_;
+};
+
 class R2CmdVelBridgeNode : public rclcpp::Node
 {
 public:
@@ -181,6 +198,7 @@ public:
 private:
     R2CmdVelBridgeConfig loadConfig();
     void onCmdVel(const geometry_msgs::msg::Twist::ConstSharedPtr& msg);
+    CommandOwner command_owner_;
     geometry_msgs::msg::Twist limitRate(const geometry_msgs::msg::Twist& target,
                                         bool stationary_arc);
     geometry_msgs::msg::Twist applyReverseSafety(
@@ -200,6 +218,7 @@ private:
 
     R2CmdVelBridgeConfig config_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscriber_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr behavior_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_event_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr feedback_imu_sub_;
@@ -235,6 +254,7 @@ struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
         using yahboom_alc_bringup::R2CmdVelBridgeConfig;
         return make_descriptor(
             named(&R2CmdVelBridgeConfig::input_topic, "input_topic"),
+            named(&R2CmdVelBridgeConfig::behavior_topic, "behavior_topic"),
             named(&R2CmdVelBridgeConfig::output_topic, "output_topic"),
             named(&R2CmdVelBridgeConfig::planner_event_topic,
                   "planner_event_topic"),

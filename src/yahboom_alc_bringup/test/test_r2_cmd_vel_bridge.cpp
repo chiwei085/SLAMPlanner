@@ -193,6 +193,16 @@ TEST(R2CmdVelBridge, StationarySpinBecomesLowSpeedArcWhenEnabled) {
     EXPECT_DOUBLE_EQ(output.angular.z, 0.0);
 }
 
+TEST(CommandOwner, BehaviorOverridesNavigationWhileItPublishes) {
+    yahboom_alc_bringup::CommandOwner owner;
+    EXPECT_TRUE(owner.navAllowed(10.0));
+    owner.onBehavior(10.0);
+    EXPECT_FALSE(owner.navAllowed(10.1));
+    owner.onBehavior(10.1);
+    EXPECT_FALSE(owner.navAllowed(10.35));
+    EXPECT_TRUE(owner.navAllowed(10.5));
+}
+
 TEST(R2CmdVelBridge, ReversedArcKeepsTheYawDirection) {
     geometry_msgs::msg::Twist arc;
     arc.linear.x = 0.08;

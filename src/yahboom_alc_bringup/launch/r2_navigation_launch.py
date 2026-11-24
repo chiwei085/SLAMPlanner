@@ -55,7 +55,8 @@ def generate_launch_description():
     common_node_args = ["--ros-args", "--log-level", log_level]
 
     controller_remaps = remappings + [("cmd_vel", "cmd_vel_nav")]
-    behavior_remaps = remappings + [("cmd_vel", nav_cmd_vel_topic)]
+    # Own topic: the bridge lets a running behavior override the smoother tail.
+    behavior_remaps = remappings + [("cmd_vel", "/alc/behavior_cmd_vel")]
     velocity_smoother_remaps = remappings + [
         ("cmd_vel", "cmd_vel_nav"),
         ("cmd_vel_smoothed", "cmd_vel_smoothed_raw"),
