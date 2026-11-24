@@ -2,6 +2,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
@@ -35,6 +36,7 @@ struct PlannerRuntimeLoggerParams
     std::string wheel_odom_topic = "/odom";
     std::string nav_cmd_topic = "/alc/nav_cmd_vel";
     std::string driver_cmd_topic = "/cmd_vel";
+    std::string plan_topic = "/plan";
     std::string navigate_status_topic = "/navigate_to_pose/_action/status";
     std::string global_frame = "map";
     std::string robot_frame = "base_footprint";
@@ -67,6 +69,7 @@ struct descriptor<yahboom_alc_bringup::PlannerRuntimeLoggerParams>
             named(&PlannerRuntimeLoggerParams::nav_cmd_topic, "nav_cmd_topic"),
             named(&PlannerRuntimeLoggerParams::driver_cmd_topic,
                   "driver_cmd_topic"),
+            named(&PlannerRuntimeLoggerParams::plan_topic, "plan_topic"),
             named(&PlannerRuntimeLoggerParams::navigate_status_topic,
                   "navigate_status_topic"),
             named(&PlannerRuntimeLoggerParams::global_frame, "global_frame"),
@@ -221,15 +224,23 @@ public:
                                    point.y - last_wheel_xy_->second);
                 }
                 last_wheel_xy_ = {point.x, point.y};
+                latest_odom_ = msg;
             });
         rclcpp::QoS cmd_qos{rclcpp::KeepLast(10)};
         cmd_qos.best_effort();
         nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.nav_cmd_topic, cmd_qos,
-            [this](const geometry_msgs::msg::Twist& msg) {
+            [this](const geometry_msgs::msg::Twist& msg,
+                   const rclcpp::MessageInfo& info) {
+                observeNavCmdSource(msg, info);
                 latest_nav_cmd_ = summarizeTwist(msg);
                 nav_cmd_time_ = get_clock()->now();
                 ++nav_cmd_message_count_;
+            });
+        plan_sub_ = create_subscription<nav_msgs::msg::Path>(
+            params.plan_topic, 10, [this](const nav_msgs::msg::Path& msg) {
+                plan_length_m_ = pathLengthM(msg);
+                plan_time_ = get_clock()->now();
             });
         driver_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             params.driver_cmd_topic, cmd_qos,
@@ -296,7 +307,73 @@ private:
         }
         writer_->write({{"type", "planner_event"},
                         {"received_sec", rounded(nowSec())},
-                        {"payload", payload}});
+                        {"payload", payload},
+                        {"context", contextJson()}});
+    }
+
+    // What was measured when the event arrived. The event itself only carries
+    // its sender's conclusion; differences between two events are read here.
+    nlohmann::json contextJson() {
+        const auto now = get_clock()->now();
+        nlohmann::json context = {
+            {"nav_cmd", twistSummaryJson(latest_nav_cmd_)},
+            {"nav_cmd_silence_sec",
+             nullableJson(receiveSilence(nav_cmd_time_, now))},
+            {"driver_cmd", twistSummaryJson(latest_driver_cmd_)},
+            {"driver_cmd_silence_sec",
+             nullableJson(receiveSilence(driver_cmd_time_, now))},
+            {"plan_length_m", nullableJson(plan_length_m_)},
+            {"plan_silence_sec", nullableJson(receiveSilence(plan_time_, now))},
+            {"odom", nullptr},
+            {"known_area_m2", nullptr}};
+        if (latest_odom_) {
+            const auto& pose = latest_odom_->pose.pose;
+            context[std::string("odom")] = {
+                {"x", rounded(pose.position.x)},
+                {"y", rounded(pose.position.y)},
+                {"yaw", rounded(yawFromQuaternion(pose.orientation))},
+                {"vx", rounded(latest_odom_->twist.twist.linear.x)}};
+        }
+        if (last_map_counts_) {
+            const auto& c = *last_map_counts_;
+            context[std::string("known_area_m2")] =
+                rounded((c.free + c.occupied) * c.resolution * c.resolution);
+        }
+        return context;
+    }
+
+    std::string publisherName(const std::string& source) {
+        for (const auto& info :
+             get_publishers_info_by_topic(nav_cmd_sub_->get_topic_name())) {
+            const auto& gid = info.endpoint_gid();
+            if (std::equal(source.begin(), source.end(), gid.begin(), gid.end(),
+                           [](const char a, const uint8_t b) {
+                               return static_cast<uint8_t>(a) == b;
+                           })) {
+                return info.node_name();
+            }
+        }
+        return "unknown";
+    }
+
+    void observeNavCmdSource(const geometry_msgs::msg::Twist& msg,
+                             const rclcpp::MessageInfo& info) {
+        const auto& gid = info.get_rmw_message_info().publisher_gid.data;
+        const std::string source(reinterpret_cast<const char*>(gid),
+                                 std::size(gid));
+        const auto previous = nav_cmd_conflict_.observe(
+            source, msg.linear.x, get_clock()->now().seconds());
+        if (!previous) {
+            return;
+        }
+        writer_->write({{"type", "command_conflict"},
+                        {"time_sec", rounded(nowSec())},
+                        {"topic", nav_cmd_sub_->get_topic_name()},
+                        {"from", publisherName(previous->source)},
+                        {"from_linear_x", rounded(previous->linear_x)},
+                        {"to", publisherName(source)},
+                        {"to_linear_x", rounded(msg.linear.x)},
+                        {"gap_sec", rounded(previous->gap_sec)}});
     }
 
     void writeSnapshot() {
@@ -487,6 +564,10 @@ private:
     std::optional<TwistSummary> latest_nav_cmd_;
     std::optional<TwistSummary> latest_driver_cmd_;
     std::optional<action_msgs::msg::GoalStatusArray> latest_status_;
+    std::optional<nav_msgs::msg::Odometry> latest_odom_;
+    std::optional<double> plan_length_m_;
+    std::optional<rclcpp::Time> plan_time_;
+    CommandConflictWatch nav_cmd_conflict_;
     std::optional<rclcpp::Time> map_time_;
     std::optional<rclcpp::Time> nav_cmd_time_;
     std::optional<rclcpp::Time> driver_cmd_time_;
@@ -508,6 +589,7 @@ private:
         global_costmap_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr plan_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr driver_cmd_sub_;
     rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr
         navigate_status_sub_;

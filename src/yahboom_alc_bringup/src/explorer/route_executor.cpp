@@ -191,6 +191,9 @@ void ClusterFrontierExplorerNode::validateRouteSegment(const int generation) {
     // navigate_to_pose_rgbd.xml.
     goal.planner_id = waypoint.view ? nav2_view_planner_id_ : "GridBased";
     goal.use_start = true;
+    validation_planner_id_ = goal.planner_id;
+    validation_start_xy_ = start_xy;
+    validation_start_yaw_ = start_yaw;
 
     validation_segment_started_sec_ = nowSec();
 
@@ -250,13 +253,19 @@ void ClusterFrontierExplorerNode::onValidationResult(
         if (handleStartBlockedValidation()) {
             return;
         }
-        publishPlannerEvent("nav2_validation_failed",
-                            {{"reason", "empty_or_failed_path"},
-                             {"failure_class", "global_path_blocked"},
-                             {"status", static_cast<int>(result.code)},
-                             {"segment", validation_segment_index_},
-                             {"goal_xy", validationGoalJson()},
-                             {"waypoint_xy", validationWaypointJson()}});
+        publishPlannerEvent(
+            "nav2_validation_failed",
+            {{"reason", "empty_or_failed_path"},
+             {"failure_class", "global_path_blocked"},
+             {"status", static_cast<int>(result.code)},
+             {"planner_id", validation_planner_id_},
+             {"waypoint_yaw",
+              rounded(validation_route_[validation_segment_index_].yaw)},
+             {"start_xy", pointJson(validation_start_xy_)},
+             {"start_yaw", rounded(validation_start_yaw_)},
+             {"segment", validation_segment_index_},
+             {"goal_xy", validationGoalJson()},
+             {"waypoint_xy", validationWaypointJson()}});
         recordValidationFailure(FailureClass::kGlobalPathBlocked);
         validateNextCandidateRoute();
         return;
@@ -618,6 +627,19 @@ void ClusterFrontierExplorerNode::checkActiveGoalProgress(
             return;
         }
         RCLCPP_WARN(get_logger(), "Abandoning frontier goal after no progress");
+        publishPlannerEvent(
+            "progress_window_expired",
+            {{"quantity", "route_grid_arc_length_m"},
+             {"value", projection
+                           ? nlohmann::json(rounded(projection->arc_length))
+                           : nlohmann::json(nullptr)},
+             {"baseline", rounded(last_progress_arc_length_)},
+             {"required_gain", rounded(config.stuck_progress_radius_m)},
+             {"lateral_distance_m",
+              projection ? nlohmann::json(rounded(projection->distance))
+                         : nlohmann::json(nullptr)},
+             {"window_sec", rounded(now - last_progress_time_sec_)},
+             {"limit_sec", rounded(config.stuck_progress_timeout_sec)}});
         startRecoveryTree("no_progress");
         return;
     }

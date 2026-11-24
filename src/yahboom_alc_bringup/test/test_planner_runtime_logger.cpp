@@ -41,6 +41,25 @@ TEST(PlannerRuntimeLogger, RunLogNamePreservesLocalTimestampFormat) {
     EXPECT_LE(timestamp, after);
 }
 
+TEST(CommandConflictWatch, ReportsOppositeCommandsFromTwoSources) {
+    CommandConflictWatch watch;
+    EXPECT_FALSE(watch.observe("a", 0.07, 10.00));
+    const auto conflict = watch.observe("b", -0.04, 10.02);
+    ASSERT_TRUE(conflict);
+    EXPECT_EQ(conflict->source, "a");
+    EXPECT_DOUBLE_EQ(conflict->linear_x, 0.07);
+    EXPECT_FALSE(watch.observe("a", 0.06, 10.05));  // one report per second
+    EXPECT_TRUE(watch.observe("b", -0.04, 11.06) ||
+                watch.observe("a", 0.06, 11.08));
+}
+
+TEST(CommandConflictWatch, OneSourceReversingIsNotAConflict) {
+    CommandConflictWatch watch;
+    EXPECT_FALSE(watch.observe("a", 0.08, 1.0));
+    EXPECT_FALSE(watch.observe("a", -0.08, 1.1));
+    EXPECT_FALSE(watch.observe("b", 0.08, 5.0));  // long after
+}
+
 TEST(PlannerRuntimeLogger, LogWriterAppendsCompleteJsonRecordsOnSeparateLines) {
     const auto dir =
         std::filesystem::temp_directory_path() / "planner_runtime_logger_test";

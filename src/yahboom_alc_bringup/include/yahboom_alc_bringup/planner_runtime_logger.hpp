@@ -2,6 +2,7 @@
 
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
@@ -48,6 +49,31 @@ struct SourceHealth
     std::optional<double> receive_silence_sec;
 };
 
+// Two publishers pulling one velocity topic in opposite directions: the bridge
+// turns that into a driver command that flips sign and the car stands still.
+class CommandConflictWatch
+{
+public:
+    struct Previous
+    {
+        std::string source;
+        double linear_x = 0.0;
+        double gap_sec = 0.0;
+    };
+
+    // The previous command when this one, from another source, reverses it
+    // within max_gap_sec. At most one report per second.
+    std::optional<Previous> observe(const std::string& source, double linear_x,
+                                    double now_sec);
+
+private:
+    std::string source_;
+    double linear_x_ = 0.0;
+    double time_sec_ = 0.0;
+    double last_report_sec_ = -1.0e9;
+};
+
+double pathLengthM(const nav_msgs::msg::Path& path);
 MapCellCounts countMapCells(const nav_msgs::msg::OccupancyGrid& msg,
                             int occupied_threshold = 50);
 TwistSummary summarizeTwist(const geometry_msgs::msg::Twist& msg);

@@ -486,6 +486,9 @@ private:
         view_camera_info_sub_;
     std::string nav2_view_behavior_tree_;
     std::string nav2_view_planner_id_;
+    std::string validation_planner_id_;
+    WorldPoint validation_start_xy_{0.0, 0.0};
+    double validation_start_yaw_ = 0.0;
     double active_goal_sent_time_sec_ = 0.0;
     double active_waypoint_sent_time_sec_ = 0.0;
     double last_progress_time_sec_ = 0.0;

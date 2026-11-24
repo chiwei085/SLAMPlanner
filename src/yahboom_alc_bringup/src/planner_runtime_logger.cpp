@@ -1,12 +1,43 @@
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <format>
 #include <stdexcept>
 
 namespace yahboom_alc_bringup
 {
+
+std::optional<CommandConflictWatch::Previous> CommandConflictWatch::observe(
+    const std::string& source, const double linear_x, const double now_sec) {
+    constexpr double kMaxGapSec = 0.2;
+    constexpr double kReportPeriodSec = 1.0;
+    std::optional<Previous> result;
+    const double gap = now_sec - time_sec_;
+    if (source != source_ && linear_x * linear_x_ < 0.0 && gap <= kMaxGapSec &&
+        now_sec - last_report_sec_ >= kReportPeriodSec) {
+        result = Previous{source_, linear_x_, gap};
+        last_report_sec_ = now_sec;
+    }
+    // A zero carries no direction, so it does not hide a reversal.
+    if (linear_x != 0.0) {
+        source_ = source;
+        linear_x_ = linear_x;
+        time_sec_ = now_sec;
+    }
+    return result;
+}
+
+double pathLengthM(const nav_msgs::msg::Path& path) {
+    double length = 0.0;
+    for (std::size_t i = 1; i < path.poses.size(); ++i) {
+        const auto& a = path.poses[i - 1].pose.position;
+        const auto& b = path.poses[i].pose.position;
+        length += std::hypot(b.x - a.x, b.y - a.y);
+    }
+    return length;
+}
 
 MapCellCounts countMapCells(const nav_msgs::msg::OccupancyGrid& msg,
                             const int occupied_threshold) {
