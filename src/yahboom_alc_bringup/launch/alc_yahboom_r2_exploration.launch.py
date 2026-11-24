@@ -559,6 +559,8 @@ def generate_launch_description():
                 "rotation_risk_reference_det": 1.0e-6,
                 "rotation_risk_max_lambda": 2.0,
                 "rotation_risk_max_yaw_rad": 3.141592653589793,
+                # Ackermann: a spin becomes an arc that can undo itself.
+                "spin_at_target": False,
                 # rtabmap runs without a namespace here.
                 "map_data_topic": "/mapData",
                 "info_topic": "/info",

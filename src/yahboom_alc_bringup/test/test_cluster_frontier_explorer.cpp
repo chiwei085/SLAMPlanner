@@ -1638,7 +1638,8 @@ TEST(ClusterFrontierExplorer, ViewTailRejectsAGoalNoStraightTailFits) {
     FrontierCounts counts;
     EXPECT_FALSE(core.makeCandidate(cluster, {4, 10}, core.mapToWorld(4, 10),
                                     blocked, 20, 20, counts));
-    EXPECT_EQ(counts.rejected_footprint, 1);
+    // The one-cell search radius offers five goal cells; each is rejected.
+    EXPECT_EQ(counts.rejected_footprint, 5);
 }
 
 TEST(ClusterFrontierExplorer, CountObservedCountsCellsNoLongerUnknown) {

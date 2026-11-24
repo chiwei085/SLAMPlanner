@@ -229,6 +229,7 @@ void ClusterFrontierExplorerNode::pauseForAlc() {
     const auto final_goal = activeFinalGoalJson();
     const auto active_waypoint = activeGoalJson();
     clearPendingRouteSelection();
+    finishObservationTurn("alc_started");
     if (goal_handle_) {
         safeCancelGoal(nav_client_, goal_handle_, "active_nav_goal");
     }
