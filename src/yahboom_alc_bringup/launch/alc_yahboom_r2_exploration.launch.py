@@ -559,6 +559,10 @@ def generate_launch_description():
                 "rotation_risk_reference_det": 1.0e-6,
                 "rotation_risk_max_lambda": 2.0,
                 "rotation_risk_max_yaw_rad": 3.141592653589793,
+                # rtabmap runs without a namespace here.
+                "map_data_topic": "/mapData",
+                "info_topic": "/info",
+                "map_topic": "/map",
                 "planner_event_topic": "/planner/events",
             }
         ],
