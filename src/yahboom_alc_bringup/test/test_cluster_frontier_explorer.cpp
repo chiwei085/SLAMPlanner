@@ -176,30 +176,33 @@ TEST(ClusterFrontierExplorer, LimitedUnknownOverlapPenalizesScore) {
 }
 
 TEST(ClusterFrontierExplorer, ExcessiveUnknownOverlapRejectsCandidate) {
+    // The goal footprint covers unknown cells ahead of it.
     auto grid = buildGrid(30, 30, 0.05);
     for (int y = 10; y < 15; ++y) {
-        for (int x = 6; x < 9; ++x) {
+        for (int x = 19; x < 22; ++x) {
             setCell(grid, x, y, -1);
         }
     }
     auto core = makeCore(grid);
-    auto config = core.config();
-    config.unknown_overlap_max_ratio = 0.1;
-    core.setConfig(config);
+    const auto candidateAt = [&](const double max_ratio,
+                                 FrontierCounts& counts) {
+        auto config = core.config();
+        config.unknown_overlap_max_ratio = max_ratio;
+        core.setConfig(config);
+        return core.makeCandidate(
+            {{18, 12}}, {6, 12}, core.mapToWorld(6, 12),
+            std::vector<std::uint8_t>(grid.data.size(), false), 30, 30, counts);
+    };
 
-    const auto xy = core.mapToWorldUnchecked(5, 12);
-    const auto check = core.footprintCheckAtWorld(xy.first, xy.second, 0.0);
-    EXPECT_GT(check.unknownRatio(), core.config().unknown_overlap_max_ratio);
+    FrontierCounts loose_counts;
+    const auto accepted = candidateAt(1.0, loose_counts);
+    ASSERT_TRUE(accepted);
+    EXPECT_GT(requireValue(accepted).unknown_overlap_ratio, 0.1);
 
-    const auto ratio = core.sweptPathUnknownRatio({{5, 12}, {12, 12}});
-    ASSERT_TRUE(ratio);
-    EXPECT_GT(requireValue(ratio), 0.0);
-
-    FrontierCounts counts3;
-    const auto candidate = core.makeCandidate(
-        {{5, 12}}, {2, 12}, core.mapToWorld(2, 12),
-        std::vector<std::uint8_t>(grid.data.size(), false), 30, 30, counts3);
-    EXPECT_FALSE(candidate);
+    FrontierCounts strict_counts;
+    EXPECT_FALSE(candidateAt(0.1, strict_counts));
+    // The goal cell and its free 4-neighbors (the one ahead is unknown).
+    EXPECT_EQ(strict_counts.rejected_unknown_ratio, 4);
 }
 
 TEST(ClusterFrontierExplorer, UnreachableGoalRejectsCandidate) {

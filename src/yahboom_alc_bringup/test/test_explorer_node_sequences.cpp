@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <thread>
 
 #include "explorer/cluster_frontier_explorer_node.hpp"
@@ -153,7 +154,7 @@ protected:
         tf.header.stamp = fake_->now();
         tf.child_frame_id = "base_footprint";
         tf.transform.translation.x = robot_x_;
-        tf.transform.translation.y = 1.0;
+        tf.transform.translation.y = robot_y_;
         tf.transform.rotation.z = std::sin(robot_yaw_ / 2.0);
         tf.transform.rotation.w = std::cos(robot_yaw_ / 2.0);
         tf.header.frame_id = "odom";
@@ -259,6 +260,7 @@ protected:
     nav_msgs::msg::OccupancyGrid map_;
     std::chrono::steady_clock::time_point last_map_pub_{};
     double robot_x_ = 0.5;
+    double robot_y_ = 1.0;
     double robot_yaw_ = 0.0;
     std::vector<nlohmann::json> events_;
 };
@@ -350,8 +352,7 @@ TEST_F(ExplorerSequenceTest, ObservationTurnRetracesItsTrackWhenPinned) {
     map_ = makeMap(false);
     geometry_msgs::msg::Twist cmd;
     bool retracing = false;
-    double forward_yaw_rate = 0.0;
-    bool same_wheel = true;
+    double forward_curvature = 0.0;
     auto last = std::chrono::steady_clock::now();
     const auto sub = fake_->create_subscription<geometry_msgs::msg::Twist>(
         "cmd_vel_smoothed_raw", 10, [&](const geometry_msgs::msg::Twist& msg) {
@@ -362,11 +363,12 @@ TEST_F(ExplorerSequenceTest, ObservationTurnRetracesItsTrackWhenPinned) {
             retracing |= countEvents("observation_turn_retrace_started") > 0 &&
                          cmd.linear.x == 0.0;
             if (cmd.linear.x > 0.0 && !retracing) {
-                forward_yaw_rate = cmd.angular.z;
+                forward_curvature = cmd.angular.z / cmd.linear.x;
                 robot_x_ = std::min(0.65, robot_x_ + cmd.linear.x * dt);
             }
             else if (cmd.linear.x < 0.0 && retracing) {
-                same_wheel &= cmd.angular.z * forward_yaw_rate < 0.0;
+                EXPECT_NEAR(cmd.angular.z / cmd.linear.x, forward_curvature,
+                            1e-6);
                 robot_x_ += cmd.linear.x * dt;
             }
             cmd = msg;
@@ -377,7 +379,7 @@ TEST_F(ExplorerSequenceTest, ObservationTurnRetracesItsTrackWhenPinned) {
         << eventLog();
     const auto finished = lastEvent("observation_turn_finished");
     EXPECT_EQ(field(*finished, "reason"), "retraced_after_contact");
-    EXPECT_TRUE(same_wheel);
+    EXPECT_NE(forward_curvature, 0.0);
     EXPECT_NEAR(robot_x_, 0.5, 0.06);
 }
 
@@ -388,33 +390,57 @@ TEST_F(ExplorerSequenceTest, FailedPlansAreRetriedInTheNextPass) {
         fake_, "/compute_path_to_pose");
     startExplorer({{"nav2_validation_enabled", true}});
     std::size_t aborted = 0;
+    std::optional<std::size_t> first_pass;
     ASSERT_TRUE(spinUntil(
         [&] {
             while (aborted < planner.goals.size()) {
                 planner.abort(aborted++);
             }
-            return countEvents("no_frontier_candidate") >= 2;
+            const auto passes = countEvents("no_frontier_candidate");
+            if (passes >= 1 && !first_pass) {
+                first_pass = aborted;
+            }
+            return passes >= 2;
         },
         15000ms))
         << eventLog();
-    EXPECT_GE(aborted, 2U);
+    EXPECT_GE(*first_pass, 2U);
+    // The second pass asks again for a goal that failed in the first.
+    const auto position = [&](const std::size_t i) {
+        return planner.goals[i]->get_goal()->goal.pose.position;
+    };
+    bool retried = false;
+    for (std::size_t i = *first_pass; i < aborted; ++i) {
+        for (std::size_t j = 0; j < *first_pass; ++j) {
+            retried |= position(i) == position(j);
+        }
+    }
+    EXPECT_TRUE(retried);
     EXPECT_EQ(countEvents("goal_attempt_updated"), 0U);
     EXPECT_EQ(nav_->goals.size(), 0U);
 }
 
 // Nothing left to see from here: go back to an earlier pose, do not stand.
 TEST_F(ExplorerSequenceTest, ReturnsAlongItsTrackWhenNoGoalIsLeft) {
+    robot_y_ = 0.8;
+    robot_yaw_ = 0.4;
     startExplorer({{"min_turning_radius_m", 0.5}});
     ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() == 1; }))
         << eventLog();
     robot_x_ = 2.2;
+    robot_y_ = 1.2;
+    robot_yaw_ = 0.0;
     map_ = makeMap(false);
     last_map_pub_ = {};
     spinFor(600ms);
     nav_->abort(0);
     ASSERT_TRUE(spinUntil([&] { return nav_->goals.size() >= 2; }, 15000ms))
         << eventLog();
-    EXPECT_NEAR(nav_->goals.back()->get_goal()->pose.pose.position.x, 0.5, 0.3);
+    const auto pose = nav_->goals.back()->get_goal()->pose.pose;
+    EXPECT_NEAR(pose.position.x, 0.5, 1e-6);
+    EXPECT_NEAR(pose.position.y, 0.8, 1e-6);
+    EXPECT_NEAR(2.0 * std::atan2(pose.orientation.z, pose.orientation.w), 0.4,
+                1e-6);
 }
 
 }  // namespace

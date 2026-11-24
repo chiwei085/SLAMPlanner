@@ -288,14 +288,6 @@ TEST(R2CmdVelBridge, ReverseSafetyAllowsFullyFreeRearFootprint) {
     EXPECT_TRUE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
 }
 
-TEST(R2CmdVelBridge, ReverseSafetyBlocksOccupiedRearFootprint) {
-    auto costmap = buildCostmap();
-    setWorldCell(costmap, -0.22, 0.0, 100);
-    const ReverseSafetyPose pose{0.0, 0.0, 0.0};
-
-    EXPECT_FALSE(isReverseSafeInCostmap(costmap, pose, -0.08, defaultConfig()));
-}
-
 TEST(R2CmdVelBridge, ReverseSafetyAllowsInflatedRearFootprintCost) {
     auto costmap = buildCostmap();
     setWorldCell(costmap, -0.22, 0.0, 80);

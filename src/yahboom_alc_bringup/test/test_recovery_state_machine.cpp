@@ -32,11 +32,11 @@ TEST(RecoveryStateMachine, SmallRotationSequenceAlternatesBeforeForwardArc) {
 
     const auto first = recovery.nextSmallRotationYaw();
     ASSERT_TRUE(first);
-    EXPECT_GT(first.value_or(0.0), 0.0);
+    EXPECT_DOUBLE_EQ(*first, testConfig().recovery_small_spin_yaw_rad);
 
     const auto second = recovery.nextSmallRotationYaw();
     ASSERT_TRUE(second);
-    EXPECT_LT(second.value_or(0.0), 0.0);
+    EXPECT_DOUBLE_EQ(*second, -testConfig().recovery_small_spin_yaw_rad);
 
     EXPECT_FALSE(recovery.nextSmallRotationYaw());
     recovery.advanceToForwardArc();
