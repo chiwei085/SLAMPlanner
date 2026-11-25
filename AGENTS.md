@@ -97,7 +97,8 @@ over adding a guard. In the report, say what the evidence does not prove.
   and depth of the nearest keyframes. Keyframes are sparse: state how many
   seconds lie between the keyframe and the event.
 - To ask what the explorer would have chosen, compile the frontier core
-  (`frontier_search.cpp`, `grid_planning.cpp`, `exploration_memory.cpp`)
+  (`frontier_search.cpp`, `grid_planning.cpp`, `exploration_memory.cpp` in
+  `src/yahboom_alc_bringup/src/explorer/`)
   directly into a probe (the unity library pulls in rclcpp). Load the map from that moment, then compare candidate counts
   with and without one specific state, such as a blacklist entry or a hazard
   region.

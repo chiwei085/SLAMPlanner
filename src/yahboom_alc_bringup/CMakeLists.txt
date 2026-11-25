@@ -43,17 +43,17 @@ find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 add_library(yahboom_alc_bringup_lib
-  src/backtrace_recovery.cpp
-  src/exploration_memory.cpp
-  src/frontier_search.cpp
-  src/grid_planning.cpp
-  src/planner_event.cpp
-  src/planner_runtime_logger.cpp
-  src/r2_cmd_vel_bridge.cpp
-  src/r2_stall_detector_core.cpp
-  src/recent_free_costmap_history.cpp
-  src/recovery_state_machine.cpp
-  src/straight_tail.cpp
+  src/explorer/backtrace_recovery.cpp
+  src/explorer/exploration_memory.cpp
+  src/explorer/frontier_search.cpp
+  src/explorer/grid_planning.cpp
+  src/diagnostics/planner_event.cpp
+  src/diagnostics/planner_runtime_logger.cpp
+  src/driver/r2_cmd_vel_bridge.cpp
+  src/driver/r2_stall_detector_core.cpp
+  src/driver/recent_free_costmap_history.cpp
+  src/explorer/recovery_state_machine.cpp
+  src/navigation/straight_tail.cpp
 )
 set_target_properties(yahboom_alc_bringup_lib PROPERTIES UNITY_BUILD ON)
 target_compile_features(yahboom_alc_bringup_lib PUBLIC cxx_std_20)
@@ -118,7 +118,7 @@ ament_target_dependencies(cluster_frontier_explorer
 )
 
 add_executable(planner_runtime_logger
-  src/planner_runtime_logger_node.cpp
+  src/diagnostics/planner_runtime_logger_node.cpp
 )
 target_link_libraries(planner_runtime_logger
   yahboom_alc_bringup_lib
@@ -133,7 +133,7 @@ ament_target_dependencies(planner_runtime_logger
 )
 
 add_executable(r2_safety_stop
-  src/r2_safety_stop_node.cpp
+  src/driver/r2_safety_stop_node.cpp
 )
 target_link_libraries(r2_safety_stop
   yahboom_alc_bringup_lib
@@ -144,7 +144,7 @@ ament_target_dependencies(r2_safety_stop
 )
 
 add_executable(r2_safe_driver
-  src/r2_safe_driver_supervisor.cpp
+  src/driver/r2_safe_driver_supervisor.cpp
 )
 target_link_libraries(r2_safe_driver
   yahboom_alc_bringup_lib
@@ -156,7 +156,7 @@ ament_target_dependencies(r2_safe_driver
 )
 
 add_executable(yahboom_r2_cmd_vel_bridge
-  src/yahboom_r2_cmd_vel_bridge_main.cpp
+  src/driver/yahboom_r2_cmd_vel_bridge_main.cpp
 )
 target_link_libraries(yahboom_r2_cmd_vel_bridge
   yahboom_alc_bringup_lib
@@ -170,11 +170,11 @@ ament_target_dependencies(yahboom_r2_cmd_vel_bridge
 )
 
 add_executable(r2_stall_detector
-  src/r2_stall_detector.cpp
+  src/driver/r2_stall_detector.cpp
 )
 
 add_executable(r2_planner_server
-  src/r2_planner_server.cpp
+  src/navigation/r2_planner_server.cpp
 )
 ament_target_dependencies(r2_planner_server
   nav2_planner
@@ -182,8 +182,8 @@ ament_target_dependencies(r2_planner_server
 )
 
 add_library(straight_tail_planner SHARED
-  src/straight_tail.cpp
-  src/straight_tail_planner.cpp
+  src/navigation/straight_tail.cpp
+  src/navigation/straight_tail_planner.cpp
 )
 target_compile_features(straight_tail_planner PUBLIC cxx_std_20)
 target_include_directories(straight_tail_planner
@@ -198,7 +198,7 @@ ament_target_dependencies(straight_tail_planner
 pluginlib_export_plugin_description_file(nav2_core straight_tail_planner_plugin.xml)
 
 add_executable(depth_cloud_preprocessor
-  src/depth_cloud_preprocessor.cpp
+  src/perception/depth_cloud_preprocessor.cpp
 )
 target_include_directories(depth_cloud_preprocessor
   PRIVATE
@@ -217,7 +217,7 @@ ament_target_dependencies(depth_cloud_preprocessor
 )
 
 add_executable(rtabmap_map_tf_relay
-  src/rtabmap_map_tf_relay.cpp
+  src/perception/rtabmap_map_tf_relay.cpp
 )
 ament_target_dependencies(rtabmap_map_tf_relay
   geometry_msgs
