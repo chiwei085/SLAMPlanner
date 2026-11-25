@@ -74,7 +74,6 @@ ament_target_dependencies(yahboom_alc_bringup_lib
 
 # The explorer node class, shared by its executable and the sequence tests.
 add_library(cluster_frontier_explorer_node STATIC
-  src/explorer/behavior_attempt.cpp
   src/explorer/cluster_frontier_explorer_node.cpp
   src/explorer/observation_turn.cpp
   src/explorer/recovery_driver.cpp
