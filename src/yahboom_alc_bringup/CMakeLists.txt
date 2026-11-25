@@ -31,6 +31,7 @@ find_package(nav2_msgs REQUIRED)
 find_package(nav2_planner REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(PCL REQUIRED COMPONENTS filters)
+find_package(nlohmann_json REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -61,6 +62,9 @@ target_include_directories(yahboom_alc_bringup_lib
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(yahboom_alc_bringup_lib
+  nlohmann_json::nlohmann_json
 )
 ament_target_dependencies(yahboom_alc_bringup_lib
   geometry_msgs

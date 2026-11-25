@@ -88,6 +88,8 @@ nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
 nlohmann::json runStartJson(double time_sec, double snapshot_period_sec,
                             const LoggerTopics& topics,
                             const nlohmann::json& runtime_metadata = {});
+// The parsed object, or {"raw": text} when text is not a JSON object.
+nlohmann::json parseObjectOrRaw(const std::string& text);
 std::string makeRunLogName();
 
 class PlannerLogWriter

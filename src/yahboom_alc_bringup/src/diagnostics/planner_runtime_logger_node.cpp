@@ -167,14 +167,7 @@ public:
         occupied_threshold_ = params.occupied_threshold;
         writer_ = std::make_unique<PlannerLogWriter>(params.log_dir);
 
-        nlohmann::json runtime_metadata = nlohmann::json::object();
-        try {
-            runtime_metadata =
-                nlohmann::json::parse(params.runtime_metadata_json);
-        }
-        catch (const nlohmann::json::parse_error&) {
-            runtime_metadata = {{"raw", params.runtime_metadata_json}};
-        }
+        auto runtime_metadata = parseObjectOrRaw(params.runtime_metadata_json);
         runtime_metadata[std::string("nav2_params_file")] =
             params.nav2_params_file;
         runtime_metadata[std::string("nav2_bt_xml")] = params.nav2_bt_xml;
@@ -301,13 +294,7 @@ private:
     void onEvent(const std_msgs::msg::String& msg) {
         event_time_ = get_clock()->now();
         ++event_message_count_;
-        nlohmann::json payload;
-        try {
-            payload = nlohmann::json::parse(msg.data);
-        }
-        catch (const nlohmann::json::parse_error&) {
-            payload = nlohmann::json{{"raw", msg.data.substr(0, 500)}};
-        }
+        auto payload = parseObjectOrRaw(msg.data);
         const auto tf = lookupTF();
         if (tf.pose) {
             payload[std::string("robot_xy")] = {{"x", tf.pose->x},

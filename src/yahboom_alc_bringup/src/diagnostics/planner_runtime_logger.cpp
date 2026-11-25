@@ -119,10 +119,18 @@ nlohmann::json runStartJson(const double time_sec,
                        {"navigate_status_topic", topics.navigate_status_topic},
                        {"global_costmap_topic", topics.global_costmap_topic},
                        {"wheel_odom_topic", topics.wheel_odom_topic}};
-    if (runtime_metadata.dump() != "null" && runtime_metadata.dump() != "{}") {
+    if (!runtime_metadata.empty()) {
         record[std::string("runtime_metadata")] = runtime_metadata;
     }
     return record;
+}
+
+nlohmann::json parseObjectOrRaw(const std::string& text) {
+    auto parsed = nlohmann::json::parse(text, nullptr, false);
+    if (parsed.is_object()) {
+        return parsed;
+    }
+    return {{"raw", text.substr(0, 500)}};
 }
 
 std::string makeRunLogName() {
@@ -151,7 +159,10 @@ PlannerLogWriter::~PlannerLogWriter() {
 }
 
 void PlannerLogWriter::write(const nlohmann::json& record) {
-    file_ << record.dump() << '\n';
+    // Raw payloads may hold invalid UTF-8, on which a strict dump throws.
+    file_ << record.dump(-1, ' ', false,
+                         nlohmann::json::error_handler_t::replace)
+          << '\n';
     file_.flush();
 }
 

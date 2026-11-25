@@ -219,7 +219,7 @@ protected:
     std::optional<nlohmann::json> lastEvent(const std::string& name) const {
         for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
             if (field(*it, "event") == name) {
-                return *it;
+                return std::make_optional<nlohmann::json>(*it);
             }
         }
         return std::nullopt;

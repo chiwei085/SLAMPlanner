@@ -88,6 +88,32 @@ TEST(PlannerRuntimeLogger, LogWriterAppendsCompleteJsonRecordsOnSeparateLines) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(PlannerRuntimeLogger, UnusableEventPayloadIsKeptAsRaw) {
+    EXPECT_EQ(parseObjectOrRaw("{\"event\":\"\\u4e2d\"}")["event"], "中");
+    for (const std::string text :
+         {"", "not json", "null", "5", "\"text\"", "[1]"}) {
+        SCOPED_TRACE(text);
+        auto payload = parseObjectOrRaw(text);
+        EXPECT_EQ(payload["raw"], text);
+        payload["robot_yaw"] = 0.5;  // the logger adds fields afterwards
+    }
+}
+
+TEST(PlannerRuntimeLogger, LogWriterSurvivesInvalidUtf8) {
+    const auto dir =
+        std::filesystem::temp_directory_path() / "planner_runtime_logger_utf8";
+    std::filesystem::remove_all(dir);
+    PlannerLogWriter writer(dir, "run.jsonl");
+    const auto payload = parseObjectOrRaw("bad \xff byte");
+    EXPECT_NO_THROW(writer.write(runStartJson(1.0, 2.0, {}, payload)));
+    writer.close();
+    std::ifstream file(dir / "run.jsonl");
+    std::string line;
+    ASSERT_TRUE(std::getline(file, line));
+    EXPECT_TRUE(nlohmann::json::accept(line));
+    std::filesystem::remove_all(dir);
+}
+
 TEST(PlannerRuntimeLogger, MapAndTwistHelpersAreCompact) {
     const auto counts = countMapCells(buildGrid());
     geometry_msgs::msg::Twist twist;
