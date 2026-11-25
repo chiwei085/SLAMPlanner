@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>yahboom_r2_teleop</name>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
   <description>Joystick-controlled RTAB-Map bringup for the Yahboom Rosmaster R2.</description>
   <maintainer email="yehchiwei.work@gmail.com">Chi Wei, Yeh</maintainer>
   <license>Apache-2.0</license>
