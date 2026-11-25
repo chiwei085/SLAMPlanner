@@ -3,7 +3,7 @@
 Overlay bringup package for running the ALC planner on a Yahboom R2.
 
 This package intentionally owns the Yahboom-specific integration code outside
-`ThirdParty/ALC-Planner`. The ALC planner remains a hardware-independent
+`src/alc_planner`. The ALC planner remains a hardware-independent
 planner package; this overlay provides the launch wiring and the velocity
 bridge needed by the R2 driver.
 

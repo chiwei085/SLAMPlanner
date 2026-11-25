@@ -4,7 +4,7 @@ ROS2 overlay workspace for Yahboom/Rosmaster R2 autonomous exploration with
 RTAB-Map, Nav2, and the ALC planner.
 
 The hardware-specific integration lives in `src/yahboom_alc_bringup`.
-`ThirdParty/ALC-Planner` is kept as the planner package and is not used for
+`src/alc_planner` is kept as the planner package and is not used for
 Yahboom-specific bridge code.
 
 ## Build

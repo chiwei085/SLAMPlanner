@@ -8,7 +8,7 @@ Use the `[type] short description` format: lowercase, imperative mood, no period
 
 Committing does not require re-running verification; follow the style above.
 
-`ThirdParty/ALC-Planner` is a git submodule (`alc_planner`). Commit changes
+`src/alc_planner` is a git submodule (`alc_planner`). Commit changes
 there inside the submodule first, then commit the updated pointer here.
 
 ## Verification
