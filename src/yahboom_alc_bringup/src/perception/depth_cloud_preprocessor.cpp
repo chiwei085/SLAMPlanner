@@ -15,6 +15,54 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"  // IWYU pragma: keep
 #include "tf2_ros/buffer.h"                         // IWYU pragma: keep
 #include "tf2_ros/transform_listener.h"             // IWYU pragma: keep
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct DepthCloudPreprocessorParams
+{
+    std::string input_topic = "/camera/depth/points";
+    std::string output_topic = "/camera/depth/points_voxel_base";
+    std::string target_frame = "base_footprint";
+    double leaf_size_m = 0.05;
+    double transform_timeout_sec = 0.2;
+    double max_range_m = 6.0;
+    // Structured-light depth cameras (Astra Pro Plus here) commonly emit
+    // literal (0,0,0) for invalid/no-return pixels instead of NaN,
+    // especially in the first frames after power-up while auto-exposure
+    // settles. Left unfiltered, such a point transforms to the camera's
+    // own mount offset from target_frame -- i.e. a phantom obstacle
+    // stuck to the robot. The costmaps have their own obstacle_min_range
+    // to catch this, but collision_monitor's pointcloud source has no
+    // range filter at all, so it must be caught here, upstream of all
+    // three consumers.
+    double min_range_m = 0.2;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::DepthCloudPreprocessorParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::DepthCloudPreprocessorParams;
+        return make_descriptor(
+            named(&DepthCloudPreprocessorParams::input_topic, "input_topic"),
+            named(&DepthCloudPreprocessorParams::output_topic, "output_topic"),
+            named(&DepthCloudPreprocessorParams::target_frame, "target_frame"),
+            named(&DepthCloudPreprocessorParams::leaf_size_m, "leaf_size_m"),
+            named(&DepthCloudPreprocessorParams::transform_timeout_sec,
+                  "transform_timeout_sec"),
+            named(&DepthCloudPreprocessorParams::max_range_m, "max_range_m"),
+            named(&DepthCloudPreprocessorParams::min_range_m, "min_range_m"));
+    }
+};
+
+}  // namespace rik_sd
 
 class DepthCloudPreprocessorNode : public rclcpp::Node
 {
@@ -25,46 +73,29 @@ public:
           tf_buffer_(std::make_shared<tf2_ros::Buffer>(get_clock())),
           tf_listener_(
               std::make_shared<tf2_ros::TransformListener>(*tf_buffer_)) {
-        input_topic_ = declare_parameter<std::string>("input_topic",
-                                                      "/camera/depth/points");
-        output_topic_ = declare_parameter<std::string>(
-            "output_topic", "/camera/depth/points_voxel_base");
-        target_frame_ =
-            declare_parameter<std::string>("target_frame", "base_footprint");
-        leaf_size_m_ = declare_parameter<double>("leaf_size_m", 0.05);
-        transform_timeout_sec_ =
-            declare_parameter<double>("transform_timeout_sec", 0.2);
-        max_range_m_ = declare_parameter<double>("max_range_m", 6.0);
-        // Structured-light depth cameras (Astra Pro Plus here) commonly emit
-        // literal (0,0,0) for invalid/no-return pixels instead of NaN,
-        // especially in the first frames after power-up while auto-exposure
-        // settles. Left unfiltered, such a point transforms to the camera's
-        // own mount offset from target_frame_ -- i.e. a phantom obstacle
-        // stuck to the robot. The costmaps have their own obstacle_min_range
-        // to catch this, but collision_monitor's pointcloud source has no
-        // range filter at all, so it must be caught here, upstream of all
-        // three consumers.
-        min_range_m_ = declare_parameter<double>("min_range_m", 0.2);
+        params_ = yahboom_alc_bringup::loadDeclaredParameters<
+            yahboom_alc_bringup::DepthCloudPreprocessorParams>(*this);
 
-        if (leaf_size_m_ <= 0.0) {
+        if (params_.leaf_size_m <= 0.0) {
             RCLCPP_WARN(get_logger(),
                         "leaf_size_m must be positive; using default 0.05 m");
-            leaf_size_m_ = 0.05;
+            params_.leaf_size_m = 0.05;
         }
-        if (max_range_m_ <= 0.0) {
+        if (params_.max_range_m <= 0.0) {
             RCLCPP_WARN(get_logger(),
                         "max_range_m must be positive; using default 6.0 m");
-            max_range_m_ = 6.0;
+            params_.max_range_m = 6.0;
         }
-        min_range_m_ = std::max(0.0, min_range_m_);
-        transform_timeout_sec_ = std::max(0.0, transform_timeout_sec_);
-        max_range_sq_m_ = max_range_m_ * max_range_m_;
-        min_range_sq_m_ = min_range_m_ * min_range_m_;
+        params_.min_range_m = std::max(0.0, params_.min_range_m);
+        params_.transform_timeout_sec =
+            std::max(0.0, params_.transform_timeout_sec);
+        max_range_sq_m_ = params_.max_range_m * params_.max_range_m;
+        min_range_sq_m_ = params_.min_range_m * params_.min_range_m;
 
         cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-            output_topic_, rclcpp::SensorDataQoS());
+            params_.output_topic, rclcpp::SensorDataQoS());
         cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            input_topic_, rclcpp::SensorDataQoS(),
+            params_.input_topic, rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
                 onCloud(msg);
             });
@@ -72,8 +103,8 @@ public:
         RCLCPP_INFO(
             get_logger(),
             "Depth cloud preprocessor: %s -> %s, target=%s, leaf=%.3f m",
-            input_topic_.c_str(), output_topic_.c_str(), target_frame_.c_str(),
-            leaf_size_m_);
+            params_.input_topic.c_str(), params_.output_topic.c_str(),
+            params_.target_frame.c_str(), params_.leaf_size_m);
     }
 
 private:
@@ -87,14 +118,14 @@ private:
         geometry_msgs::msg::TransformStamped transform_stamped;
         try {
             transform_stamped = tf_buffer_->lookupTransform(
-                target_frame_, msg->header.frame_id, msg->header.stamp,
-                tf2::durationFromSec(transform_timeout_sec_));
+                params_.target_frame, msg->header.frame_id, msg->header.stamp,
+                tf2::durationFromSec(params_.transform_timeout_sec));
         }
         catch (const tf2::TransformException& ex) {
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 5000,
                 "Cannot transform depth cloud %s -> %s at stamp %.3f: %s",
-                msg->header.frame_id.c_str(), target_frame_.c_str(),
+                msg->header.frame_id.c_str(), params_.target_frame.c_str(),
                 rclcpp::Time(msg->header.stamp).seconds(), ex.what());
             return;
         }
@@ -128,9 +159,9 @@ private:
         pcl::PointCloud<pcl::PointXYZ> voxel_cloud;
         if (!finite_cloud.empty()) {
             pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-            voxel_filter.setLeafSize(static_cast<float>(leaf_size_m_),
-                                     static_cast<float>(leaf_size_m_),
-                                     static_cast<float>(leaf_size_m_));
+            voxel_filter.setLeafSize(static_cast<float>(params_.leaf_size_m),
+                                     static_cast<float>(params_.leaf_size_m),
+                                     static_cast<float>(params_.leaf_size_m));
             voxel_filter.setInputCloud(finite_cloud.makeShared());
             voxel_filter.filter(voxel_cloud);
         }
@@ -157,7 +188,7 @@ private:
         sensor_msgs::msg::PointCloud2 output;
         pcl::toROSMsg(transformed_cloud, output);
         output.header.stamp = msg->header.stamp;
-        output.header.frame_id = target_frame_;
+        output.header.frame_id = params_.target_frame;
         cloud_pub_->publish(output);
 
         RCLCPP_DEBUG_THROTTLE(
@@ -166,20 +197,14 @@ private:
             finite_cloud.size(), transformed_cloud.size());
     }
 
-    std::string input_topic_;
-    std::string output_topic_;
-    std::string target_frame_;
-    double leaf_size_m_;
-    double transform_timeout_sec_;
-    double max_range_m_;
     double max_range_sq_m_;
-    double min_range_m_;
     double min_range_sq_m_;
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    yahboom_alc_bringup::DepthCloudPreprocessorParams params_;
 };
 
 int main(int argc, char** argv) {

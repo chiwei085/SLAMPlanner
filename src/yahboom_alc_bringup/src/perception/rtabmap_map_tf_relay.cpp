@@ -38,6 +38,40 @@
 #include "tf2_ros/buffer.h"                         // IWYU pragma: keep
 #include "tf2_ros/transform_broadcaster.h"          // IWYU pragma: keep
 #include "tf2_ros/transform_listener.h"             // IWYU pragma: keep
+#include "yahboom_alc_bringup/parameter_loader.hpp"
+
+namespace yahboom_alc_bringup
+{
+
+struct MapTfRelayParams
+{
+    std::string odom_frame = "odom";
+    std::string map_frame = "map";
+    std::string base_frame = "base_footprint";
+    double publish_rate_hz = 50.0;
+    double stale_warn_sec = 2.0;
+};
+
+}  // namespace yahboom_alc_bringup
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::MapTfRelayParams>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::MapTfRelayParams;
+        return make_descriptor(
+            named(&MapTfRelayParams::odom_frame, "odom_frame"),
+            named(&MapTfRelayParams::map_frame, "map_frame"),
+            named(&MapTfRelayParams::base_frame, "base_frame"),
+            named(&MapTfRelayParams::publish_rate_hz, "publish_rate_hz"),
+            named(&MapTfRelayParams::stale_warn_sec, "stale_warn_sec"));
+    }
+};
+
+}  // namespace rik_sd
 
 class MapTfRelayNode : public rclcpp::Node
 {
@@ -51,12 +85,8 @@ public:
         tf_listener_ =
             std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
-        map_frame_ = declare_parameter<std::string>("map_frame", "map");
-        base_frame_ =
-            declare_parameter<std::string>("base_frame", "base_footprint");
-        publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 50.0);
-        stale_warn_sec_ = declare_parameter<double>("stale_warn_sec", 2.0);
+        params_ = yahboom_alc_bringup::loadDeclaredParameters<
+            yahboom_alc_bringup::MapTfRelayParams>(*this);
 
         cached_transform_ = makeIdentityMapToOdom();
 
@@ -79,7 +109,7 @@ public:
                 sub_opts);
 
         republish_timer_ = create_wall_timer(
-            std::chrono::duration<double>(1.0 / publish_rate_hz_),
+            std::chrono::duration<double>(1.0 / params_.publish_rate_hz),
             [this]() { republishTransform(); }, timer_cbgroup_);
     }
 
@@ -97,19 +127,20 @@ private:
         geometry_msgs::msg::TransformStamped odom_T_base_stamped;
         try {
             odom_T_base_stamped = tf_buffer_->lookupTransform(
-                odom_frame_, base_frame_, msg->header.stamp,
+                params_.odom_frame, params_.base_frame, msg->header.stamp,
                 tf2::durationFromSec(0.2));
         }
         catch (const tf2::TransformException&) {
             try {
                 odom_T_base_stamped = tf_buffer_->lookupTransform(
-                    odom_frame_, base_frame_, tf2::TimePointZero);
+                    params_.odom_frame, params_.base_frame, tf2::TimePointZero);
             }
             catch (const tf2::TransformException& ex) {
                 RCLCPP_WARN_THROTTLE(
                     get_logger(), *get_clock(), 5000,
                     "Cannot lookup %s→%s: %s — skipping update",
-                    odom_frame_.c_str(), base_frame_.c_str(), ex.what());
+                    params_.odom_frame.c_str(), params_.base_frame.c_str(),
+                    ex.what());
                 return;
             }
         }
@@ -124,7 +155,7 @@ private:
         ts.header.stamp =
             msg->header.stamp;  // source timestamp for staleness tracking
         ts.header.frame_id = msg->header.frame_id;  // "map"
-        ts.child_frame_id = odom_frame_;
+        ts.child_frame_id = params_.odom_frame;
         tf2::toMsg(map_T_odom, ts.transform);
 
         std::unique_lock<std::shared_mutex> lk(cache_mutex_);
@@ -145,14 +176,15 @@ private:
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 5000,
                 "No localization_pose received yet; publishing identity %s→%s",
-                map_frame_.c_str(), odom_frame_.c_str());
+                params_.map_frame.c_str(), params_.odom_frame.c_str());
         }
         auto source_age = (get_clock()->now() - ts.header.stamp).seconds();
-        if (cache_from_localization_pose && source_age > stale_warn_sec_) {
+        if (cache_from_localization_pose &&
+            source_age > params_.stale_warn_sec) {
             RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 2000,
                 "map→%s transform is %.1f s stale — RTAB-Map may be stalled",
-                odom_frame_.c_str(), source_age);
+                params_.odom_frame.c_str(), source_age);
         }
 
         // Republish with current timestamp so Nav2 sees a valid,
@@ -164,8 +196,8 @@ private:
     geometry_msgs::msg::TransformStamped makeIdentityMapToOdom() {
         geometry_msgs::msg::TransformStamped ts;
         ts.header.stamp = get_clock()->now();
-        ts.header.frame_id = map_frame_;
-        ts.child_frame_id = odom_frame_;
+        ts.header.frame_id = params_.map_frame;
+        ts.child_frame_id = params_.odom_frame;
         ts.transform.rotation.w = 1.0;
         return ts;
     }
@@ -188,11 +220,7 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    std::string odom_frame_;
-    std::string map_frame_;
-    std::string base_frame_;
-    double publish_rate_hz_;
-    double stale_warn_sec_;
+    yahboom_alc_bringup::MapTfRelayParams params_;
 };
 
 int main(int argc, char** argv) {

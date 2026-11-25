@@ -205,6 +205,7 @@ add_executable(depth_cloud_preprocessor
 )
 target_include_directories(depth_cloud_preprocessor
   PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${PCL_INCLUDE_DIRS}
 )
 target_link_libraries(depth_cloud_preprocessor
@@ -222,6 +223,8 @@ ament_target_dependencies(depth_cloud_preprocessor
 add_executable(rtabmap_map_tf_relay
   src/perception/rtabmap_map_tf_relay.cpp
 )
+target_include_directories(rtabmap_map_tf_relay
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 ament_target_dependencies(rtabmap_map_tf_relay
   geometry_msgs
   rclcpp
