@@ -1,6 +1,7 @@
 #include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
 
 #include <nlohmann/json.hpp>
+#include <rik_sd/struct_descriptor.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
 
@@ -11,10 +12,89 @@
 #include <numbers>
 #include <string>
 
+#include "driver/r2_cmd_vel_bridge_node.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/planner_event.hpp"
 #include "yahboom_alc_bringup/temporal_signal.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::R2CmdVelBridgeConfig>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::R2CmdVelBridgeConfig;
+        return make_descriptor(
+            named(&R2CmdVelBridgeConfig::input_topic, "input_topic"),
+            named(&R2CmdVelBridgeConfig::behavior_topic, "behavior_topic"),
+            named(&R2CmdVelBridgeConfig::output_topic, "output_topic"),
+            named(&R2CmdVelBridgeConfig::planner_event_topic,
+                  "planner_event_topic"),
+            named(&R2CmdVelBridgeConfig::min_linear_speed, "min_linear_speed"),
+            named(&R2CmdVelBridgeConfig::enforce_min_linear_speed,
+                  "enforce_min_linear_speed"),
+            named(&R2CmdVelBridgeConfig::max_linear_speed, "max_linear_speed"),
+            named(&R2CmdVelBridgeConfig::wheelbase_m, "wheelbase_m"),
+            named(&R2CmdVelBridgeConfig::min_turning_radius_m,
+                  "min_turning_radius_m"),
+            named(&R2CmdVelBridgeConfig::max_curvature, "max_curvature"),
+            named(&R2CmdVelBridgeConfig::max_steering_angle_rad,
+                  "max_steering_angle_rad"),
+            named(&R2CmdVelBridgeConfig::linear_deadband, "linear_deadband"),
+            named(&R2CmdVelBridgeConfig::angular_deadband, "angular_deadband"),
+            named(&R2CmdVelBridgeConfig::max_linear_accel, "max_linear_accel"),
+            named(&R2CmdVelBridgeConfig::max_steering_rate,
+                  "max_steering_rate"),
+            named(&R2CmdVelBridgeConfig::assumed_command_period,
+                  "assumed_command_period"),
+            named(&R2CmdVelBridgeConfig::arc_turn_when_stationary,
+                  "arc_turn_when_stationary"),
+            named(&R2CmdVelBridgeConfig::
+                      stationary_arc_requires_forward_clearance,
+                  "stationary_arc_requires_forward_clearance"),
+            named(&R2CmdVelBridgeConfig::stationary_arc_check_distance_m,
+                  "stationary_arc_check_distance_m"),
+            named(&R2CmdVelBridgeConfig::reverse_safety_enabled,
+                  "reverse_safety_enabled"),
+            named(&R2CmdVelBridgeConfig::reverse_costmap_topic,
+                  "reverse_costmap_topic"),
+            named(&R2CmdVelBridgeConfig::reverse_robot_frame,
+                  "reverse_robot_frame"),
+            named(&R2CmdVelBridgeConfig::reverse_costmap_max_age_sec,
+                  "reverse_costmap_max_age_sec"),
+            named(&R2CmdVelBridgeConfig::reverse_check_distance_m,
+                  "reverse_check_distance_m"),
+            named(&R2CmdVelBridgeConfig::reverse_safety_margin_m,
+                  "reverse_safety_margin_m"),
+            named(&R2CmdVelBridgeConfig::reverse_unknown_is_blocked,
+                  "reverse_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::reverse_recent_free_grace_sec,
+                  "reverse_recent_free_grace_sec"),
+            named(&R2CmdVelBridgeConfig::stationary_arc_unknown_is_blocked,
+                  "stationary_arc_unknown_is_blocked"),
+            named(&R2CmdVelBridgeConfig::observation_blind_reverse_max_sec,
+                  "observation_blind_reverse_max_sec"),
+            named(&R2CmdVelBridgeConfig::input_timeout_sec,
+                  "input_timeout_sec"),
+            named(&R2CmdVelBridgeConfig::idle_stop_burst_sec,
+                  "idle_stop_burst_sec"),
+            named(&R2CmdVelBridgeConfig::feedback_imu_topic,
+                  "feedback_imu_topic"),
+            named(&R2CmdVelBridgeConfig::feedback_frozen_timeout_sec,
+                  "feedback_frozen_timeout_sec"),
+            named(&R2CmdVelBridgeConfig::footprint_front_m,
+                  "footprint_front_m"),
+            named(&R2CmdVelBridgeConfig::footprint_rear_m, "footprint_rear_m"),
+            named(&R2CmdVelBridgeConfig::footprint_half_width_m,
+                  "footprint_half_width_m"),
+            named(&R2CmdVelBridgeConfig::footprint_padding_m,
+                  "footprint_padding_m"));
+    }
+};
+
+}  // namespace rik_sd
 
 namespace yahboom_alc_bringup
 {

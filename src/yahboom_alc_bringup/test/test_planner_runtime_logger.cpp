@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <ctime>
 #include <filesystem>
@@ -141,7 +142,7 @@ TEST(PlannerRuntimeLogger, RunStartRecordsAllObservedTopics) {
     const LoggerTopics topics{"/planner/events", "/map", "/alc/nav_cmd_vel",
                               "/cmd_vel", "/navigate_to_pose/_action/status"};
 
-    const auto record = runStartJson(12.3456, 2.0, topics);
+    const auto record = runStartJson(12.3456, 2.0, topics, nullptr);
 
     EXPECT_EQ(record[std::string("type")].dump(), "\"run_start\"");
     EXPECT_DOUBLE_EQ(record[std::string("time_sec")], 12.346);

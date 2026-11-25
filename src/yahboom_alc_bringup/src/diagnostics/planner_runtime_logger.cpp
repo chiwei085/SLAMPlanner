@@ -1,10 +1,15 @@
 #include "yahboom_alc_bringup/planner_runtime_logger.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <ctime>
 #include <format>
 #include <stdexcept>
+#include <utility>
+
+#include "yahboom_alc_bringup/math_util.hpp"
 
 namespace yahboom_alc_bringup
 {

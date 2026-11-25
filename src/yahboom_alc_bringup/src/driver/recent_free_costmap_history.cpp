@@ -1,5 +1,7 @@
 #include "yahboom_alc_bringup/recent_free_costmap_history.hpp"
 
+#include <cmath>
+
 namespace yahboom_alc_bringup
 {
 

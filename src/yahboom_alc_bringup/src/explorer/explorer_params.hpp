@@ -5,7 +5,7 @@
 #include <string>
 
 #include "yahboom_alc_bringup/backtrace_recovery.hpp"
-#include "yahboom_alc_bringup/frontier_explorer_core.hpp"
+#include "yahboom_alc_bringup/frontier_types.hpp"
 #include "yahboom_alc_bringup/recovery_state_machine.hpp"
 
 namespace yahboom_alc_bringup

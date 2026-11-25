@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "yahboom_alc_bringup/frontier_explorer_core.hpp"
+#include "yahboom_alc_bringup/frontier_types.hpp"
 
 namespace yahboom_alc_bringup
 {

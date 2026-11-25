@@ -3,14 +3,12 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
-
-#include "yahboom_alc_bringup/math_util.hpp"
 
 namespace yahboom_alc_bringup
 {
@@ -87,7 +85,7 @@ nlohmann::json sourcesJson(const SourceHealth& event, const SourceHealth& map,
                            const SourceHealth& navigate_status);
 nlohmann::json runStartJson(double time_sec, double snapshot_period_sec,
                             const LoggerTopics& topics,
-                            const nlohmann::json& runtime_metadata = {});
+                            const nlohmann::json& runtime_metadata);
 // The parsed object, or {"raw": text} when text is not a JSON object.
 nlohmann::json parseObjectOrRaw(const std::string& text);
 std::string makeRunLogName();

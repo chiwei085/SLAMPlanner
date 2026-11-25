@@ -6,7 +6,7 @@
 #include <memory>
 #include <thread>
 
-#include "yahboom_alc_bringup/r2_cmd_vel_bridge.hpp"
+#include "driver/r2_cmd_vel_bridge_node.hpp"
 
 namespace
 {

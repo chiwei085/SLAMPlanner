@@ -62,6 +62,8 @@ target_include_directories(yahboom_alc_bringup_lib
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(yahboom_alc_bringup_lib
   nlohmann_json::nlohmann_json
@@ -161,6 +163,8 @@ ament_target_dependencies(r2_safe_driver
 add_executable(yahboom_r2_cmd_vel_bridge
   src/driver/yahboom_r2_cmd_vel_bridge_main.cpp
 )
+target_include_directories(yahboom_r2_cmd_vel_bridge
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(yahboom_r2_cmd_vel_bridge
   yahboom_alc_bringup_lib
 )

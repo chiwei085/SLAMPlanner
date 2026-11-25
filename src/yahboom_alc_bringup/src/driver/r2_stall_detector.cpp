@@ -3,6 +3,8 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nlohmann/json.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rik_sd/struct_descriptor.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -15,6 +17,41 @@
 #include "yahboom_alc_bringup/math_util.hpp"
 #include "yahboom_alc_bringup/parameter_loader.hpp"
 #include "yahboom_alc_bringup/yaw_util.hpp"
+
+namespace rik_sd
+{
+
+template <>
+struct descriptor<yahboom_alc_bringup::R2StallDetectorConfig>
+{
+    static constexpr auto fields() {
+        using yahboom_alc_bringup::R2StallDetectorConfig;
+        return make_descriptor(
+            named(&R2StallDetectorConfig::driver_cmd_topic, "driver_cmd_topic"),
+            named(&R2StallDetectorConfig::odom_topic, "odom_topic"),
+            named(&R2StallDetectorConfig::imu_topic, "imu_topic"),
+            named(&R2StallDetectorConfig::planner_event_topic,
+                  "planner_event_topic"),
+            named(&R2StallDetectorConfig::command_vx_threshold_mps,
+                  "command_vx_threshold_mps"),
+            named(&R2StallDetectorConfig::min_expected_motion_m,
+                  "min_expected_motion_m"),
+            named(&R2StallDetectorConfig::stuck_motion_ratio,
+                  "stuck_motion_ratio"),
+            named(&R2StallDetectorConfig::start_response_delay_sec,
+                  "start_response_delay_sec"),
+            named(&R2StallDetectorConfig::imu_yaw_rate_threshold_radps,
+                  "imu_yaw_rate_threshold_radps"),
+            named(&R2StallDetectorConfig::stale_observation_timeout_sec,
+                  "stale_observation_timeout_sec"),
+            named(&R2StallDetectorConfig::zero_burst_duration_sec,
+                  "zero_burst_duration_sec"),
+            named(&R2StallDetectorConfig::retrigger_cooldown_sec,
+                  "retrigger_cooldown_sec"));
+    }
+};
+
+}  // namespace rik_sd
 
 namespace yahboom_alc_bringup
 {

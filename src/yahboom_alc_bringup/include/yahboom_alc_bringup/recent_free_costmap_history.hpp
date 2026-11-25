@@ -2,7 +2,7 @@
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
 
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
