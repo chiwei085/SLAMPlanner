@@ -143,17 +143,6 @@ ament_target_dependencies(r2_safety_stop
   rclcpp
 )
 
-add_executable(r2_emergency_stop
-  src/r2_emergency_stop_node.cpp
-)
-target_link_libraries(r2_emergency_stop
-  yahboom_alc_bringup_lib
-)
-ament_target_dependencies(r2_emergency_stop
-  geometry_msgs
-  rclcpp
-)
-
 add_executable(r2_safe_driver
   src/r2_safe_driver_supervisor.cpp
 )
@@ -257,7 +246,6 @@ install(
     cluster_frontier_explorer
     depth_cloud_preprocessor
     planner_runtime_logger
-    r2_emergency_stop
     r2_safe_driver
     r2_safety_stop
     r2_stall_detector

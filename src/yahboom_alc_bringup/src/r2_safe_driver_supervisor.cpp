@@ -21,10 +21,12 @@ namespace yahboom_alc_bringup
 struct R2SafeDriverParams
 {
     std::string cmd_vel_topic = "/cmd_vel";
-    int stop_publish_count = 30;
+    // 3 s of zeros. Stop, driver SIGTERM wait (2 s) and serial zero (2 s) must
+    // all fit in the 10 s before ros2 launch sends SIGKILL.
+    int stop_publish_count = 150;
     double stop_publish_period_sec = 0.02;
-    std::string driver_package = "yahboomcar_base_node";
-    std::string driver_executable = "base_node_R2";
+    std::string driver_package = "yahboomcar_bringup";
+    std::string driver_executable = "Ackman_driver_R2";
     bool pub_odom_tf = false;
     double linear_scale_x = 1.0;
     double linear_scale_y = 1.0;
@@ -141,8 +143,9 @@ public:
             const pid_t result = waitpid(child_pid_, &status, WNOHANG);
             if (result == child_pid_) {
                 RCLCPP_WARN(get_logger(),
-                            "Yahboom driver exited; supervisor stopping");
-                publishStopBurst();
+                            "Yahboom driver exited; stopping the chassis");
+                child_pid_ = -1;
+                sendHardwareZero();
                 return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
             }
             rclcpp::spin_some(get_node_base_interface());
@@ -153,6 +156,7 @@ public:
                     "Stopping R2 driver with hardware zero command");
         publishStopBurst();
         stopChild();
+        sendHardwareZero();
         return 0;
     }
 
@@ -169,13 +173,37 @@ public:
     }
 
 private:
+    // The firmware latches its last command and nothing subscribes to /cmd_vel
+    // once the driver is gone, so write zero to the serial port directly. Call
+    // only after the driver has been reaped, when the port is free.
+    void sendHardwareZero() {
+        const pid_t pid = fork();
+        if (pid == 0) {
+            setsid();  // a second Ctrl+C must not interrupt the stop
+            execlp("timeout", "timeout", "2", "python3", "-c",
+                   "from Rosmaster_Lib import Rosmaster\n"
+                   "car = Rosmaster(car_type=5)\n"
+                   "for _ in range(20): car.set_car_motion(0, 0, 0)\n"
+                   "car.ser.flush()\n",
+                   static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        int status = 0;
+        if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0) {
+            RCLCPP_ERROR(get_logger(),
+                         "Serial zero command failed; the car may still move");
+            return;
+        }
+        RCLCPP_WARN(get_logger(), "Serial zero command sent");
+    }
+
     void stopChild() {
         if (child_pid_ <= 0) {
             return;
         }
-        publishStopBurst();
         kill(child_pid_, SIGTERM);
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 20; ++i) {
             int status = 0;
             if (waitpid(child_pid_, &status, WNOHANG) == child_pid_) {
                 child_pid_ = -1;
@@ -194,7 +222,7 @@ private:
     std::string pub_odom_tf_arg_;
     std::string linear_scale_x_arg_;
     std::string linear_scale_y_arg_;
-    int stop_publish_count_ = 30;
+    int stop_publish_count_ = 150;
     double stop_publish_period_sec_ = 0.02;
     pid_t child_pid_ = -1;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher_;

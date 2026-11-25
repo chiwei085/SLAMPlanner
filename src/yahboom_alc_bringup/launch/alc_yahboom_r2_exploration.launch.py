@@ -3,19 +3,16 @@ import os
 import sys
 
 import yaml
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
-    RegisterEventHandler,
     SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -347,24 +344,6 @@ def generate_launch_description():
         parameters=[exploration_params_file, {"cmd_vel_topic": driver_cmd_vel_topic}],
     )
 
-    stop_on_shutdown = RegisterEventHandler(
-        OnShutdown(
-            on_shutdown=[
-                ExecuteProcess(
-                    cmd=[
-                        os.path.join(
-                            get_package_prefix("yahboom_alc_bringup"),
-                            "lib",
-                            "yahboom_alc_bringup",
-                            "r2_emergency_stop",
-                        )
-                    ],
-                    output="screen",
-                ),
-            ]
-        )
-    )
-
     return LaunchDescription(
         [
             # Fast DDS shared-memory transport is vulnerable to stale
@@ -561,6 +540,5 @@ def generate_launch_description():
                     frontier_explorer,
                 ],
             ),
-            stop_on_shutdown,
         ]
     )
